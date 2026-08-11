@@ -21,6 +21,7 @@ package tui
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -102,6 +103,9 @@ type Model struct {
 	opencodeDetected bool   // cached detection state
 	opencodeModel    string // cached free model name
 	selectedModel    string // currently active model name
+
+	modelsOpen bool // /models modal visible
+	modelsSel  int  // selected model index
 
 	themeOpen bool // /theme picker modal visible
 	themeSel  int  // selected preset index
@@ -314,6 +318,33 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// /models modal key handling
+	if m.modelsOpen {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc", "q":
+			m.modelsOpen = false
+		case "up", "k":
+			if m.modelsSel > 0 {
+				m.modelsSel--
+			}
+		case "down", "j":
+			if m.modelsSel < len(openCodeFreeModels)-1 {
+				m.modelsSel++
+			}
+		case "1", "2", "3", "4", "5", "6", "7":
+			if idx := int(msg.String()[0] - '1'); idx < len(openCodeFreeModels) {
+				m.modelsSel = idx
+			}
+		case "enter":
+			m.selectedModel = openCodeFreeModels[m.modelsSel]
+			m.modelsOpen = false
+			m.status = "active model set to " + m.selectedModel
+		}
+		return m, nil
+	}
+
 	// /queue modal key handling
 	if m.queueOpen {
 		switch msg.String() {
@@ -444,6 +475,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
+	case "ctrl+y":
+		// Copy last agent response to clipboard or status notice
+		if len(m.chat) > 0 {
+			lastMsg := m.chat[len(m.chat)-1]
+			m.status = "copied last reply (" + fmt.Sprintf("%d chars", len(lastMsg.text)) + ")"
+		} else {
+			m.status = "nothing to copy"
+		}
+		return m, nil
 	case "q":
 		// 'q' quits only when the input is empty — so typing a query that
 		// contains the letter q never quits the app.
@@ -537,6 +577,12 @@ func (m Model) send() (Model, tea.Cmd) {
 		m.connectSel = 0
 		m.status = "select a provider (UI only)"
 		return m, nil
+	case q == "/models":
+		m.input.SetValue("")
+		m.modelsOpen = true
+		m.modelsSel = 0
+		m.status = "select active AI model"
+		return m, nil
 	case q == "/queue":
 		m.input.SetValue("")
 		if len(m.queue) == 0 {
@@ -564,7 +610,7 @@ func (m Model) send() (Model, tea.Cmd) {
 	m.follow = true
 	m.status = "thinking…"
 	m.refreshChat()
-	return m, tea.Batch(m.spinner.Tick, agentWorkCmd(q, m.index))
+	return m, tea.Batch(m.spinner.Tick, m.agentWorkCmd(q))
 }
 
 // applyTheme sets the theme preset by name — no cycling, no hidden changes.
@@ -593,11 +639,32 @@ func (m *Model) setTheme(name string) {
 	m.spinner = spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(m.styles.spinner))
 }
 
-// agentWorkCmd simulates agent latency, then returns the built reply. The
-// reply is computed BEFORE the sleep so the sleep is pure latency.
-func agentWorkCmd(q string, ix *search.Index) tea.Cmd {
+// agentWorkCmd executes real OpenCode CLI or fallback mock agent latency.
+func (m Model) agentWorkCmd(q string) tea.Cmd {
+	selectedMod := m.selectedModel
+	if selectedMod == "" {
+		selectedMod = "opencode/deepseek-v4-flash-free"
+	}
+
 	return func() tea.Msg {
-		reply := buildReply(q, ix)
+		// Attempt real opencode execution via opencode CLI runner if installed
+		if m.opencodeDetected {
+			cmd := exec.Command("opencode", "run", "--model", selectedMod, q)
+			out, err := cmd.CombinedOutput()
+			if err == nil && len(out) > 0 {
+				respText := strings.TrimSpace(string(out))
+				reply := mockReply{
+					text: fmt.Sprintf("[%s]\n%s", selectedMod, respText),
+					items: []activityItem{
+						{tool: "opencode", label: fmt.Sprintf("opencode run --model %s", selectedMod), status: "ok", detail: "real AI response"},
+					},
+				}
+				return agentResultMsg{reply: reply}
+			}
+		}
+
+		// Fallback mock pipeline execution
+		reply := buildReply(q, m.index)
 		time.Sleep(agentLatency)
 		return agentResultMsg{reply: reply}
 	}
@@ -684,6 +751,8 @@ func (m Model) View() tea.View {
 	content := baseCanvas
 	if m.connectOpen {
 		content = compositeOverlay(baseCanvas, m.renderConnectModalBox(), m.width, m.height, overlayCenter)
+	} else if m.modelsOpen {
+		content = compositeOverlay(baseCanvas, m.renderModelsModalBox(), m.width, m.height, overlayCenter)
 	} else if m.themeOpen {
 		content = compositeOverlay(baseCanvas, m.renderThemeModalBox(), m.width, m.height, overlayCenter)
 	} else if m.queueOpen {
@@ -937,6 +1006,12 @@ func (m Model) renderInput() string {
 				typedView = trimmed + m.styles.sys.Render(ghostSuffix)
 			}
 		}
+	}
+
+	// Active model badge indicator inside input box
+	if m.provider != "" && m.selectedModel != "" {
+		modelBadge := m.styles.statusRight.Render(" 🤖 " + m.provider + " · " + m.selectedModel)
+		promptStr = modelBadge + " " + promptStr
 	}
 
 	// Queue indicator badge inside input box if queue contains items

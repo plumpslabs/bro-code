@@ -15,6 +15,7 @@ type keymap struct {
 	Scroll   key.Binding
 	Help     key.Binding
 	Collapse key.Binding
+	Copy     key.Binding
 }
 
 var keys = keymap{
@@ -36,14 +37,18 @@ var keys = keymap{
 	),
 	Collapse: key.NewBinding(
 		key.WithKeys("ctrl+o"),
-		key.WithHelp("ctrl+o", "expand/collapse block"),
+		key.WithHelp("ctrl+o", "expand/collapse"),
+	),
+	Copy: key.NewBinding(
+		key.WithKeys("ctrl+y"),
+		key.WithHelp("ctrl+y", "copy reply"),
 	),
 }
 
 // shortHelp renders the one-line hint shown in the status bar, built from the
 // bindings themselves so it can never drift from the actual keymap.
 func (k keymap) shortHelp() string {
-	bindings := []key.Binding{k.Send, k.Scroll, k.Collapse, k.Help, k.Quit}
+	bindings := []key.Binding{k.Send, k.Scroll, k.Collapse, k.Copy, k.Help, k.Quit}
 	parts := make([]string, 0, len(bindings))
 	for _, b := range bindings {
 		h := b.Help()

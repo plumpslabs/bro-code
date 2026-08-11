@@ -19,6 +19,7 @@ type commandItem struct {
 // commandList is the source for the "/" suggestion popup.
 var commandList = []commandItem{
 	{"/connect", "connect an LLM provider (UI)"},
+	{"/models", "select active AI model"},
 	{"/search", "search tools & skills (BM25)"},
 	{"/diff", "Myers diff demo"},
 	{"/agents", "primary agent + lazy subagents"},
