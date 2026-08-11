@@ -285,6 +285,35 @@ func TestConnectSelectsProvider(t *testing.T) {
 	}
 }
 
+func TestModelsModal(t *testing.T) {
+	m := newTestModel()
+	m.modelsOpen = true
+	m.modelsSel = 0
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	m2 := updated.(Model)
+	if m2.modelsSel != 1 {
+		t.Fatalf("expected modelsSel 1 after down, got %d", m2.modelsSel)
+	}
+	updated, _ = m2.Update(enterKey())
+	m3 := updated.(Model)
+	if m3.modelsOpen {
+		t.Fatal("modal should close after enter")
+	}
+	if m3.selectedModel != openCodeFreeModels[1] {
+		t.Fatalf("expected model %q, got %q", openCodeFreeModels[1], m3.selectedModel)
+	}
+}
+
+func TestCopyShortcut(t *testing.T) {
+	m := newTestModel()
+	m.chat = appendChat(m.chat, chatMsg{role: roleAgent, text: "hello world"})
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: 'y', Mod: tea.ModCtrl}))
+	m2 := updated.(Model)
+	if !strings.Contains(m2.status, "copied last reply") {
+		t.Fatalf("expected copy status notice, got %q", m2.status)
+	}
+}
+
 func TestOpenCodeAutoDetection(t *testing.T) {
 	detected, model := DetectOpenCode()
 	if detected {
