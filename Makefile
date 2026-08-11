@@ -9,12 +9,19 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.dat
 
 BINARY := bin/brocode
 
-.PHONY: all build test vet fmt check run measure install clean
+.PHONY: all build build-all test vet fmt check run measure install clean
 
 all: build
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/brocode
+
+build-all:
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-linux-amd64 ./cmd/brocode
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-linux-arm64 ./cmd/brocode
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-windows-amd64.exe ./cmd/brocode
+	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-darwin-amd64 ./cmd/brocode
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/brocode-darwin-arm64 ./cmd/brocode
 
 test:
 	go test -race ./...
@@ -36,8 +43,13 @@ measure: build
 	@ls -lh $(BINARY) | awk '{print "binary size:", $$5}'
 	@/usr/bin/time -p ./$(BINARY) --search mcp >/dev/null
 
+# Install to the Go bin dir (~/go/bin) — user-writable and already on PATH
+# for Go developers. Override with: make install BINDIR=/usr/local/bin
+BINDIR ?= $(shell go env GOPATH)/bin
+
 install: build
-	install -m 0755 $(BINARY) /usr/local/bin/brocode
+	install -d $(BINDIR)
+	install -m 0755 $(BINARY) $(BINDIR)/brocode
 
 clean:
 	rm -rf bin

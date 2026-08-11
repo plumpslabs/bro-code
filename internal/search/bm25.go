@@ -80,6 +80,16 @@ func New(docs []Document) *Index {
 	return ix
 }
 
+// Len returns the number of documents in the index (bounded corpus size).
+func (ix *Index) Len() int { return ix.n }
+
+// Docs returns a copy of the indexed documents, for read-only listing.
+func (ix *Index) Docs() []Document {
+	out := make([]Document, len(ix.docs))
+	copy(out, ix.docs)
+	return out
+}
+
 // Search returns up to topK most relevant documents. Results are capped at
 // topK (bounded — Principle 1) at the point of creation, not patched later.
 func (ix *Index) Search(query string, topK int) []Result {
