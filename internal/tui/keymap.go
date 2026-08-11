@@ -29,7 +29,7 @@ var keys = keymap{
 	),
 	Scroll: key.NewBinding(
 		key.WithKeys("up", "down", "pgup", "pgdown"),
-		key.WithHelp("↑↓ / wheel", "scroll"),
+		key.WithHelp("↑↓ history / wheel scroll", ""),
 	),
 	Help: key.NewBinding(
 		key.WithKeys("?"),

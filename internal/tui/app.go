@@ -117,6 +117,10 @@ type Model struct {
 	suggestSel       int  // highlighted suggestion row
 	suggestDismissed bool // popup hidden until the next keystroke
 
+	promptHistory []string // history of sent user prompts
+	historyIdx    int      // navigation index in history (-1 = typing current draft)
+	draftInput    string   // saved draft input before navigating history
+
 	subagents []subagentState // live active subagent tasks
 
 	input    textinput.Model
@@ -157,9 +161,10 @@ func New(ix *search.Index, version, commit string, resume bool) Model {
 		styles:    st,
 		input:     ti,
 		spinner:   spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(st.spinner)),
-		viewport:  viewport.New(),
-		panel:     gitInfo(),
-		follow:    true,
+		viewport:   viewport.New(),
+		panel:      gitInfo(),
+		follow:     true,
+		historyIdx: -1,
 	}
 
 	// Auto-detect OpenCode CLI & free models on startup
@@ -510,23 +515,44 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Scroll keys always control the chat viewport — no focus dance. Only
-	// arrow/page keys scroll (j/k stay typing characters in the input).
+	// Arrow keys navigate prompt history when typing in input, while pgup/pgdown scroll chat.
 	switch msg.String() {
-	case "up", "pgup":
-		if msg.String() == "pgup" {
-			m.viewport.HalfPageUp()
-		} else {
-			m.viewport.ScrollUp(1)
+	case "up":
+		if len(m.promptHistory) > 0 {
+			if m.historyIdx == -1 {
+				m.draftInput = m.input.Value()
+				m.historyIdx = len(m.promptHistory) - 1
+			} else if m.historyIdx > 0 {
+				m.historyIdx--
+			}
+			m.input.SetValue(m.promptHistory[m.historyIdx])
+			m.input.CursorEnd()
+			return m, nil
 		}
+		m.viewport.ScrollUp(1)
 		m.follow = m.viewport.AtBottom()
 		return m, nil
-	case "down", "pgdown":
-		if msg.String() == "pgdown" {
-			m.viewport.HalfPageDown()
-		} else {
-			m.viewport.ScrollDown(1)
+	case "down":
+		if m.historyIdx != -1 {
+			if m.historyIdx < len(m.promptHistory)-1 {
+				m.historyIdx++
+				m.input.SetValue(m.promptHistory[m.historyIdx])
+			} else {
+				m.historyIdx = -1
+				m.input.SetValue(m.draftInput)
+			}
+			m.input.CursorEnd()
+			return m, nil
 		}
+		m.viewport.ScrollDown(1)
+		m.follow = m.viewport.AtBottom()
+		return m, nil
+	case "pgup":
+		m.viewport.HalfPageUp()
+		m.follow = m.viewport.AtBottom()
+		return m, nil
+	case "pgdown":
+		m.viewport.HalfPageDown()
 		m.follow = m.viewport.AtBottom()
 		return m, nil
 	}
@@ -605,6 +631,9 @@ func (m Model) send() (Model, tea.Cmd) {
 
 	m.started = true
 	m.chat = appendChat(m.chat, chatMsg{role: roleUser, text: q})
+	m.promptHistory = append(m.promptHistory, q)
+	m.historyIdx = -1
+	m.draftInput = ""
 	m.input.SetValue("")
 	m.agentWorking = true
 	m.follow = true
