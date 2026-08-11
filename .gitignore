@@ -1,0 +1,28 @@
+# Binaries & build output
+/brocode
+/bin/
+/dist/
+/brocode-*
+
+# Go build/test artifacts
+/coverage.out
+*.test
+*.prof
+
+# Storage (Principle 5 — SQLite/JSONL runtime data)
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
