@@ -672,20 +672,25 @@ func (m *Model) setTheme(name string) {
 func (m Model) agentWorkCmd(q string) tea.Cmd {
 	selectedMod := m.selectedModel
 	if selectedMod == "" {
-		selectedMod = "opencode/deepseek-v4-flash-free"
+		selectedMod = "deepseek-v4-flash-free"
+	}
+	// Ensure opencode/ prefix for opencode CLI model selection
+	opencodeMod := selectedMod
+	if !strings.HasPrefix(opencodeMod, "opencode/") {
+		opencodeMod = "opencode/" + selectedMod
 	}
 
 	return func() tea.Msg {
-		// Attempt real opencode execution via opencode CLI runner if installed
-		if m.opencodeDetected {
-			cmd := exec.Command("opencode", "run", "--model", selectedMod, q)
+		// Attempt real opencode execution via opencode CLI runner if installed and opencode provider active
+		if m.opencodeDetected && m.provider == "opencode" {
+			cmd := exec.Command("opencode", "run", "--model", opencodeMod, q)
 			out, err := cmd.CombinedOutput()
 			if err == nil && len(out) > 0 {
 				respText := strings.TrimSpace(string(out))
 				reply := mockReply{
-					text: fmt.Sprintf("[%s]\n%s", selectedMod, respText),
+					text: respText,
 					items: []activityItem{
-						{tool: "opencode", label: fmt.Sprintf("opencode run --model %s", selectedMod), status: "ok", detail: "real AI response"},
+						{tool: "opencode", label: fmt.Sprintf("opencode run --model %s", opencodeMod), status: "ok", detail: "opencode provider response"},
 					},
 				}
 				return agentResultMsg{reply: reply}
