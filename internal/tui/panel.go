@@ -139,13 +139,20 @@ func (m Model) renderPanel() string {
 	w := panelWidth - 4 // inside the panel border
 	var sb strings.Builder
 
-	// Context — model, window, live token usage (transparent, P3 spirit).
+	// Context — provider, model, window, live token usage (transparent, P3 spirit).
 	sb.WriteString(m.section("context"))
-	model := "not connected"
+	prov := "not connected"
 	if m.provider != "" {
-		model = m.provider
+		prov = m.provider
 	}
-	sb.WriteString(m.kv("model", model, w))
+	sb.WriteString(m.kv("provider", prov, w))
+
+	modName := "—"
+	if m.selectedModel != "" {
+		modName = m.selectedModel
+	}
+	sb.WriteString(m.kv("model", clip(modName, w-9), w))
+
 	used := tokenEstimate(m.chat)
 	win := "—"
 	pct := ""
