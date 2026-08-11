@@ -690,8 +690,8 @@ func (m *Model) layout() {
 		chatW = 12
 	}
 
-	// header(1) + input box(3 incl. border) + status(1) + body panel border(2)
-	bodyH := m.height - 7
+	// header(1) + input box(3 incl. border) + model bar(1) + status(1) + body panel border(2)
+	bodyH := m.height - 8
 	if bodyH < 3 {
 		bodyH = 3
 	}
@@ -745,7 +745,7 @@ func (m Model) View() tea.View {
 		}
 	}
 	if baseCanvas == "" {
-		baseCanvas = strings.Join([]string{m.renderHeader(), m.renderBody(), m.renderInput(), m.renderStatus()}, "\n")
+		baseCanvas = strings.Join([]string{m.renderHeader(), m.renderBody(), m.renderInput(), m.renderModelBar(), m.renderStatus()}, "\n")
 	}
 
 	content := baseCanvas
@@ -1008,11 +1008,7 @@ func (m Model) renderInput() string {
 		}
 	}
 
-	// Active model badge indicator inside input box
-	if m.provider != "" && m.selectedModel != "" {
-		modelBadge := m.styles.statusRight.Render(" 🤖 " + m.provider + " · " + m.selectedModel)
-		promptStr = modelBadge + " " + promptStr
-	}
+
 
 	// Queue indicator badge inside input box if queue contains items
 	if len(m.queue) > 0 {
@@ -1027,6 +1023,21 @@ func (m Model) renderInput() string {
 	}
 
 	return m.styles.inputBoxOn.Render(promptStr + typedView)
+}
+
+// renderModelBar renders a compact one-line model indicator displayed between
+// the chat input box and the status bar. Empty when no provider is active.
+func (m Model) renderModelBar() string {
+	if m.provider == "" || m.selectedModel == "" {
+		return ""
+	}
+	badge := m.styles.statusRight.Render(" 🤖 " + m.provider + " · " + m.selectedModel)
+	hint := m.styles.statusLeft.Render("  /models to switch")
+	gap := m.width - lipgloss.Width(ansiStrip.ReplaceAllString(badge, "")) - lipgloss.Width(ansiStrip.ReplaceAllString(hint, ""))
+	if gap < 1 {
+		gap = 1
+	}
+	return badge + strings.Repeat(" ", gap) + hint
 }
 
 // renderQueueModalBox renders the framed modal box for /queue.
