@@ -256,13 +256,13 @@ func TestConnectModalNavigation(t *testing.T) {
 		updated, _ = m2.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
 		m2 = updated.(Model)
 	}
-	if m2.connectSel != len(providers)-1 {
+	if m2.connectSel != len(defaultProviders)-1 {
 		t.Fatalf("expected selection clamped at last provider, got %d", m2.connectSel)
 	}
 	// Up returns toward the top.
 	updated, _ = m2.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
 	m3 := updated.(Model)
-	if m3.connectSel != len(providers)-2 {
+	if m3.connectSel != len(defaultProviders)-2 {
 		t.Fatalf("expected selection moved up, got %d", m3.connectSel)
 	}
 }
@@ -282,6 +282,19 @@ func TestConnectSelectsProvider(t *testing.T) {
 	}
 	if !strings.Contains(m3.status, "deepseek") {
 		t.Fatalf("expected deepseek in status, got %q", m3.status)
+	}
+}
+
+func TestOpenCodeAutoDetection(t *testing.T) {
+	detected, model := DetectOpenCode()
+	if detected {
+		if model == "" {
+			t.Fatal("expected non-empty free model name when OpenCode detected")
+		}
+	}
+	m := newTestModel()
+	if detected && m.provider != "opencode" {
+		t.Fatalf("expected opencode auto-selected on startup, got %q", m.provider)
 	}
 }
 

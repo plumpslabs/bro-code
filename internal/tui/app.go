@@ -99,6 +99,9 @@ type Model struct {
 	connectOpen bool // /connect modal visible
 	connectSel  int  // selected provider index
 
+	opencodeDetected bool   // cached detection state
+	opencodeModel    string // cached free model name
+
 	themeOpen bool // /theme picker modal visible
 	themeSel  int  // selected preset index
 
@@ -152,6 +155,14 @@ func New(ix *search.Index, version, commit string, resume bool) Model {
 		viewport:  viewport.New(),
 		panel:     gitInfo(),
 		follow:    true,
+	}
+
+	// Auto-detect OpenCode CLI & free models on startup
+	if detected, model := DetectOpenCode(); detected {
+		m.opencodeDetected = true
+		m.opencodeModel = model
+		m.provider = "opencode"
+		m.window = 200000
 	}
 
 	if resume {
@@ -279,17 +290,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.connectSel--
 			}
 		case "down", "j":
-			if m.connectSel < len(providers)-1 {
+			if m.connectSel < len(defaultProviders)-1 {
 				m.connectSel++
 			}
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			// Number keys select providers dynamically — index is guarded by
-			// len(providers) so a shorter list never overflows.
-			if idx := int(msg.String()[0] - '1'); idx < len(providers) {
+			// len(defaultProviders) so a shorter list never overflows.
+			if idx := int(msg.String()[0] - '1'); idx < len(defaultProviders) {
 				m.connectSel = idx
 			}
 		case "enter":
-			p := providers[m.connectSel]
+			p := defaultProviders[m.connectSel]
 			// Mock selection only — real auth comes with the provider layer.
 			// Choosing a provider sizes the context-window display (UI/UX
 			// stage; valid numbers come later, Principle 3).
