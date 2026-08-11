@@ -101,6 +101,7 @@ type Model struct {
 
 	opencodeDetected bool   // cached detection state
 	opencodeModel    string // cached free model name
+	selectedModel    string // currently active model name
 
 	themeOpen bool // /theme picker modal visible
 	themeSel  int  // selected preset index
@@ -161,6 +162,7 @@ func New(ix *search.Index, version, commit string, resume bool) Model {
 	if detected, model := DetectOpenCode(); detected {
 		m.opencodeDetected = true
 		m.opencodeModel = model
+		m.selectedModel = model
 		m.provider = "opencode"
 		m.window = 200000
 	}
@@ -995,7 +997,14 @@ func (m Model) renderStatus() string {
 	left := m.styles.statusLeft.Render(keys.shortHelp())
 	right := m.status
 	if right == "" {
-		right = fmt.Sprintf("%d msgs · %d activities", len(m.chat), len(m.activity))
+		if m.provider != "" && m.selectedModel != "" {
+			right = fmt.Sprintf("%s · %s", m.provider, m.selectedModel)
+		} else if m.provider != "" {
+			right = fmt.Sprintf("%s · %d msgs", m.provider, len(m.chat))
+		} else {
+			right = fmt.Sprintf("%d msgs · %d activities", len(m.chat), len(m.activity))
+		}
+		right = m.styles.statusRight.Render(right)
 	} else {
 		right = m.styles.statusRight.Render(right)
 	}

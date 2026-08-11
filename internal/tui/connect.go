@@ -68,9 +68,9 @@ func (m Model) renderConnectModalBox() string {
 
 	// matcha:explain reuse cached opencodeDetected state from Model to prevent disk I/O in render loop
 	detected := m.opencodeDetected
-	freeModel := m.opencodeModel
-	if freeModel == "" {
-		freeModel = openCodeFreeModels[0]
+	activeModel := m.selectedModel
+	if activeModel == "" {
+		activeModel = openCodeFreeModels[0]
 	}
 
 	var sb strings.Builder
@@ -80,7 +80,7 @@ func (m Model) renderConnectModalBox() string {
 	for i, p := range defaultProviders {
 		statusStr := p.method
 		if p.name == "opencode" && detected {
-			statusStr = m.styles.ok.Render("✓ auto-configured (" + freeModel + ")")
+			statusStr = m.styles.ok.Render("✓ configured")
 		}
 
 		row := fmt.Sprintf("%d  %-12s %s", i+1, p.name, statusStr)
@@ -96,13 +96,27 @@ func (m Model) renderConnectModalBox() string {
 	}
 
 	if detected {
-		sb.WriteString("\n" + m.styles.ok.Render("  ✓ opencode detected — free models active") + "\n")
-		n := min(3, len(openCodeFreeModels))
-		sb.WriteString(m.styles.statusLeft.Render("  models: "+strings.Join(openCodeFreeModels[:n], ", ")) + "\n")
+		sb.WriteString("\n" + m.styles.title.Render(" ── select model for opencode ──") + "\n")
+		for i, modName := range openCodeFreeModels {
+			marker := "  "
+			if modName == activeModel {
+				marker = "❯ "
+			}
+			activeBadge := ""
+			if modName == activeModel {
+				activeBadge = " [active]"
+			}
+			line := fmt.Sprintf("  %s%d  %s%s", marker, i+1, modName, activeBadge)
+			if modName == activeModel {
+				sb.WriteString(m.styles.ok.Render(line) + "\n")
+			} else {
+				sb.WriteString(m.styles.statusLeft.Render(line) + "\n")
+			}
+		}
 	}
 
 	sb.WriteString("\n")
-	sb.WriteString(m.styles.statusLeft.Render("1-4 / ↑↓ select · enter choose · esc/q close"))
+	sb.WriteString(m.styles.statusLeft.Render("1-4 select provider · enter choose · esc/q close"))
 
 	return m.styles.connectBox.Width(w).Render(sb.String())
 }
