@@ -1382,9 +1382,9 @@ func (m Model) send() (Model, tea.Cmd) {
 		m.input.SetValue("")
 		m.mouseEnabled = !m.mouseEnabled
 		if m.mouseEnabled {
-			m.status = "mouse mode → wheel scroll + drag to select & copy (ctrl+m or /mouse to disable)"
+			m.status = "mouse mode → wheel scroll + drag to select & copy (/mouse to disable)"
 		} else {
-			m.status = "mouse mode → native terminal selection (app mouse events off, ctrl+m or /mouse to restore)"
+			m.status = "mouse mode → native terminal selection (app mouse events off, /mouse to restore)"
 		}
 		return m, nil
 
