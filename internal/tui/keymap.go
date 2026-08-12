@@ -16,12 +16,13 @@ type keymap struct {
 	Help     key.Binding
 	Collapse key.Binding
 	Copy     key.Binding
+	Prompt   key.Binding
 }
 
 var keys = keymap{
 	Quit: key.NewBinding(
-		key.WithKeys("ctrl+c", "q"),
-		key.WithHelp("ctrl+c / q", "quit"),
+		key.WithKeys("ctrl+c"),
+		key.WithHelp("ctrl+c", "quit"),
 	),
 	Send: key.NewBinding(
 		key.WithKeys("enter"),
@@ -43,12 +44,16 @@ var keys = keymap{
 		key.WithKeys("ctrl+y"),
 		key.WithHelp("ctrl+y", "copy reply"),
 	),
+	Prompt: key.NewBinding(
+		key.WithKeys("ctrl+e"),
+		key.WithHelp("ctrl+e", "long prompt edit"),
+	),
 }
 
 // shortHelp renders the one-line hint shown in the status bar, built from the
 // bindings themselves so it can never drift from the actual keymap.
 func (k keymap) shortHelp() string {
-	bindings := []key.Binding{k.Send, k.Scroll, k.Collapse, k.Copy, k.Help, k.Quit}
+	bindings := []key.Binding{k.Send, k.Scroll, k.Collapse, k.Copy, k.Prompt, k.Help, k.Quit}
 	parts := make([]string, 0, len(bindings))
 	for _, b := range bindings {
 		h := b.Help()

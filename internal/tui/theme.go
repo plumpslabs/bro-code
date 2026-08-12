@@ -20,19 +20,22 @@ type Theme struct {
 	Accent       color.Color // scores, warnings, in-flight work
 	Border       color.Color // inactive panel border
 	BorderActive color.Color // focused panel border
+	PopoverBG    color.Color // popover panel background (dim floating card)
 }
 
-// DefaultTheme is the modern slate & soft cyan palette (Nord/Tokyo-Night inspired).
-// Values use ANSI 256 indexes for terminal compatibility while feeling clean and low-glare.
+// DefaultTheme is the modern minimalist palette: warm muted grays with a
+// soft cyan accent and near-black popover panels. Low glare, high contrast,
+// thin-bordered elegance (Warp/Kilo-style).
 var DefaultTheme = Theme{
-	Primary:      lipgloss.Color("117"), // soft cyan
-	Secondary:    lipgloss.Color("253"), // soft off-white/grey for agent text
-	Muted:        lipgloss.Color("244"), // low-contrast muted grey
-	Error:        lipgloss.Color("203"), // soft red
-	Success:      lipgloss.Color("114"), // soft green
-	Accent:       lipgloss.Color("180"), // subtle warm grey/sand
-	Border:       lipgloss.Color("237"), // dark slate border
-	BorderActive: lipgloss.Color("117"), // soft cyan active border
+	Primary:      lipgloss.Color("#7dd3fc"), // soft cyan
+	Secondary:    lipgloss.Color("#d6d3d1"), // warm off-white
+	Muted:        lipgloss.Color("#a8a29e"), // warm muted gray
+	Error:        lipgloss.Color("#fca5a5"), // soft red
+	Success:      lipgloss.Color("#86efac"), // soft green
+	Accent:       lipgloss.Color("#fcd34d"), // soft amber
+	Border:       lipgloss.Color("#44403c"), // dark warm border
+	BorderActive: lipgloss.Color("#7dd3fc"), // soft cyan active border
+	PopoverBG:    lipgloss.Color("#1c1917"), // near-black stone (popover card)
 }
 
 // Themes are the minimal built-in presets — plain data maps, no runtime cost
@@ -41,24 +44,26 @@ var DefaultTheme = Theme{
 var Themes = map[string]Theme{
 	"default": DefaultTheme,
 	"mono": {
-		Primary:      lipgloss.Color("255"),
-		Secondary:    lipgloss.Color("250"),
-		Muted:        lipgloss.Color("244"),
-		Error:        lipgloss.Color("203"),
-		Success:      lipgloss.Color("114"),
-		Accent:       lipgloss.Color("252"),
-		Border:       lipgloss.Color("238"),
-		BorderActive: lipgloss.Color("255"),
+		Primary:      lipgloss.Color("#e7e5e4"),
+		Secondary:    lipgloss.Color("#d6d3d1"),
+		Muted:        lipgloss.Color("#a8a29e"),
+		Error:        lipgloss.Color("#fca5a5"),
+		Success:      lipgloss.Color("#86efac"),
+		Accent:       lipgloss.Color("#fafaf9"),
+		Border:       lipgloss.Color("#44403c"),
+		BorderActive: lipgloss.Color("#fafaf9"),
+		PopoverBG:    lipgloss.Color("#1c1917"),
 	},
 	"ocean": {
-		Primary:      lipgloss.Color("81"),
-		Secondary:    lipgloss.Color("75"),
-		Muted:        lipgloss.Color("110"),
-		Error:        lipgloss.Color("203"),
-		Success:      lipgloss.Color("114"),
-		Accent:       lipgloss.Color("229"),
-		Border:       lipgloss.Color("239"),
-		BorderActive: lipgloss.Color("81"),
+		Primary:      lipgloss.Color("#67e8f9"),
+		Secondary:    lipgloss.Color("#a5f3fc"),
+		Muted:        lipgloss.Color("#7dd3fc"),
+		Error:        lipgloss.Color("#fca5a5"),
+		Success:      lipgloss.Color("#86efac"),
+		Accent:       lipgloss.Color("#fde68a"),
+		Border:       lipgloss.Color("#155e75"),
+		BorderActive: lipgloss.Color("#67e8f9"),
+		PopoverBG:    lipgloss.Color("#082f3b"),
 	},
 }
 
@@ -98,10 +103,21 @@ type styles struct {
 	thinking    lipgloss.Style
 	sideSel     lipgloss.Style
 	spinner     lipgloss.Style
+	selReverse  lipgloss.Style // drag-select highlight (reverse video)
+	builderMode lipgloss.Style
+	plannerMode lipgloss.Style
+	matchaMode  lipgloss.Style
 
 	chatBoxOn  lipgloss.Style
 	sideBoxIn  lipgloss.Style
 	inputBoxOn lipgloss.Style
+
+	// Popover chrome — thin-bordered floating card, bottom-anchored over the
+	// input bar (command-palette style). The backdrop dims the base canvas.
+	popoverBox    lipgloss.Style
+	popoverTitle  lipgloss.Style
+	popoverFooter lipgloss.Style
+	backdrop      lipgloss.Style
 
 	logo       lipgloss.Style // landing wordmark (pixel block)
 	tagline    lipgloss.Style // landing one-liner
@@ -114,7 +130,8 @@ type styles struct {
 // (once at startup + once per /theme), never inside View().
 func newStyles(t Theme) styles {
 	box := func(c color.Color) lipgloss.Style {
-		return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(c)
+		// Thin border (1px) — the "elegant" look. No thick rounded frames.
+		return lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(c)
 	}
 	return styles{
 		title:       lipgloss.NewStyle().Bold(true).Foreground(t.Primary),
@@ -129,10 +146,21 @@ func newStyles(t Theme) styles {
 		thinking:    lipgloss.NewStyle().Italic(true).Foreground(t.Accent),
 		sideSel:     lipgloss.NewStyle().Background(t.Primary).Foreground(lipgloss.Color("0")),
 		spinner:     lipgloss.NewStyle().Foreground(t.Accent),
+		selReverse:  lipgloss.NewStyle().Reverse(true),
+		builderMode: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#fbbf24")),
+		plannerMode: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#34d399")),
+		matchaMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#2dd4bf")),
 
 		chatBoxOn:  box(t.BorderActive),
 		sideBoxIn:  box(t.Border),
 		inputBoxOn: box(t.BorderActive),
+
+		// Popover: thin muted border + dark card background so it reads as a
+		// floating panel above the dimmed chat.
+		popoverBox:    lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(t.BorderActive).Background(t.PopoverBG).Padding(0, 1),
+		popoverTitle:  lipgloss.NewStyle().Bold(true).Foreground(t.Primary),
+		popoverFooter: lipgloss.NewStyle().Foreground(t.Muted),
+		backdrop:      lipgloss.NewStyle().Faint(true),
 
 		logo:       lipgloss.NewStyle().Bold(true).Foreground(t.Primary),
 		tagline:    lipgloss.NewStyle().Italic(true).Foreground(t.Secondary),

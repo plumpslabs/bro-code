@@ -5,7 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode/utf8"
+
+	"charm.land/lipgloss/v2"
 )
 
 // panelState is the static transparency data captured once at startup: the
@@ -91,40 +92,77 @@ func readHead(root string) (string, bool) {
 	return strings.TrimSpace(string(data)), true
 }
 
-// tokenEstimate is a rough upper-ish bound of the transcript size — ~4 chars
-// per token on English text. It is an ESTIMATE (Principle 3: real numbers
-// come from the API); for now it keeps the context window display honest
-// instead of showing a fake 0 forever.
-func tokenEstimate(chat []chatMsg) int {
-	n := 0
-	for _, cm := range chat {
-		n += utf8.RuneCountInString(cm.text) / 4
-		if cm.content != "" {
-			n += utf8.RuneCountInString(cm.content) / 4
-		}
-	}
-	return n
-}
-
-// fmtTokens renders a token count compactly: 1.5k, 2.0M, 137.
-func fmtTokens(n int) string {
+// ctxColor returns the style for a context-usage percentage on the 0–100
+// scale: muted under the compaction trigger, sand (warning) between the
+// trigger and 80%, red past 80% — window pressure is visible BEFORE it
+// becomes a problem (doctrine P4: fire early, never wait for the cliff).
+func (m Model) ctxColor(pct float64) lipgloss.Style {
 	switch {
-	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	case n >= 1_000:
-		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	case pct >= 80:
+		return m.styles.err
+	case pct >= compactTriggerPct*100:
+		return m.styles.statusRight
 	default:
-		return fmt.Sprintf("%d", n)
+		return m.styles.statusLeft
 	}
 }
 
-// modelWindows is the mock context window per provider (UI stage). Real
-// windows come with the provider layer; these only size the display.
-var modelWindows = map[string]int{
-	"opencode":    200_000,
-	"antigravity": 200_000,
-	"claude":      200_000,
-	"deepseek":    131_072,
+// modelWindowFor returns the exact context window size for a given model or provider.
+func modelWindowFor(provider, model string) int {
+	model = strings.ToLower(model)
+
+	// Explicit context tags in model name
+	if strings.Contains(model, "-2m") {
+		return 2_000_000
+	}
+	if strings.Contains(model, "-1m") {
+		return 1_000_000
+	}
+	if strings.Contains(model, "-200k") {
+		return 200_000
+	}
+	if strings.Contains(model, "-128k") {
+		return 128_000
+	}
+	if strings.Contains(model, "-32k") {
+		return 32_000
+	}
+
+	// Model Family specific matching
+	if strings.Contains(model, "gemini") {
+		if strings.Contains(model, "pro") {
+			return 2_000_000 // Gemini Pro
+		}
+		return 1_000_000 // Gemini Flash
+	}
+	if strings.Contains(model, "claude") {
+		return 200_000
+	}
+	if strings.Contains(model, "deepseek") {
+		return 131_072 // Native DeepSeek contexts
+	}
+	if strings.Contains(model, "llama") || strings.Contains(model, "qwen") || strings.Contains(model, "mimo") {
+		return 128_000
+	}
+	if strings.Contains(model, "gpt-4") || strings.Contains(model, "o1") || strings.Contains(model, "o3") {
+		return 128_000
+	}
+	if strings.Contains(model, "laguna") || strings.Contains(model, "poolside") {
+		return 1_000_000 // Poolside Laguna is 1M context
+	}
+	if strings.Contains(model, "mistral") || strings.Contains(model, "mixtral") {
+		return 32_768
+	}
+
+	// Provider fallbacks
+	if provider == "antigravity" {
+		return 1_000_000
+	}
+	if provider == "groq" {
+		return 8_192 // Groq typical limit
+	}
+
+	return 128_000 // Standard fallback
 }
 
 // activityPanelRows caps how many tool rows the panel shows — the rest is
@@ -153,14 +191,40 @@ func (m Model) renderPanel() string {
 	}
 	sb.WriteString(m.kv("model", clip(modName, w-9), w))
 
-	used := tokenEstimate(m.chat)
+	// Used — settlement numbers when the API reported them, otherwise the
+	// calibrated forecast (doctrine P3), explicitly labeled "~" so nobody
+	// mistakes an estimate for a bill. Percent is color-coded by pressure.
+	used := m.actualTokens.total
+	label := ""
+	if used == 0 {
+		used = m.ctxUsed
+		label = "~" // forecast, not settlement
+	}
 	win := "—"
-	pct := ""
+	usedStr := fmt.Sprintf("%s%s / %s", label, fmtTokens(used), win)
 	if m.window > 0 {
 		win = fmtTokens(m.window)
-		pct = fmt.Sprintf(" · %.1f%%", float64(used)*100/float64(m.window))
+		pct := float64(used) * 100 / float64(m.window)
+		usedStr = m.ctxColor(pct).Render(fmt.Sprintf("%s%s / %s · %.1f%%", label, fmtTokens(used), win, pct))
 	}
-	sb.WriteString(m.kv("used", fmt.Sprintf("%s / %s%s", fmtTokens(used), win, pct), w))
+	if m.compactCount > 0 {
+		// Auto-compaction history is transparency too — the badge shows the
+		// ledger has been folded N times this session.
+		usedStr += " " + m.styles.statusRight.Render(fmt.Sprintf("%dx compact", m.compactCount))
+	}
+	sb.WriteString(m.kv("used", usedStr, w))
+
+	// Show real token breakdown when available
+	if m.actualTokens.total > 0 {
+		sb.WriteString(m.kv("in", fmtTokens(m.actualTokens.input), w))
+		sb.WriteString(m.kv("out", fmtTokens(m.actualTokens.output), w))
+		if m.actualTokens.cacheRead > 0 {
+			sb.WriteString(m.kv("cache", fmtTokens(m.actualTokens.cacheRead), w))
+		}
+		if m.actualTokens.cost > 0 {
+			sb.WriteString(m.kv("cost", fmt.Sprintf("$%.4f", m.actualTokens.cost), w))
+		}
+	}
 
 	// Git — branch + cwd relative to home.
 	sb.WriteString(m.section("git"))
@@ -183,7 +247,11 @@ func (m Model) renderPanel() string {
 			if sa.status == "working" {
 				icon, color = "⚡", m.styles.statusRight
 			}
-			row := fmt.Sprintf("  @%-7s %s", sa.name, color.Render(icon+" "+clip(sa.task, w-14)))
+			modBadge := ""
+			if sa.model != "" {
+				modBadge = m.styles.statusLeft.Render("· " + clip(sa.model, 10))
+			}
+			row := fmt.Sprintf("  @%-7s %s %s", sa.name, color.Render(icon+" "+clip(sa.task, w-22)), modBadge)
 			sb.WriteString(row)
 			sb.WriteString("\n")
 		}
@@ -225,22 +293,6 @@ func (m Model) section(name string) string {
 // kv renders a "key  value" row: key padded to a fixed width, value clipped
 // so a long branch/path never overflows the panel (Principle 1).
 func (m Model) kv(key, val string, w int) string {
-	line := fmt.Sprintf("  %-7s %s", key, clip(val, w-10))
+	line := fmt.Sprintf("  %-7s %s", key, val)
 	return m.styles.statusLeft.Render(line) + "\n"
-}
-
-// clip truncates a string to n runes with an ellipsis — single-line safe
-// (unlike truncate, which is for chat blocks).
-func clip(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	if n == 1 {
-		return "…"
-	}
-	return string(r[:n-1]) + "…"
 }

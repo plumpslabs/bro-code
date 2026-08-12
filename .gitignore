@@ -1,28 +1,87 @@
 # Binaries & build output
 /brocode
+/brocode.exe
 /bin/
 /dist/
+/out/
 /brocode-*
+
+# Compiled binaries (cross-platform)
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 
 # Go build/test artifacts
 /coverage.out
 *.test
 *.prof
+*.cover
+*.coverprofile
 
-# Storage (Principle 5 — SQLite/JSONL runtime data)
+# Go profiling & tracing
+*.pprof
+*.trace
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependencies
+/vendor/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+.envrc
+
+# Local overrides
+*.local
+
+# Runtime data & storage
 *.db
 *.db-*
 *.sqlite
 *.sqlite3
+*.db-journal
+*.sqlite-shm
+*.sqlite-wal
+.brocode/
 
 # Logs
 *.log
+/logs/
 
-# macOS
+# Temp & backup
+*.tmp
+*.temp
+*.swp
+*.swo
+*.sav
+*~
+*.bak
+*.orig
+*.rej
+
+# OS
 .DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-# Editors
+# Editors & IDEs
 .idea/
 .vscode/
-*.swp
-*~
+.fleet/
+*.code-workspace
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.iml

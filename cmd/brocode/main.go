@@ -78,7 +78,11 @@ func runTUI(ix *search.Index, resume bool) {
 	// single latest.jsonl, bounded). Failure to save is a warning, not an
 	// error — the user's session must never be held hostage by the disk.
 	if m, ok := final.(tui.Model); ok && m.Started() {
-		if err := tui.SaveSession(m.Messages()); err != nil {
+		if err := tui.SaveSession(m.Messages()); err == nil {
+			fmt.Printf("✓ Session saved for project '%s' (id: %s)\n", m.ProjectName(), m.SessionID())
+			fmt.Printf("  File: %s\n", tui.SessionFilePath())
+			fmt.Println("  Resume anytime in this project with: brocode -c")
+		} else {
 			fmt.Fprintln(os.Stderr, "warning: could not save session:", err)
 		}
 	}
