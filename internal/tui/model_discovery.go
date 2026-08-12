@@ -260,15 +260,6 @@ func DiscoverAllModels() map[string][]string {
 		models["poolside"] = poolsideModels // fallback to static
 	}
 
-	// Lalarasa (Custom Proxy, OpenAI-compatible)
-	if lalarasaKey := loadAPIKey("lalarasa"); lalarasaKey != "" {
-		if lalarasaModels, err := discoverModelsFromAPI("https://9router.rosyidrid.com", "Authorization", lalarasaKey); err == nil && len(lalarasaModels) > 0 {
-			models["lalarasa"] = lalarasaModels
-		}
-	}
-	if len(models["lalarasa"]) == 0 {
-		models["lalarasa"] = lalarasaModels // fallback to static
-	}
 
 	// DeepSeek (OpenAI-compatible)
 	if dsKey := loadAPIKey("deepseek"); dsKey != "" {

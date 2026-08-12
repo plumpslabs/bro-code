@@ -25,6 +25,7 @@ var commandList = []commandItem{
 	{"/mcp", "MCP server status"},
 	{"/usage", "usage & context window"},
 	{"/compact", "compact context window now"},
+	{"/mouse", "toggle mouse scroll & native copy mode"},
 	{"/memory", "session memory plan"},
 	{"/tools", "list indexed tools & skills"},
 	{"/theme", "open theme picker"},

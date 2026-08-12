@@ -509,11 +509,11 @@ func TestConnectModalNavigation(t *testing.T) {
 func TestConnectSelectsProvider(t *testing.T) {
 	m := newTestModel()
 	m.connectOpen = true
-	// Select poolside (index 5) — api key provider → opens key modal
-	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: '6', Text: "6"}))
+	// Select poolside (index 4) — api key provider → opens key modal
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: '5', Text: "5"}))
 	m2 := updated.(Model)
-	if m2.connectSel != 5 {
-		t.Fatalf("expected poolside selected (index 5), got %d", m2.connectSel)
+	if m2.connectSel != 4 {
+		t.Fatalf("expected poolside selected (index 4), got %d", m2.connectSel)
 	}
 	updated, _ = m2.Update(enterKey())
 	m3 := updated.(Model)

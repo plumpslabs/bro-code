@@ -1389,6 +1389,7 @@ func (m Model) send() (Model, tea.Cmd) {
 		return m, nil
 
 
+
 	case q == "/compact":
 		m.input.SetValue("")
 		used := chatTokens(m.chat)

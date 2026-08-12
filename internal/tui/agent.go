@@ -922,37 +922,43 @@ func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<-
 			}
 		}
 
-		// Lalarasa provider: Custom Proxy (OpenAI-compatible chat completions)
-		if m.provider == "lalarasa" {
-			apiKey := loadAPIKey("lalarasa") // Might be empty if proxy doesn't need it
-			lalarasaModel := m.selectedModel
-			if lalarasaModel == "" {
-				lalarasaModel = lalarasaModels[0]
+		if m.provider == "custom" {
+			keyData := loadAPIKey("custom")
+			parts := strings.Split(keyData, "|")
+			endpoint := "http://localhost:11434/v1/chat/completions"
+			apiKey := ""
+			if len(parts) >= 1 && parts[0] != "" {
+				endpoint = parts[0]
+				if !strings.HasSuffix(endpoint, "/chat/completions") {
+					endpoint = strings.TrimRight(endpoint, "/") + "/chat/completions"
+				}
+			}
+			if len(parts) >= 2 {
+				apiKey = parts[1]
+			}
+			customModel := m.selectedModel
+			if customModel == "" {
+				customModel = "default"
 			}
 
-			wf := newWorkflow(traceCh, "lalarasa", lalarasaModel, startTime)
+			wf := newWorkflow(traceCh, "custom", customModel, startTime)
 			wf.phaseThinking()
-
 			reqBody := map[string]interface{}{
-				"model": lalarasaModel,
-				"messages": []map[string]string{
-					{"role": "user", "content": q},
-				},
+				"model":       customModel,
+				"messages":    zenMessages(m.chat, q),
 				"temperature": 0.7,
-				"max_tokens":  4096,
+				"max_tokens":  8192,
 			}
 			reqJSON, _ := json.Marshal(reqBody)
-
 			wf.phaseProcessing()
 
-			req, err := http.NewRequest("POST", "https://9router.rosyidrid.com/v1/chat/completions", strings.NewReader(string(reqJSON)))
+			req, err := http.NewRequest("POST", endpoint, strings.NewReader(string(reqJSON)))
 			if err != nil {
 				wf.phaseError(err.Error())
-				reply := mockReply{
-					text:  parseCLIError("lalarasa", "", err),
-					items: []activityItem{{tool: "lalarasa", label: "lalarasa request build failed", status: "error", detail: err.Error()}},
-				}
-				return agentResultMsg{reply: reply, run: run}
+				return agentResultMsg{reply: mockReply{
+					text:  parseCLIError("custom", "", err),
+					items: []activityItem{{tool: "custom", label: "request build failed", status: "error", detail: err.Error()}},
+				}, run: run}
 			}
 			req.Header.Set("Content-Type", "application/json")
 			if apiKey != "" {
@@ -963,70 +969,42 @@ func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<-
 			resp, err := client.Do(req)
 			if err != nil {
 				wf.phaseError(err.Error())
-				reply := mockReply{
-					text:  parseCLIError("lalarasa", "", err),
-					items: []activityItem{{tool: "lalarasa", label: "lalarasa request failed", status: "error", detail: err.Error()}},
-				}
-				return agentResultMsg{reply: reply, run: run}
+				return agentResultMsg{reply: mockReply{
+					text:  parseCLIError("custom", "", err),
+					items: []activityItem{{tool: "custom", label: "request failed", status: "error", detail: err.Error()}},
+				}, run: run}
 			}
 			defer resp.Body.Close()
 
 			respBody, _ := io.ReadAll(resp.Body)
 			if resp.StatusCode != 200 {
 				wf.phaseError(fmt.Sprintf("HTTP %d", resp.StatusCode))
-				reply := mockReply{
-					text:  parseCLIError("lalarasa", string(respBody), nil),
-					items: []activityItem{{tool: "lalarasa", label: fmt.Sprintf("lalarasa HTTP %d", resp.StatusCode), status: "error", detail: string(respBody[:min(100, len(respBody))])}},
-				}
-				return agentResultMsg{reply: reply, run: run}
+				return agentResultMsg{reply: mockReply{
+					text:  parseCLIError("custom", string(respBody), nil),
+					items: []activityItem{{tool: "custom", label: fmt.Sprintf("HTTP %d", resp.StatusCode), status: "error", detail: string(respBody[:min(100, len(respBody))])}},
+				}, run: run}
 			}
 
 			wf.phaseReceiving()
-
-			var lalarasaResp struct {
-				Choices []struct {
-					Message struct {
-						Content string `json:"content"`
-					} `json:"message"`
-				} `json:"choices"`
-				Usage struct {
-					PromptTokens     int `json:"prompt_tokens"`
-					CompletionTokens int `json:"completion_tokens"`
-					TotalTokens      int `json:"total_tokens"`
-				} `json:"usage"`
-			}
-			if err := json.Unmarshal(respBody, &lalarasaResp); err != nil {
+			text, _, tok, err := parseZenResponse(respBody)
+			if err != nil {
 				wf.phaseError(err.Error())
-				reply := mockReply{
-					text:  parseCLIError("lalarasa", string(respBody), err),
-					items: []activityItem{{tool: "lalarasa", label: "lalarasa parse error", status: "error", detail: err.Error()}},
-				}
-				return agentResultMsg{reply: reply, run: run}
+				return agentResultMsg{reply: mockReply{
+					text:  parseCLIError("custom", string(respBody), err),
+					items: []activityItem{{tool: "custom", label: "parse error", status: "error", detail: err.Error()}},
+				}, run: run}
 			}
 
 			elapsed := time.Since(startTime)
-			respText := ""
-			if len(lalarasaResp.Choices) > 0 {
-				respText = lalarasaResp.Choices[0].Message.Content
-			}
-
-			tok := tokenUsage{
-				input:  lalarasaResp.Usage.PromptTokens,
-				output: lalarasaResp.Usage.CompletionTokens,
-				total:  lalarasaResp.Usage.TotalTokens,
-			}
-
-			if respText != "" {
-				attr := fmt.Sprintf("\n\n  ⚡ lalarasa/%s · %.1fs · %s tokens", lalarasaModel, elapsed.Seconds(), fmtTokens(lalarasaResp.Usage.TotalTokens))
-				respText += attr
-
+			if text != "" {
+				attr := fmt.Sprintf("\n\n  ⚡ custom/%s · %.1fs · %s tokens", customModel, elapsed.Seconds(), fmtTokens(tok.total))
+				text += attr
 				wf.phaseDone(elapsed, fmt.Sprintf("%d tokens", tok.total))
-
 				reply := mockReply{
-					text: respText,
+					text: text,
 					items: []activityItem{{
-						tool: "lalarasa", label: fmt.Sprintf("lalarasa %s", lalarasaModel), status: "ok",
-						detail: fmt.Sprintf("%.1fs · %d tokens", elapsed.Seconds(), lalarasaResp.Usage.TotalTokens),
+						tool: "custom", label: fmt.Sprintf("custom %s", customModel), status: "ok",
+						detail: fmt.Sprintf("%.1fs · %d tokens", elapsed.Seconds(), tok.total),
 					}},
 				}
 				return agentResultMsg{reply: reply, tokens: tok, run: run}

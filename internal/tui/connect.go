@@ -65,7 +65,6 @@ var defaultProviders = []provider{
 	{name: "freebuff", method: "native · free (saved credentials)", detected: false},
 	{name: "codebuff", method: "native · free (saved credentials)", detected: false},
 	{name: "antigravity", method: "url login (browser)", detected: false},
-	{name: "lalarasa", method: "custom proxy (9router)", detected: false},
 	{name: "poolside", method: "api key (Laguna)", detected: false},
 	{name: "groq", method: "api key (free tier)", detected: false},
 	{name: "deepseek", method: "api key", detected: false},
@@ -73,6 +72,7 @@ var defaultProviders = []provider{
 	{name: "zhipu", method: "api key (GLM)", detected: false},
 	{name: "mimo", method: "api key (Xiaomi)", detected: false},
 	{name: "claude", method: "api key", detected: false},
+	{name: "custom", method: "api key (URL|KEY)", detected: false},
 }
 
 // Static fallback models (used when API is unavailable or no credentials)
@@ -108,11 +108,6 @@ var poolsideModels = []string{
 	"poolside/laguna-xs-2.1",
 }
 
-var lalarasaModels = []string{
-	"oc/deepseek-v4-flash-free",
-	"ps/poolside/laguna-s-2.1",
-	"ps/poolside/laguna-xs-2.1",
-}
 
 // MiniMax models (OpenAI-compatible API)
 var minimaxModels = []string{
@@ -258,8 +253,6 @@ func (m Model) allModelEntries() []modelEntry {
 				models = groqModels
 			case "poolside":
 				models = poolsideModels
-			case "lalarasa":
-				models = lalarasaModels
 			case "deepseek":
 				models = deepseekStaticModels
 			case "minimax":
@@ -270,6 +263,8 @@ func (m Model) allModelEntries() []modelEntry {
 				models = mimoModels
 			case "claude":
 				models = claudeStaticModels
+			case "custom":
+				models = []string{"default", "llama-3-70b", "deepseek-coder", "qwen2-72b"}
 			}
 		}
 

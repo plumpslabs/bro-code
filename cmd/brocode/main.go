@@ -21,6 +21,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/diff"
 	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/tui"
+	"github.com/plumpslabs/bro-code/internal/web"
 )
 
 // Build-time injected variables (see Makefile LDFLAGS).
@@ -39,6 +40,11 @@ func main() {
 
 	if *showVersion {
 		fmt.Printf("brocode %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
+
+	if flag.Arg(0) == "web" {
+		web.StartDashboard()
 		return
 	}
 
