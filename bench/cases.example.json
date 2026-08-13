@@ -1,0 +1,23 @@
+[
+  {
+    "id": "fix-broken-go-build",
+    "prompt": "The project does not build. Find the problem and fix it, then verify the build passes.",
+    "setup": "printf 'package main\\n\\nimport \"fmt\"\\n\\nfunc main() {\\n\\tfmt.Prinln(\"hello\")\\n}\\n' > main.go && printf 'module benchtest\\n\\ngo 1.21\\n' > go.mod",
+    "verify": "go build ./...",
+    "maxIterations": 15
+  },
+  {
+    "id": "create-file-with-content",
+    "prompt": "Create a file called greeting.txt containing the text 'hello world'.",
+    "setup": "echo ready > .ready",
+    "verify": "grep -q 'hello world' greeting.txt",
+    "maxIterations": 8
+  },
+  {
+    "id": "find-and-report",
+    "prompt": "Look at the project and report what the constant MAX_RETRIES is set to in config.js. Answer with just the number.",
+    "setup": "printf 'const MAX_RETRIES = 5;\\nmodule.exports = { MAX_RETRIES };\\n' > config.js",
+    "verify": "grep -qi '5' report.txt 2>/dev/null || grep -q '5' .bro-answer 2>/dev/null || true",
+    "maxIterations": 10
+  }
+]

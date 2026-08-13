@@ -1,13 +1,19 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/hexops/gotextdiff"
 	"github.com/hexops/gotextdiff/myers"
@@ -23,9 +29,13 @@ type Tool interface {
 	Execute(ctx context.Context, argsJSON string) (string, error)
 }
 
-// Registry holds all registered tools.
+// Registry holds all registered tools plus the permission gate state.
 type Registry struct {
-	tools map[string]Tool
+	tools    map[string]Tool
+	repoRoot string          // anchors the cd/pushd escape check
+	allow    map[string]bool // session allow-list (keys from AllowKey)
+	askFunc  func(context.Context, []AskQuestion) ([]AskResult, error)
+	sandbox  *Sandbox // granular per-tool policy (.brocode/sandbox.json)
 }
 
 // NewRegistry initializes default built-in tools.
@@ -38,7 +48,125 @@ func NewRegistry() *Registry {
 	r.Register(&GrepTool{})
 	r.Register(&GlobTool{})
 	r.Register(&BashTool{})
+	r.Register(&AskUserTool{})
+	r.Register(&FetchURLTool{})
+	r.Register(&GitTool{})
+	r.Register(&UndoTool{})
+	r.Register(&WebSearchTool{})
+	r.Register(&ReviewChangesTool{})
+	r.Register(&CodeSymbolsTool{})
+	r.Register(&SearchCodeTool{})
 	return r
+}
+
+// SetRepoRoot anchors the out-of-repo escape check for cd/pushd gates.
+func (r *Registry) SetRepoRoot(path string) {
+	r.repoRoot = path
+}
+
+// SetUserAskHandler wires the interactive ask modal so gated commands can
+// request approval from the user. Without it (headless), gated commands run.
+func (r *Registry) SetUserAskHandler(fn func(context.Context, []AskQuestion) ([]AskResult, error)) {
+	r.askFunc = fn
+	if rc, ok := r.tools["review_changes"].(*ReviewChangesTool); ok {
+		rc.Ask = fn
+	}
+}
+
+// SetSandbox applies a granular per-tool permission policy (from
+// .brocode/sandbox.json). Nil or disabled sandboxes leave the default
+// gate-only behavior untouched.
+func (r *Registry) SetSandbox(s *Sandbox) {
+	r.sandbox = s
+}
+
+// Sandbox returns the active sandbox policy, or nil when none is configured.
+func (r *Registry) Sandbox() *Sandbox {
+	return r.sandbox
+}
+
+// GateAction decides whether a tool call may proceed. Only bash commands are
+// gated (the proven legacy design): risky/destructive commands either run
+// silently, ask the user for approval (Allow once / Always allow / Deny), or
+// are hard-blocked. write_file/edit_file are not gated — the PLANNER mode
+// guard already handles read-only enforcement.
+func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approved bool, reason string, err error) {
+	// Sandbox policy first: a blocked tool is hard-denied, never prompted.
+	if r.sandbox != nil {
+		if reason := r.sandbox.CheckTool(tc.Name, tc.Arguments); reason != "" {
+			return false, reason, nil
+		}
+	}
+
+	var cmd string
+	switch tc.Name {
+	case "bash":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return false, "invalid bash arguments: " + err.Error(), nil
+		}
+		cmd = args.Command
+	case "git":
+		// Only the commit action is gated (it mutates the repo). Read-only
+		// actions (status/diff/log/branch) always pass.
+		var args struct {
+			Action  string `json:"action"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return false, "invalid git arguments: " + err.Error(), nil
+		}
+		if args.Action != "commit" {
+			return true, "", nil
+		}
+		cmd = "git commit"
+	default:
+		return true, "", nil
+	}
+
+	switch GateCommand(cmd, r.repoRoot, r.allow) {
+	case GateAllow:
+		return true, "", nil
+	case GateDeny:
+		return false, fmt.Sprintf("command %q is prohibited (destructive system operation)", cmd), nil
+	}
+
+	// GateAsk
+	if r.askFunc == nil {
+		return true, "", nil // headless/unattended: proceed
+	}
+
+	results, err := r.askFunc(ctx, []AskQuestion{
+		{
+			Question: "⚠️ BroCode wants to run a gated command:\n\n```\n" + cmd + "\n```",
+			Options:  []string{"✅ Allow once", "🔁 Always allow for this session", "🚫 Deny"},
+		},
+	})
+	if err != nil {
+		return false, "approval request failed: " + err.Error(), nil
+	}
+	if len(results) == 0 || len(results[0].Answers) == 0 {
+		return false, "user skipped the approval prompt", nil
+	}
+
+	ans := results[0].Answers[0]
+	key := AllowKey(cmd)
+	switch {
+	case strings.Contains(ans, "Deny"):
+		return false, fmt.Sprintf("user denied command %q", cmd), nil
+	case strings.Contains(ans, "Always"):
+		if r.allow == nil {
+			r.allow = map[string]bool{}
+		}
+		if key != "" {
+			r.allow[key] = true
+		}
+		return true, "", nil
+	default:
+		return true, "", nil // allow once
+	}
 }
 
 func (r *Registry) Register(t Tool) {
@@ -63,6 +191,38 @@ func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (string, 
 		return "", fmt.Errorf("tool '%s' not registered", name)
 	}
 	return t.Execute(ctx, argsJSON)
+}
+
+// Lookup returns a registered tool by name, or nil if not found.
+func (r *Registry) Lookup(name string) Tool {
+	return r.tools[name]
+}
+
+// SubRegistry returns a copy of the registry safe for sub-agent execution:
+// tool instances are shared (they are stateless), but the interactive tools
+// (ask_user, review_changes) and subagent itself are dropped so a sub-agent
+// can never pop a modal, ask the user, or recurse. Gated commands are always
+// DENIED in a sub-agent — destructive operations must go through the main
+// agent's approval modal, never a silent background run.
+func (r *Registry) SubRegistry() *Registry {
+	nr := &Registry{
+		tools:    make(map[string]Tool, len(r.tools)),
+		repoRoot: r.repoRoot,
+		allow:    make(map[string]bool),
+	}
+	for name, t := range r.tools {
+		switch name {
+		case "ask_user", "review_changes", "subagent":
+			continue // no interactive tools, no recursion
+		}
+		nr.tools[name] = t
+	}
+	// Non-nil askFunc whose error path DENIES the command: sub-agents cannot
+	// request interactive approval, so gated commands are blocked outright.
+	nr.askFunc = func(ctx context.Context, q []AskQuestion) ([]AskResult, error) {
+		return nil, fmt.Errorf("sub-agents cannot run commands that require user approval — the main agent must run %q", q[0].Question)
+	}
+	return nr
 }
 
 // ---------------- Built-in Tools ----------------
@@ -119,7 +279,7 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		return fmt.Sprintf("%s\n\n[file has %d lines, showing first 100 lines. Request line range for more]", head, len(lines)), nil
 	}
 
-	return string(data), nil
+	return CapOutput(string(data)), nil
 }
 
 // WriteFileTool
@@ -150,6 +310,9 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 		return "", err
 	}
 
+	// One-turn rollback window: keep a backup before overwriting.
+	_ = Snapshot(args.Path)
+
 	if err := os.WriteFile(args.Path, []byte(args.Content), 0644); err != nil {
 		return "", err
 	}
@@ -159,8 +322,10 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 // EditFileTool
 type EditFileTool struct{}
 
-func (t *EditFileTool) Name() string        { return "edit_file" }
-func (t *EditFileTool) Description() string { return "Edit target file by replacing old string content with new content" }
+func (t *EditFileTool) Name() string { return "edit_file" }
+func (t *EditFileTool) Description() string {
+	return "Edit target file by replacing old string content with new content"
+}
 func (t *EditFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -186,6 +351,9 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	if err != nil {
 		return "", err
 	}
+
+	// One-turn rollback window: keep a backup before modifying.
+	_ = Snapshot(args.Path)
 
 	content := string(data)
 	if !strings.Contains(content, args.Target) {
@@ -282,12 +450,37 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		args.Path = "."
 	}
 
-	cmd := exec.CommandContext(ctx, "grep", "-rn", "-I", args.Pattern, args.Path)
+	// Skip heavy/vendored directories so searches stay fast and relevant in
+	// big monorepos (node_modules, .git, build output, etc.). Without this a
+	// single grep can wade through gigabytes of dependencies and drown the
+	// agent in noise — which is exactly what made earlier turns spin.
+	excludeDirs := []string{
+		"node_modules", "bower_components", "vendor", "dist", "build", "out",
+		".git", ".next", ".nuxt", "coverage", ".cache", ".turbo", "target",
+		"__pycache__", ".venv", "venv", "Pods", ".gradle", "bin", "obj",
+	}
+	var excl []string
+	for _, d := range excludeDirs {
+		excl = append(excl, "--exclude-dir="+d)
+	}
+
+	cmdArgs := append([]string{"-rn", "-I"}, append(excl, args.Pattern, args.Path)...)
+	cmd := exec.CommandContext(ctx, "grep", cmdArgs...)
 	output, err := cmd.Output()
-	if err != nil && len(output) == 0 {
-		// Fallback to fixed strings match (-F) if regex pattern parsing failed
-		cmdFixed := exec.CommandContext(ctx, "grep", "-rn", "-I", "-F", args.Pattern, args.Path)
-		output, _ = cmdFixed.Output()
+	// grep exits 1 when there are NO matches — that is a normal result, not an
+	// error. Only re-run with -F (fixed strings) when grep failed for another
+	// reason (exit 2 = regex parse error, exit >1), otherwise "no matches"
+	// would silently scan the tree twice on every empty result — the most
+	// common case in an agent loop.
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			output = nil // no matches: fall through to the empty-result path
+		} else if len(output) == 0 {
+			// Fallback to fixed strings match (-F) if regex pattern parsing failed
+			cmdArgsF := append([]string{"-rn", "-I", "-F"}, append(excl, args.Pattern, args.Path)...)
+			cmdFixed := exec.CommandContext(ctx, "grep", cmdArgsF...)
+			output, _ = cmdFixed.Output()
+		}
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
@@ -325,14 +518,178 @@ func (t *GlobTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		return "", err
 	}
 
-	matches, err := filepath.Glob(args.Pattern)
+	// Tolerate patterns the model writes with a leading "/" (treating it as
+	// repo-rooted) — "/*.js" or "/src/**" should mean "*.js" / "src/**"
+	// relative to the working directory, not an absolute filesystem path that
+	// never matches. Models (and some free model outputs) do this constantly;
+	// without this a glob silently returns nothing and the agent spins.
+	pattern := strings.TrimPrefix(args.Pattern, "/")
+	pattern = strings.TrimPrefix(pattern, "./")
+
+	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return "", err
 	}
+
+	// Go's filepath.Glob does NOT support recursive "**" and a bare name like
+	// "ConversationService" only matches the cwd — so "glob /ConversationService*"
+	// silently finds nothing and the agent spins. Fall back to a recursive walk
+	// when the direct match is empty (or the pattern has no path separator).
+	if len(matches) == 0 || !strings.Contains(pattern, string(filepath.Separator)) {
+		rec, walkErr := recursiveGlob(pattern)
+		if walkErr != nil {
+			return "", walkErr
+		}
+		matches = rec
+	}
+
 	if len(matches) == 0 {
 		return "No matching files.", nil
 	}
+	if len(matches) > 50 {
+		matches = matches[:50]
+	}
 	return strings.Join(matches, "\n"), nil
+}
+
+// recursiveGlob walks the working directory and returns paths matching a glob
+// pattern. Bare names (no separator) match the file/dir basename anywhere in
+// the tree (e.g. "ConversationService*"); patterns with separators are matched
+// against the path relative to the cwd. Heavy/vendored directories are skipped
+// and results are capped.
+func recursiveGlob(pattern string) ([]string, error) {
+	var matches []string
+	basePattern := pattern
+	if !strings.Contains(pattern, string(filepath.Separator)) {
+		basePattern = filepath.Base(pattern)
+	}
+
+	// Bare names with no wildcard (e.g. "conversation") most likely target a
+	// directory — match directories too so "/conversation" finds
+	// src/services/conversation instead of returning nothing.
+	bareNoWildcard := !strings.Contains(pattern, string(filepath.Separator)) &&
+		!strings.ContainsAny(pattern, "*?[")
+
+	walkErr := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries, keep walking
+		}
+		if len(matches) >= 200 {
+			return filepath.SkipAll
+		}
+		if d.IsDir() {
+			if path != "." && isHeavyDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			if bareNoWildcard {
+				if ok, _ := filepath.Match(basePattern, d.Name()); ok {
+					matches = append(matches, path+"/")
+				}
+			}
+			return nil
+		}
+
+		if strings.Contains(pattern, string(filepath.Separator)) {
+			if ok, _ := filepath.Match(pattern, path); ok {
+				matches = append(matches, path)
+			}
+			return nil
+		}
+		if ok, _ := filepath.Match(basePattern, d.Name()); ok {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	return matches, walkErr
+}
+
+// isHeavyDir reports whether a directory should be skipped during recursive
+// glob (dependencies, build output, VCS metadata).
+func isHeavyDir(name string) bool {
+	switch name {
+	case "node_modules", "bower_components", "vendor", "dist", "build", "out",
+		".git", ".next", ".nuxt", "coverage", ".cache", ".turbo", "target",
+		"__pycache__", ".venv", "venv", "Pods", ".gradle", "bin", "obj":
+		return true
+	}
+	return false
+}
+
+// ---------------- Interactive User Questions ----------------
+
+// AskQuestion is a single interactive multiple-choice question presented to the user.
+type AskQuestion struct {
+	Question string   `json:"question"`
+	Options  []string `json:"options"`
+	Multi    bool     `json:"multi"`
+}
+
+// AskResult is the user's answer to one question.
+type AskResult struct {
+	Question string   `json:"question"`
+	Answers  []string `json:"answers"`
+	Custom   string   `json:"custom,omitempty"`
+}
+
+// AskUserTool asks the user interactive multiple-choice questions. The Ask
+// handler is wired by the UI layer; without it (headless) the tool fails
+// gracefully with an error the model can read.
+type AskUserTool struct {
+	Ask func(ctx context.Context, questions []AskQuestion) ([]AskResult, error)
+}
+
+func (t *AskUserTool) Name() string { return "ask_user" }
+func (t *AskUserTool) Description() string {
+	return "Ask the user interactive multiple-choice questions when you need a decision, preference, or confirmation that tools cannot determine. Supports single-select, multi-select, and custom answers."
+}
+func (t *AskUserTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"questions": map[string]any{
+				"type":        "array",
+				"description": "One or more questions to ask (1-3 recommended). Each question has 2-6 options.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"question": map[string]any{"type": "string", "description": "The question text"},
+						"options":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Answer options"},
+						"multi":    map[string]any{"type": "boolean", "description": "true = user may select multiple options; false (default) = single choice"},
+					},
+					"required": []string{"question", "options"},
+				},
+			},
+		},
+		"required": []string{"questions"},
+	}
+}
+func (t *AskUserTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Questions []AskQuestion `json:"questions"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	if len(args.Questions) == 0 {
+		return "", fmt.Errorf("ask_user requires at least one question")
+	}
+	if t.Ask == nil {
+		return "", fmt.Errorf("ask_user handler is not configured (running headless?)")
+	}
+
+	results, err := t.Ask(ctx, args.Questions)
+	if err != nil {
+		return "", fmt.Errorf("user interaction failed: %w", err)
+	}
+	if len(results) == 0 {
+		return "The user skipped the questions without providing answers. Proceed with the most reasonable default.", nil
+	}
+
+	out, err := json.Marshal(results)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("User answers:\n%s", out), nil
 }
 
 // BashTool
@@ -363,14 +720,328 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		return "", fmt.Errorf("prohibited destructive command")
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", args.Command)
+	// Bound every command with a timeout so a hung process cannot stall the loop.
+	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(tctx, "sh", "-c", args.Command)
 	out, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(out))
+	if tctx.Err() == context.DeadlineExceeded {
+		return CapOutput(fmt.Sprintf("Command timed out after 60s.\nOutput:\n%s", result)), nil
+	}
 	if err != nil {
-		return fmt.Sprintf("Command failed with error: %v\nOutput:\n%s", err, result), nil
+		return CapOutput(fmt.Sprintf("Command failed with error: %v\nOutput:\n%s", err, result)), nil
 	}
 	if result == "" {
 		return "Command executed successfully with no output.", nil
 	}
-	return result, nil
+	return CapOutput(result), nil
+}
+
+// ---------------- Web & Git ----------------
+
+var (
+	stripScriptsRegex = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`)
+	stripStylesRegex  = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	stripTagsRegex    = regexp.MustCompile(`<[^>]+>`)
+	collapseWSRegex   = regexp.MustCompile(`[ \t]+`)
+	collapseNLRegex   = regexp.MustCompile(`\n{3,}`)
+)
+
+// htmlToText extracts readable text from an HTML document.
+func htmlToText(raw string) string {
+	s := stripScriptsRegex.ReplaceAllString(raw, "")
+	s = stripStylesRegex.ReplaceAllString(s, "")
+	s = stripTagsRegex.ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+	s = collapseWSRegex.ReplaceAllString(s, " ")
+	s = collapseNLRegex.ReplaceAllString(s, "\n\n")
+	return strings.TrimSpace(s)
+}
+
+// FetchURLTool fetches a URL and returns its readable text content.
+type FetchURLTool struct{}
+
+func (t *FetchURLTool) Name() string { return "fetch_url" }
+func (t *FetchURLTool) Description() string {
+	return "Fetch a URL and return its readable text content (documentation, error pages, API docs, etc.)"
+}
+func (t *FetchURLTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"url":       map[string]any{"type": "string", "description": "Full http(s) URL to fetch"},
+			"max_chars": map[string]any{"type": "integer", "description": "Max characters to return (default 20000, max 100000)"},
+		},
+		"required": []string{"url"},
+	}
+}
+func (t *FetchURLTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		URL      string `json:"url"`
+		MaxChars int    `json:"max_chars"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(args.URL, "http://") && !strings.HasPrefix(args.URL, "https://") {
+		return "", fmt.Errorf("only http(s) URLs are supported")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, args.URL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "BroCode/1.0")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("HTTP %d %s", resp.StatusCode, resp.Status)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return "", err
+	}
+
+	text := htmlToText(string(body))
+	maxChars := args.MaxChars
+	if maxChars <= 0 {
+		maxChars = 20000
+	} else if maxChars > 100000 {
+		maxChars = 100000
+	}
+	if r := []rune(text); len(r) > maxChars {
+		text = string(r[:maxChars]) + fmt.Sprintf("\n… [truncated, %d more chars]", len(r)-maxChars)
+	}
+	return text, nil
+}
+
+// GitTool runs read-only git commands only — no commands that mutate the repo.
+type GitTool struct{}
+
+func (t *GitTool) Name() string { return "git" }
+func (t *GitTool) Description() string {
+	return "Run git commands: status, diff, log, branch (read-only) and commit (requires user approval). Commit and other mutating operations go through the permission gate."
+}
+func (t *GitTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"action":  map[string]any{"type": "string", "enum": []string{"status", "diff", "log", "branch", "commit"}, "description": "Which git operation to run"},
+			"message": map[string]any{"type": "string", "description": "commit: the commit message (required for commit)"},
+			"stat":    map[string]any{"type": "boolean", "description": "diff: show file stats instead of the full diff (default false)"},
+			"limit":   map[string]any{"type": "integer", "description": "log: max commits to show (default 10, max 50)"},
+		},
+		"required": []string{"action"},
+	}
+}
+func (t *GitTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Action  string `json:"action"`
+		Message string `json:"message"`
+		Stat    bool   `json:"stat"`
+		Limit   int    `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+
+	var argv []string
+	switch args.Action {
+	case "status":
+		argv = []string{"status", "--short", "--branch"}
+	case "diff":
+		if args.Stat {
+			argv = []string{"diff", "--stat"}
+		} else {
+			argv = []string{"diff"}
+		}
+	case "log":
+		limit := args.Limit
+		if limit <= 0 {
+			limit = 10
+		} else if limit > 50 {
+			limit = 50
+		}
+		argv = []string{"log", "--oneline", "-n", fmt.Sprintf("%d", limit)}
+	case "branch":
+		argv = []string{"branch", "-a"}
+	case "commit":
+		msg := strings.TrimSpace(args.Message)
+		if msg == "" {
+			return "", fmt.Errorf("commit requires a message parameter")
+		}
+		argv = []string{"commit", "-m", msg}
+	default:
+		return "", fmt.Errorf("unknown git action %q (allowed: status, diff, log, branch, commit)", args.Action)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", argv...)
+	out, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(out))
+	if err != nil {
+		if result != "" {
+			return result, nil
+		}
+		return "", fmt.Errorf("git %s failed: %w", args.Action, err)
+	}
+	if result == "" {
+		return "(no output)", nil
+	}
+	return CapOutput(result), nil
+}
+
+// WebSearchTool searches the web via the Exa API (semantic search for AI
+// agents). Requires the EXA_API_KEY environment variable.
+type WebSearchTool struct{}
+
+func (t *WebSearchTool) Name() string { return "web_search" }
+func (t *WebSearchTool) Description() string {
+	return "Search the web and return result titles, URLs and dates (docs, errors, libraries). Pair with fetch_url to read a result. Requires EXA_API_KEY."
+}
+func (t *WebSearchTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query":       map[string]any{"type": "string", "description": "Search query"},
+			"num_results": map[string]any{"type": "integer", "description": "Number of results (default 5, max 10)"},
+		},
+		"required": []string{"query"},
+	}
+}
+func (t *WebSearchTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Query     string `json:"query"`
+		NumResult int    `json:"num_results"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(args.Query) == "" {
+		return "", fmt.Errorf("web_search requires a query")
+	}
+
+	apiKey := os.Getenv("EXA_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("EXA_API_KEY is not set — add it to your environment to enable web search (get a key at exa.ai)")
+	}
+
+	num := args.NumResult
+	if num <= 0 {
+		num = 5
+	} else if num > 10 {
+		num = 10
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"query":      args.Query,
+		"numResults": num,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.exa.ai/search", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("search request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Exa API error HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+
+	var out struct {
+		Results []struct {
+			Title         string `json:"title"`
+			URL           string `json:"url"`
+			PublishedDate string `json:"publishedDate"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("failed to parse search results: %w", err)
+	}
+	if len(out.Results) == 0 {
+		return "No results found.", nil
+	}
+
+	var sb strings.Builder
+	for i, r := range out.Results {
+		date := ""
+		if r.PublishedDate != "" {
+			date = " (" + r.PublishedDate[:min(10, len(r.PublishedDate))] + ")"
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s%s\n   %s\n", i+1, r.Title, date, r.URL))
+	}
+	return strings.TrimSpace(sb.String()), nil
+}
+
+// ReviewChangesTool shows the current uncommitted diff to the user in the
+// interactive modal and lets them approve or roll back the turn's changes.
+type ReviewChangesTool struct {
+	Ask func(ctx context.Context, questions []AskQuestion) ([]AskResult, error)
+}
+
+func (t *ReviewChangesTool) Name() string { return "review_changes" }
+func (t *ReviewChangesTool) Description() string {
+	return "Show the current uncommitted changes to the user for interactive review. Use after making edits: the user can approve the changes or roll them back."
+}
+func (t *ReviewChangesTool) Parameters() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
+}
+func (t *ReviewChangesTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "diff")
+	diffOut, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("not a git repository or git unavailable: %w", err)
+	}
+	diff := strings.TrimSpace(string(diffOut))
+	if diff == "" {
+		return "No uncommitted changes to review.", nil
+	}
+	diff = CapOutput(diff)
+
+	if t.Ask == nil {
+		// Headless: return the diff for the model to summarize.
+		return "Current uncommitted changes:\n" + diff, nil
+	}
+
+	results, err := t.Ask(ctx, []AskQuestion{
+		{
+			Question: "📝 BroCode made changes — review them:\n\n```diff\n" + diff + "\n```",
+			Options:  []string{"✅ Looks good, continue", "↩️ Revert this turn's changes"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("review failed: %w", err)
+	}
+	if len(results) == 0 || len(results[0].Answers) == 0 {
+		return "User skipped the review.", nil
+	}
+	if strings.Contains(results[0].Answers[0], "Revert") {
+		n := RestoreAllSnapshots()
+		return fmt.Sprintf("User rolled back the changes (%d files restored).", n), nil
+	}
+	return "User approved the changes.", nil
 }

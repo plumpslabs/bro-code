@@ -4,22 +4,30 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/glamour"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
+	"github.com/plumpslabs/bro-code/internal/hooks"
 	"github.com/plumpslabs/bro-code/internal/loop"
+	"github.com/plumpslabs/bro-code/internal/lsp"
+	"github.com/plumpslabs/bro-code/internal/mcp"
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/store"
+	"github.com/plumpslabs/bro-code/internal/subagent"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
@@ -33,20 +41,44 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-var mdRenderer, _ = glamour.NewTermRenderer(
-	glamour.WithStandardStyle("dark"),
-	glamour.WithWordWrap(90),
-)
+// mdRenderers caches a glamour renderer per wrap width so the markdown line
+// length follows the terminal width instead of a fixed 90 columns (which left
+// most of a wide terminal unused and broke lines too early).
+var mdRenderers = struct {
+	sync.Mutex
+	m map[int]*glamour.TermRenderer
+}{m: map[int]*glamour.TermRenderer{}}
 
-func renderMarkdown(text string) string {
-	if mdRenderer == nil {
+func renderMarkdown(text string, wrap int) string {
+	if wrap < 40 {
+		wrap = 90 // fallback for headless/narrow terminals
+	}
+
+	mdRenderers.Lock()
+	r, ok := mdRenderers.m[wrap]
+	if !ok {
+		r, _ = glamour.NewTermRenderer(
+			glamour.WithStandardStyle("dark"),
+			glamour.WithWordWrap(wrap),
+		)
+		mdRenderers.m[wrap] = r
+	}
+	mdRenderers.Unlock()
+
+	if r == nil {
 		return text
 	}
-	out, err := mdRenderer.Render(text)
+	out, err := r.Render(text)
 	if err != nil || strings.TrimSpace(out) == "" {
 		return text
 	}
 	res := strings.TrimSpace(out)
+
+	// Glamour pads every rendered line with trailing spaces so its word wrap
+	// is stable — but inside the border box those pad the lines to full width
+	// and make tables/paragraphs look ragged ("acak-acakan"). Strip per-line
+	// trailing whitespace; the box border is the right edge.
+	res = stripTrailingWS(res)
 
 	// Clean up any remaining unparsed **text** into bold lipgloss styling
 	if strings.Contains(res, "**") {
@@ -64,6 +96,16 @@ func renderMarkdown(text string) string {
 	}
 
 	return res
+}
+
+// stripTrailingWS removes trailing spaces/tabs from each line (glamour pads
+// lines; the border box must be the visual right edge, not invisible spaces).
+func stripTrailingWS(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " \t")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Model defines the Bubble Tea v2 TUI state.
@@ -84,11 +126,60 @@ type Model struct {
 	// Reference to running Bubble Tea program for async event broadcasting
 	prog *tea.Program
 
+	// MCP (Model Context Protocol) manager — status shown via /mcp command.
+	mcpMgr *mcp.Manager
+
+	// LSP code intelligence manager (lazy-spawned language servers).
+	lspMgr *lsp.Manager
+
+	// projectCtx is the cached compact project overview (structure + docs)
+	// injected into the system prompt each turn.
+	projectCtx *search.ProjectContext
+
+	// scoutMgr runs background research tasks (scout tool) whose finished
+	// findings the engine drains into the model's context each loop step.
+	scoutMgr *subagent.ScoutManager
+
 	// Cancelation function for active LLM turn / tool execution
 	cancelTurn context.CancelFunc
 
 	// Spinner animation state
 	spinnerIdx int
+
+	// Live token streaming state
+	streaming     bool
+	pendingStream string
+
+	// activity holds the most recent agent steps (tool calls, reasoning)
+	// during a turn. Rendered live in the status slot above the input — never
+	// appended to the conversation history.
+	activity []string
+
+	// interrupted is set when the user presses ESC to cancel a running turn.
+	// The in-flight RunTurn then returns a "context canceled" error which must
+	// NOT be shown as an ERROR row (the user already knows they cancelled).
+	interrupted bool
+
+	// Log viewport: the conversation scrolls inside a fixed-height window so
+	// the terminal never repaints the whole history (flicker fix) and the
+	// input/footer stay pinned. renderedLog/renderedKey cache the formatted
+	// log so the expensive markdown render only runs on new messages.
+	logViewport viewport.Model
+	renderedLog string
+	renderedKey string
+	// lastUserLine is the rendered line where the last user message starts;
+	// after a turn completes the viewport parks here so the user's own prompt
+	// never disappears from the history (only scrolled past by long answers).
+	// foundUserLine distinguishes "park at line 0" from "no user message at all".
+	lastUserLine  int
+	foundUserLine bool
+
+	// renderedH remembers the log viewport height from the last re-render so
+	// the parking logic can re-park the scroll when the viewport SHRINKS (the
+	// live activity slot grows while a turn runs) — a height change without a
+	// content change used to scroll the user's prompt out of view until the
+	// turn finished.
+	renderedH int
 
 	// Multi-line prompt input: soft-wraps at terminal width and grows
 	// into new lines instead of overflowing the frame.
@@ -108,13 +199,32 @@ type Model struct {
 	modelsSel    int
 
 	// Sessions Modal State
-	sessionList []store.Session
-	sessionsSel int
+	sessionList      []store.Session
+	sessionsSel      int
+	sessionsViewport viewport.Model
 
-	// Connect Modal State (2-Step Wizard)
-	connectStep        int // 0 = select provider, 1 = enter key
-	connectProviderSel int
-	connectTextInput   textinput.Model
+	// Connect Modal State (multi-step wizard)
+	connectStep         int // 0=provider pick, 1=name, 2=API key, 3=base URL, 4=models
+	connectProviderSel  int
+	connectCustom       bool // true when adding a brand-new custom provider
+	connectNameInput    textinput.Model
+	connectTextInput    textinput.Model
+	connectBaseURLInput textinput.Model
+	connectModelsInput  textarea.Model
+
+	// Interactive Ask-User Modal (ask_user tool)
+	ask            *askBroker
+	showAsk        bool
+	askID          string
+	askQuestions   []tool.AskQuestion
+	askCursor      int // current question index
+	askOptionIdx   int // cursor within current question's rows
+	askChecked     map[int]map[int]bool
+	askSel         map[int]int
+	askCustom      map[int]string
+	askCustomQ     int // question index with custom input open, -1 = none
+	askCustomInput textinput.Model
+	askViewport    viewport.Model
 }
 
 type turnResultMsg struct {
@@ -124,6 +234,7 @@ type turnResultMsg struct {
 
 type statusUpdateMsg string
 type stepProgressMsg string
+type streamChunkMsg string
 
 // NewApp initializes the Bubble Tea v2 TUI model.
 func NewApp(
@@ -133,6 +244,9 @@ func NewApp(
 	adapter provider.ProviderAdapter,
 	tools *tool.Registry,
 	ctxMgr *bcontext.Manager,
+	mcpMgr *mcp.Manager,
+	lspMgr *lsp.Manager,
+	scoutMgr *subagent.ScoutManager,
 	initialMsgs ...string,
 ) Model {
 	ti := textarea.New()
@@ -144,11 +258,70 @@ func NewApp(
 	ti.MaxHeight = 8
 	// ENTER sends the prompt (handled by the app); Alt+Enter inserts a newline.
 	ti.KeyMap.InsertNewline.SetKeys("alt+enter")
+
+	// Clean look: the textarea defaults add line numbers ("1.") and a
+	// background bar on the cursor line. Strip those so the input stays
+	// minimal like the previous single-line input.
+	ti.ShowLineNumbers = false
+	clean := ti.Styles().Focused
+	clean.Base = lipgloss.NewStyle()
+	clean.CursorLine = lipgloss.NewStyle()
+	clean.CursorLineNumber = lipgloss.NewStyle()
+	clean.EndOfBuffer = lipgloss.NewStyle()
+	clean.LineNumber = lipgloss.NewStyle()
+	clean.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	clean.Prompt = lipgloss.NewStyle()
+	clean.Text = lipgloss.NewStyle()
+	styles := ti.Styles()
+	styles.Focused = clean
+	styles.Blurred = clean
+	// Themed block cursor (teal, matching the ❯ prompt) instead of default white.
+	styles.Cursor.Color = lipgloss.Color("86")
+	ti.SetStyles(styles)
 	ti.Focus()
 
 	cti := textinput.New()
-	cti.Placeholder = "Paste or type API Key here..."
+	cti.Placeholder = "Paste or type API Key here (leave empty if none)..."
 	cti.Prompt = ""
+
+	cni := textinput.New()
+	cni.Placeholder = "e.g. 9router, my-gateway, local-ai..."
+	cni.Prompt = ""
+
+	cbi := textinput.New()
+	cbi.Placeholder = "e.g. https://9router.rosyidrid.com/v1"
+	cbi.Prompt = ""
+
+	cmi := textarea.New()
+	cmi.Placeholder = "Optional: JSON models block, e.g.\n{\"model-a\":{\"name\":\"Model A\",\"limit\":{\"context\":1048576,\"output\":32768}}}\n\nOr a plain JSON array: [\"model-a\", \"model-b\"]"
+	cmi.Prompt = ""
+	cmi.CharLimit = 0
+	cmi.ShowLineNumbers = false
+	cmi.MaxHeight = 6
+	cmi.DynamicHeight = true
+	cleanCM := cmi.Styles().Focused
+	cleanCM.Base = lipgloss.NewStyle()
+	cleanCM.CursorLine = lipgloss.NewStyle()
+	cleanCM.EndOfBuffer = lipgloss.NewStyle()
+	cleanCM.LineNumber = lipgloss.NewStyle()
+	cleanCM.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cleanCM.Prompt = lipgloss.NewStyle()
+	cleanCM.Text = lipgloss.NewStyle()
+	cmStyles := cmi.Styles()
+	cmStyles.Focused = cleanCM
+	cmStyles.Blurred = cleanCM
+	cmi.SetStyles(cmStyles)
+
+	aci := textinput.New()
+	aci.Placeholder = "Type your custom answer..."
+	aci.Prompt = ""
+
+	brk := newAskBroker()
+	if askTool, ok := tools.Lookup("ask_user").(*tool.AskUserTool); ok {
+		askTool.Ask = brk.Ask
+	}
+	// Gated bash commands reuse the same interactive modal for approval.
+	tools.SetUserAskHandler(brk.Ask)
 
 	msgs := []string{"⚡ BroCode engine active. Type a prompt or /help for commands."}
 	if len(initialMsgs) > 0 {
@@ -156,34 +329,100 @@ func NewApp(
 	}
 
 	m := Model{
-		cfg:              cfg,
-		activeProvider:   p,
-		activeModel:      modelName,
-		adapter:          adapter,
-		tools:            tools,
-		context:          ctxMgr,
-		mode:             "BUILDER",
-		status:           "Ready",
-		messages:         msgs,
-		promptInput:      ti,
-		connectTextInput: cti,
-		promptHistory:    []string{},
-		historyIdx:       0,
+		cfg:                 cfg,
+		activeProvider:      p,
+		activeModel:         modelName,
+		adapter:             adapter,
+		tools:               tools,
+		context:             ctxMgr,
+		mcpMgr:              mcpMgr,
+		lspMgr:              lspMgr,
+		scoutMgr:            scoutMgr,
+		mode:                "BUILDER",
+		status:              "Ready",
+		messages:            msgs,
+		promptInput:         ti,
+		connectTextInput:    cti,
+		connectNameInput:    cni,
+		connectBaseURLInput: cbi,
+		connectModelsInput:  cmi,
+		promptHistory:       []string{},
+		historyIdx:          0,
+		ask:                 brk,
+		askCustomInput:      aci, logViewport: viewport.New(),
+		askViewport:      viewport.New(),
+		sessionsViewport: viewport.New(),
 	}
-	m.engine = loop.NewEngine(adapter, tools, ctxMgr, modelName)
 	m.modelOptions = provider.DiscoverModels(cfg)
+	m.rebuildEngine()
 	return m
 }
 
 func (m *Model) SetProgram(p *tea.Program) {
 	m.prog = p
+	if m.ask != nil {
+		m.ask.prog = p
+	}
+}
+
+// buildFallbacks returns automatic fallback adapters for every other detected
+// provider, used when the primary provider fails mid-turn.
+func (m *Model) buildFallbacks() []loop.Fallback {
+	var fbs []loop.Fallback
+	for _, d := range provider.AutoDetect(m.cfg) {
+		if m.activeProvider.Info.ID != "" && d.Info.ID == m.activeProvider.Info.ID {
+			continue
+		}
+		var a provider.ProviderAdapter
+		switch {
+		case d.Info.ID == "opencode":
+			a = provider.NewOpenCodeAdapter()
+		case d.Info.Protocol == "anthropic":
+			a = provider.NewAnthropicAdapter(d.Info.DefaultBaseURL, d.APIKey)
+		default:
+			a = provider.NewOpenAIAdapter(d.Info.DefaultBaseURL, d.APIKey)
+		}
+		model := ""
+		if len(d.Info.DefaultModels) > 0 {
+			model = d.Info.DefaultModels[0]
+		}
+		if model == "" {
+			model = "deepseek-v4-flash-free"
+		}
+		fbs = append(fbs, loop.Fallback{Adapter: a, Model: model})
+	}
+	return fbs
+}
+
+// rebuildEngine recreates the loop engine with the current adapter/model and
+// wires automatic fallbacks + the project context overview.
+func (m *Model) rebuildEngine() {
+	m.engine = loop.NewEngine(m.adapter, m.tools, m.context, m.activeModel)
+	m.engine.SetMode(m.mode)
+	if m.projectCtx == nil {
+		// Build the compact project overview once (tree + AGENTS/CLAUDE/README
+		// docs) so every turn starts oriented instead of blind-grepping for
+		// file locations. Rebuilt on each NewApp, cached for the session.
+		cwd, _ := os.Getwd()
+		m.projectCtx = search.BuildProjectContext(cwd)
+	}
+	m.engine.SetProjectContext(m.projectCtx.String())
+	for _, fb := range m.buildFallbacks() {
+		m.engine.AddFallback(fb)
+	}
+	// User-defined lifecycle hooks (.brocode/hooks.json) fire at turn
+	// start/end/error and around tool calls. Loaded lazily on first engine
+	// build; engine is rebuilt on model switches but hooks are cheap to reload.
+	cwd, _ := os.Getwd()
+	m.engine.SetHooks(hooks.Load(cwd))
+	m.engine.SetScoutManager(m.scoutMgr)
 }
 
 func (m Model) Init() tea.Cmd {
 	return m.promptInput.Focus()
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -194,9 +433,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Reserve room for the "❯ " prompt and a small right margin so
 			// the input soft-wraps inside the terminal instead of overflowing.
 			m.promptInput.SetWidth(m.width - 4)
+			m.logViewport.SetWidth(m.width)
+			m.askViewport.SetWidth(m.width - 8)
+			m.updateLogHeight()
 		}
 
 	case spinnerTickMsg:
+		// While any modal is open the content is static — keep ticking would
+		// re-render every 150ms and cause visible flicker on the modal.
+		if m.showAsk || m.showModels || m.showConnect || m.showDebug || m.showSessions {
+			return m, nil
+		}
 		if m.status != "Ready" && m.status != "Failed" {
 			m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
 			return m, tickCmd()
@@ -205,21 +452,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case stepProgressMsg:
 		str := string(msg)
+		// Progress events that land AFTER the turn has already settled (the
+		// adapter's stderr goroutine may still flush lines after turnResultMsg)
+		// must not clobber the final status or pollute the history.
+		if m.status == "Ready" || m.status == "Failed" {
+			return m, nil
+		}
+		// Skip the terminal "Completed" marker — it is not a user-visible step.
+		if str == "Completed" {
+			m.status = str
+			return m, nil
+		}
+		// Live agent activity is shown in the status slot ABOVE the input — it
+		// must never be appended to the conversation history (that made process
+		// rows pile up above the answer and hid the user's prompt).
 		m.status = str
-		m.messages = append(m.messages, "PROCESS:\n⚡ "+str)
+		if len(m.activity) == 0 || m.activity[len(m.activity)-1] != str {
+			m.activity = append(m.activity, str)
+			if len(m.activity) > 5 {
+				m.activity = m.activity[len(m.activity)-5:]
+			}
+		}
 		return m, nil
 
 	case turnResultMsg:
+		m.streaming = false
+		m.pendingStream = ""
+		m.activity = nil
 		if msg.err != nil {
+			// A user-initiated interrupt (ESC) aborts the context, which the
+			// adapter reports as "context canceled". That is not an error —
+			// the interruption notice was already shown when ESC was pressed.
+			if m.interrupted {
+				m.interrupted = false
+				m.status = "Ready"
+				return m, nil
+			}
 			m.messages = append(m.messages, "ERROR: "+msg.err.Error())
 			m.status = "Failed"
 		} else if msg.content != "" {
-			m.messages = append(m.messages, "BROCODE:\n"+msg.content)
+			// Surface the model's reasoning (thinking) above the answer, like
+			// opencode, so the agent's deliberation is visible — not just the
+			// final text. Falls back to plain content when there is no reasoning.
+			display := msg.content
+			if r := m.lastAssistantReasoning(); r != "" {
+				display = "💭 " + r + "\n\n" + msg.content
+			}
+			m.messages = append(m.messages, "BROCODE:\n"+display)
 			m.status = "Ready"
 		}
 
+	case streamChunkMsg:
+		if !m.streaming {
+			m.streaming = true
+			m.pendingStream = ""
+			m.status = "Streaming..."
+		}
+		m.pendingStream += string(msg)
+		return m, nil
+
 	case statusUpdateMsg:
 		m.status = string(msg)
+
+	case askUserMsg:
+		m.openAsk(msg)
+		return m, nil
 
 	case tea.KeyMsg:
 		keyStr := msg.String()
@@ -229,13 +526,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if clipText, err := clipboard.ReadAll(); err == nil && clipText != "" {
 				cleanClip := strings.TrimSpace(strings.ReplaceAll(clipText, "\r\n", "\n"))
 
-				if m.showConnect && m.connectStep == 1 {
-					m.connectTextInput.SetValue(m.connectTextInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+				if m.showAsk && m.askCustomQ >= 0 {
+					m.askCustomInput.SetValue(m.askCustomInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+					return m, nil
+				} else if m.showConnect {
+					switch m.connectStep {
+					case 1:
+						m.connectNameInput.SetValue(m.connectNameInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+					case 2:
+						m.connectTextInput.SetValue(m.connectTextInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+					case 3:
+						m.connectBaseURLInput.SetValue(m.connectBaseURLInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+					case 4:
+						// Models block is JSON — keep newlines.
+						m.connectModelsInput.InsertString(cleanClip)
+					}
 					return m, nil
 				} else if m.showModels {
 					m.modelsQuery += strings.ReplaceAll(cleanClip, "\n", "")
 					return m, nil
-				} else if !m.showConnect && !m.showModels && !m.showDebug && !m.showSessions {
+				} else if !m.showConnect && !m.showModels && !m.showDebug && !m.showSessions && !m.showAsk {
 					// Keep newlines: the prompt input is multi-line now.
 					m.promptInput.InsertString(cleanClip)
 					return m, nil
@@ -248,6 +558,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "tab", "shift+tab":
+			if m.showAsk {
+				if keyStr == "shift+tab" {
+					m.askNextQuestion(-1)
+				} else {
+					m.askNextQuestion(1)
+				}
+				return m, nil
+			}
 			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
 				if m.mode == "BUILDER" {
 					m.mode = "PLANNER"
@@ -259,6 +577,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
+			if m.showAsk {
+				if m.askCustomQ >= 0 {
+					m.askCustomQ = -1
+					m.askCustomInput.SetValue("")
+				} else {
+					m.skipAsk()
+				}
+				return m, nil
+			}
 			if m.showModels {
 				m.showModels = false
 				return m, nil
@@ -272,11 +599,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.showConnect {
-				if m.connectStep > 0 {
-					m.connectStep = 0
-				} else {
-					m.showConnect = false
-				}
+				m.connectPrev()
 				return m, nil
 			}
 
@@ -286,12 +609,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cancelTurn()
 					m.cancelTurn = nil
 				}
+				m.interrupted = true
+				m.activity = nil
 				m.status = "Ready"
 				m.messages = append(m.messages, "⚡ Interrupted turn execution.")
 				return m, nil
 			}
 
 		case "enter":
+			if m.showAsk {
+				if m.askCustomQ >= 0 {
+					m.askSaveCustom()
+				} else {
+					m.submitAsk()
+				}
+				return m, nil
+			}
+
 			if m.showModels {
 				m.applySelectedModel()
 				m.showModels = false
@@ -305,14 +639,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			if m.showConnect {
-				if m.connectStep == 0 {
-					m.connectStep = 1
-					m.connectTextInput.SetValue("")
-					m.connectTextInput.Focus()
-				} else {
-					m.applyConnectConfig()
-					m.showConnect = false
-				}
+				m.connectNext()
 				return m, nil
 			}
 
@@ -334,9 +661,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.messages = append(m.messages, "YOU:\n"+userQuery)
 			m.status = "Thinking..."
+			// Clear any stale streaming state from a previous interrupted turn.
+			m.streaming = false
+			m.pendingStream = ""
+			m.activity = nil
 
 			ctx, cancel := context.WithCancel(context.Background())
 			m.cancelTurn = cancel
+
+			m.engine.SetStreamHandler(func(delta string) {
+				if m.prog != nil {
+					m.prog.Send(streamChunkMsg(delta))
+				}
+			})
 
 			runTurnCmd := func() tea.Msg {
 				res, err := m.engine.RunTurn(ctx, userQuery, func(state loop.LoopState, info string) {
@@ -349,7 +686,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			return m, tea.Batch(runTurnCmd, tickCmd())
 
+		case "space":
+			if m.showAsk && m.askCustomQ < 0 {
+				m.askToggle()
+				return m, nil
+			}
+
+		case "pgup":
+			if m.showSessions {
+				m.sessionsViewport.PageUp()
+				return m, nil
+			}
+			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
+				m.logViewport.PageUp()
+				return m, nil
+			}
+
+		case "pgdown":
+			if m.showSessions {
+				m.sessionsViewport.PageDown()
+				return m, nil
+			}
+			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
+				m.logViewport.PageDown()
+				return m, nil
+			}
+
 		case "up":
+			if m.showAsk && m.askCustomQ < 0 {
+				m.askMove(-1)
+				return m, nil
+			}
 			if m.showModels && m.modelsSel > 0 {
 				m.modelsSel--
 				return m, nil
@@ -362,7 +729,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.connectProviderSel--
 				return m, nil
 			}
-			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !strings.Contains(m.promptInput.Value(), "\n") {
+			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showAsk && !strings.Contains(m.promptInput.Value(), "\n") {
 				if len(m.promptHistory) > 0 {
 					if m.historyIdx > 0 {
 						m.historyIdx--
@@ -373,6 +740,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down":
+			if m.showAsk && m.askCustomQ < 0 {
+				m.askMove(1)
+				return m, nil
+			}
 			if m.showModels {
 				items := m.getModelList()
 				if m.modelsSel < len(items)-1 {
@@ -384,11 +755,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionsSel++
 				return m, nil
 			}
-			if m.showConnect && m.connectStep == 0 && m.connectProviderSel < len(provider.BuiltinProviders)-1 {
+			if m.showConnect && m.connectStep == 0 && m.connectProviderSel < len(provider.BuiltinProviders) {
 				m.connectProviderSel++
 				return m, nil
 			}
-			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !strings.Contains(m.promptInput.Value(), "\n") {
+			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showAsk && !strings.Contains(m.promptInput.Value(), "\n") {
 				if len(m.promptHistory) > 0 {
 					if m.historyIdx < len(m.promptHistory)-1 {
 						m.historyIdx++
@@ -404,11 +775,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Update text inputs based on active mode
-	if m.showConnect && m.connectStep == 1 {
+	if m.showAsk && m.askCustomQ >= 0 {
 		var cmd tea.Cmd
-		m.connectTextInput, cmd = m.connectTextInput.Update(msg)
+		m.askCustomInput, cmd = m.askCustomInput.Update(msg)
 		cmds = append(cmds, cmd)
-	} else if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
+		m.refreshAskModal()
+	} else if m.showConnect {
+		switch m.connectStep {
+		case 1:
+			var cmd tea.Cmd
+			m.connectNameInput, cmd = m.connectNameInput.Update(msg)
+			cmds = append(cmds, cmd)
+		case 2:
+			var cmd tea.Cmd
+			m.connectTextInput, cmd = m.connectTextInput.Update(msg)
+			cmds = append(cmds, cmd)
+		case 3:
+			var cmd tea.Cmd
+			m.connectBaseURLInput, cmd = m.connectBaseURLInput.Update(msg)
+			cmds = append(cmds, cmd)
+		case 4:
+			var cmd tea.Cmd
+			m.connectModelsInput, cmd = m.connectModelsInput.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+	} else if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showAsk {
 		var cmd tea.Cmd
 		m.promptInput, cmd = m.promptInput.Update(msg)
 		cmds = append(cmds, cmd)
@@ -421,14 +812,36 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.messages = append(m.messages, "📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen")
+		m.messages = append(m.messages, "📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen")
+
+	case "/lsp":
+		m.messages = append(m.messages, m.lspStatus())
+
+	case "/mcp":
+		m.messages = append(m.messages, m.mcpStatus())
+
+	case "/mcp-reload":
+		if m.mcpMgr != nil {
+			m.mcpMgr.Close()
+			m.mcpMgr.LoadDefaults()
+			m.mcpMgr.Start(context.Background())
+			for _, mt := range m.mcpMgr.Tools() {
+				m.tools.Register(mt)
+			}
+			m.rebuildEngine()
+			m.messages = append(m.messages, m.mcpStatus())
+		} else {
+			m.messages = append(m.messages, "⚠️ MCP manager not initialized.")
+		}
 
 	case "/sessions", "/history":
 		if st := m.context.Store(); st != nil {
-			cwd, _ := os.Getwd()
-			if list, err := st.ListSessionsByProjectPath(cwd); err == nil {
+			// Show ALL sessions (any project) so /history never hides older
+			// conversations; each row already shows its project name.
+			if list, err := st.ListSessions(); err == nil {
 				m.sessionList = list
 				m.sessionsSel = 0
+				m.sessionsViewport.GotoTop()
 				m.showSessions = true
 			} else {
 				m.messages = append(m.messages, "❌ Failed to list sessions: "+err.Error())
@@ -445,7 +858,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			_ = st.CreateSession(newSessID, cwd)
 		}
 		m.context = bcontext.NewManager(newSessID, st, 128000)
-		m.engine = loop.NewEngine(m.adapter, m.tools, m.context, m.activeModel)
+		m.rebuildEngine()
 		m.messages = []string{fmt.Sprintf("✅ Started new session: %s", newSessID)}
 
 	case "/models":
@@ -461,6 +874,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		} else {
 			m.showConnect = true
 			m.connectStep = 0
+			m.connectCustom = false
 			m.connectTextInput.SetValue("")
 			m.connectProviderSel = 0
 		}
@@ -482,13 +896,70 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			} else {
 				m.activeModel = target
 				m.messages = append(m.messages, fmt.Sprintf("✅ Model switched to %s", m.activeModel))
-				m.engine = loop.NewEngine(m.adapter, m.tools, m.context, m.activeModel)
+				m.rebuildEngine()
 			}
 		} else {
 			m.messages = append(m.messages, "Usage: /model <provider>/<model> or /model <model_name>")
 		}
 	}
-	return *m, nil
+	return m, nil
+}
+
+// lspStatus renders the code intelligence status: which language servers are
+// installed and can be used by the lsp_* tools.
+func (m *Model) lspStatus() string {
+	if m.lspMgr == nil {
+		return "ℹ️ LSP not initialized."
+	}
+	langs := map[string]string{
+		"go":         "gopls",
+		"typescript": "typescript-language-server",
+		"python":     "pyright-langserver",
+		"rust":       "rust-analyzer",
+		"c":          "clangd",
+		"cpp":        "clangd",
+	}
+	var sb strings.Builder
+	sb.WriteString("🧠 LSP code intelligence (lsp_definition, lsp_references, lsp_hover, lsp_diagnostics)\n")
+	for lang, bin := range langs {
+		_, err := exec.LookPath(bin)
+		if err == nil {
+			sb.WriteString(fmt.Sprintf("  ✅ %-12s %s\n", lang, bin))
+		} else {
+			sb.WriteString(fmt.Sprintf("  ❌ %-12s %s (not installed)\n", lang, bin))
+		}
+	}
+	sb.WriteString("\nInstall e.g. gopls: go install golang.org/x/tools/gopls@latest\nInstall tsserver: npm i -g typescript-language-server typescript\nThe model falls back to grep/glob/read_file when a server is missing.")
+	return sb.String()
+}
+
+// mcpStatus renders a readable status of connected MCP servers and tools.
+func (m *Model) mcpStatus() string {
+	if m.mcpMgr == nil {
+		return "⚠️ MCP not initialized."
+	}
+	names := m.mcpMgr.ServerNames()
+	if len(names) == 0 {
+		return "ℹ️ No MCP servers configured.\n\nCreate a `.mcp.json` in the project root or `~/.config/brocode/mcp.json` (same format as Claude/Cursor):\n```json\n{\"mcpServers\": {\"my-server\": {\"command\": \"npx\", \"args\": [\"-y\", \"pkg\"]}}}\n```\nThen run `/mcp-reload` to connect."
+	}
+
+	errs := m.mcpMgr.Errors()
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🔌 MCP: %d server(s), %d tool(s)\n", len(names), len(m.mcpMgr.Tools())))
+	toolNames := make(map[string][]string)
+	for _, t := range m.mcpMgr.Tools() {
+		toolNames[t.Server()] = append(toolNames[t.Server()], t.ToolName())
+	}
+	for _, n := range names {
+		if e := errs[n]; e != "" {
+			sb.WriteString(fmt.Sprintf("❌ %s — %s\n", n, e))
+			continue
+		}
+		ts := toolNames[n]
+		sort.Strings(ts)
+		sb.WriteString(fmt.Sprintf("✅ %s — %d tool(s): %s\n", n, len(ts), strings.Join(ts, ", ")))
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func (m *Model) applySelectedSession() {
@@ -500,20 +971,31 @@ func (m *Model) applySelectedSession() {
 		// Load past events into context and message log
 		m.messages = []string{fmt.Sprintf("✅ Switched to session: %s", targetSess.ID)}
 		if st != nil {
+			// Purge history duplicated by old resume logic before restoring.
+			if removed, err := st.CleanupReplayDuplicates(targetSess.ID); err == nil && removed > 0 {
+				m.messages = append(m.messages, fmt.Sprintf("⚡ Purged %d duplicated history events", removed))
+			}
 			if events, err := st.GetSessionEvents(targetSess.ID); err == nil {
 				for _, ev := range events {
 					text := bcontext.ExtractEventContent(ev.PayloadJSON)
 					if ev.Type == "user_msg" {
-						_ = m.context.AppendUserMessage(text)
+						// Import into memory without re-persisting, so switching
+						// sessions never duplicates history in the store.
+						m.context.ImportUserMessage(text)
 						m.messages = append(m.messages, "YOU:\n"+text)
 					} else if ev.Type == "assistant_msg" {
-						_ = m.context.AppendAssistantTurn("", text, nil)
+						m.context.ImportAssistantTurn("", text, nil)
 						m.messages = append(m.messages, "BROCODE:\n"+text)
 					}
 				}
 			}
 		}
-		m.engine = loop.NewEngine(m.adapter, m.tools, m.context, m.activeModel)
+		// Invalidate the rendered-log cache so the viewport re-renders with the
+		// freshly loaded session history instead of showing stale content.
+		m.renderedLog = ""
+		m.renderedKey = ""
+		m.logViewport.SetYOffset(0)
+		m.rebuildEngine()
 	}
 }
 
@@ -563,6 +1045,7 @@ func (m *Model) saveProviderKey(pID, apiKey string) {
 		APIKeyEnv: targetProvider.APIKeyEnvVar,
 		APIKey:    apiKey,
 		Models:    targetProvider.DefaultModels,
+		ModelMap:  nil,
 	}
 
 	if err := provider.SaveGlobalConfig(m.cfg); err != nil {
@@ -577,15 +1060,155 @@ func (m *Model) saveProviderKey(pID, apiKey string) {
 	m.switchProviderAndModel(pID, targetProvider.DefaultModels[0])
 }
 
+// connectNext advances the connect wizard one step (or saves on the last).
+//
+// Flow:
+//   - Custom provider: name → API key → base URL → models (multi-step)
+//   - Built-in provider: API key only (single step) — base URL/models are
+//     not forced, matching the provider's known defaults.
+func (m *Model) connectNext() {
+	switch m.connectStep {
+	case 0:
+		if m.connectProviderSel >= len(provider.BuiltinProviders) {
+			// Custom provider: full multi-step wizard.
+			m.connectCustom = true
+			m.connectStep = 1
+			m.connectNameInput.SetValue("")
+			m.connectNameInput.Focus()
+		} else {
+			// Built-in provider: only the API key is needed.
+			m.connectCustom = false
+			p := provider.BuiltinProviders[m.connectProviderSel]
+			m.connectTextInput.SetValue("")
+			m.connectBaseURLInput.SetValue(p.DefaultBaseURL)
+			m.connectStep = 1
+			m.connectTextInput.Focus()
+		}
+	case 1:
+		if m.connectCustom {
+			m.connectTextInput.SetValue("")
+			m.connectStep = 2
+			m.connectTextInput.Focus()
+		} else {
+			// Built-in: single step, save immediately.
+			m.applyConnectConfig()
+			m.showConnect = false
+		}
+	case 2:
+		m.connectStep = 3
+		m.connectBaseURLInput.Focus()
+	case 3:
+		m.connectModelsInput.SetValue("")
+		m.connectStep = 4
+		m.connectModelsInput.Focus()
+	case 4:
+		m.applyConnectConfig()
+		m.showConnect = false
+	}
+}
+
+// connectPrev steps the wizard back one step (or closes it at step 0).
+func (m *Model) connectPrev() {
+	if m.connectStep == 0 {
+		m.showConnect = false
+		return
+	}
+	m.connectStep--
+	switch m.connectStep {
+	case 1:
+		if m.connectCustom {
+			m.connectNameInput.Focus()
+		} else {
+			// Built-in: step 1 (API key) goes back to provider pick.
+			m.connectTextInput.Blur()
+		}
+	case 2:
+		m.connectTextInput.Focus()
+	case 3:
+		m.connectBaseURLInput.Focus()
+	case 4:
+		m.connectModelsInput.Focus()
+	}
+}
+
+// applyConnectConfig saves the completed wizard form as a provider config and
+// switches the active provider/model to it.
 func (m *Model) applyConnectConfig() {
+	if m.connectCustom {
+		m.saveCustomProvider()
+		return
+	}
 	if m.connectProviderSel < 0 || m.connectProviderSel >= len(provider.BuiltinProviders) {
 		return
 	}
 	p := provider.BuiltinProviders[m.connectProviderSel]
 	keyVal := strings.TrimSpace(m.connectTextInput.Value())
-	if keyVal != "" {
-		m.saveProviderKey(p.ID, keyVal)
+	baseURL := strings.TrimSpace(m.connectBaseURLInput.Value())
+	if keyVal == "" && (baseURL == "" || baseURL == p.DefaultBaseURL) {
+		m.messages = append(m.messages, "⚠️ Nothing to save — API key is empty.")
+		return
 	}
+	m.saveProviderConfig(p.ID, p, keyVal, baseURL, nil, nil)
+}
+
+// saveCustomProvider persists a brand-new custom provider from wizard fields.
+func (m *Model) saveCustomProvider() {
+	pID := strings.TrimSpace(m.connectNameInput.Value())
+	if pID == "" {
+		m.messages = append(m.messages, "❌ Provider name is required.")
+		return
+	}
+	pID = strings.ToLower(strings.ReplaceAll(pID, " ", "-"))
+
+	keyVal := strings.TrimSpace(m.connectTextInput.Value())
+	baseURL := strings.TrimSpace(m.connectBaseURLInput.Value())
+	if baseURL == "" {
+		m.messages = append(m.messages, "❌ Base URL is required for a custom provider.")
+		return
+	}
+
+	modelIDs, modelMap, err := provider.ParseModelJSON(m.connectModelsInput.Value())
+	if err != nil {
+		m.messages = append(m.messages, "❌ Models JSON invalid: "+err.Error())
+		return
+	}
+
+	info := provider.ProviderInfo{
+		ID:             pID,
+		Name:           pID + " (Custom)",
+		Protocol:       "openai-compatible",
+		DefaultBaseURL: baseURL,
+		DefaultModels:  modelIDs,
+	}
+	m.saveProviderConfig(pID, info, keyVal, baseURL, modelIDs, modelMap)
+}
+
+// saveProviderConfig writes a provider into the global config and switches to it.
+func (m *Model) saveProviderConfig(pID string, info provider.ProviderInfo, keyVal, baseURL string, modelIDs []string, modelMap map[string]provider.CustomModel) {
+	if m.cfg.Providers == nil {
+		m.cfg.Providers = make(map[string]provider.CustomProviderConfig)
+	}
+
+	m.cfg.Providers[pID] = provider.CustomProviderConfig{
+		Protocol: info.Protocol,
+		BaseURL:  baseURL,
+		APIKey:   keyVal,
+		Models:   modelIDs,
+		ModelMap: modelMap,
+	}
+
+	if err := provider.SaveGlobalConfig(m.cfg); err != nil {
+		m.messages = append(m.messages, fmt.Sprintf("❌ Failed to save config: %v", err))
+		return
+	}
+
+	m.modelOptions = provider.DiscoverModels(m.cfg)
+	model := "default"
+	if len(info.DefaultModels) > 0 {
+		model = info.DefaultModels[0]
+	}
+	m.switchProviderAndModel(pID, model)
+	m.messages = append(m.messages, fmt.Sprintf("✅ Provider %s saved to ~/.config/brocode/config.json!", pID))
 }
 
 type modelOptionItem struct {
@@ -633,8 +1256,7 @@ func (m *Model) switchProviderAndModel(pID, modelName string) {
 			} else {
 				m.adapter = provider.NewOpenAIAdapter(d.Info.DefaultBaseURL, d.APIKey)
 			}
-			m.engine = loop.NewEngine(m.adapter, m.tools, m.context, m.activeModel)
-			m.engine.SetMode(m.mode)
+			m.rebuildEngine()
 			m.messages = append(m.messages, fmt.Sprintf("✅ Active model set & saved: %s/%s", pID, modelName))
 			return
 		}
@@ -653,9 +1275,11 @@ func (m *Model) applySelectedModel() {
 	}
 }
 
-func (m Model) View() tea.View {
+func (m *Model) View() tea.View {
 	var content string
-	if m.showModels {
+	if m.showAsk {
+		content = m.renderAskModal()
+	} else if m.showModels {
 		content = m.renderModelsModal()
 	} else if m.showSessions {
 		content = m.renderSessionsModal()
@@ -666,18 +1290,58 @@ func (m Model) View() tea.View {
 	} else {
 		var sb strings.Builder
 
-		// Message Log — wrap every message to the terminal width so long
-		// lines fold inside the frame instead of breaking through it.
+		// Message Log — scrolls inside a viewport; the formatted log is cached
+		// so markdown only re-renders when a message actually changes.
 		contentWidth := m.width - 4
-		for _, msg := range m.messages {
-			sb.WriteString(formatMessage(msg, contentWidth) + "\n\n")
+		if contentWidth < 0 {
+			contentWidth = 0
+		}
+		log := m.buildLog(contentWidth)
+		if m.width > 0 {
+			h := m.updateLogHeight()
+			if m.streaming {
+				if log != m.renderedLog {
+					m.logViewport.SetContent(log)
+					m.logViewport.GotoBottom()
+					m.renderedLog = log
+				}
+			} else if key := m.logKey(); key != m.renderedKey || h != m.renderedH {
+				m.logViewport.SetContent(log)
+				// Park the scroll at the user's own prompt so it never silently
+				// disappears from the history after a long answer scrolls past it
+				// — or when the viewport shrinks because the live activity slot
+				// grew while a turn is running.
+				// lastUserLine == 0 is a VALID position (prompt is the first
+				// rendered line), so use an explicit found-flag, not "> 0".
+				if m.foundUserLine {
+					m.parkAtUserPrompt()
+				} else {
+					m.logViewport.GotoBottom()
+				}
+				m.renderedLog = log
+				m.renderedKey = key
+				m.renderedH = h
+			}
+			sb.WriteString(m.logViewport.View())
+		} else {
+			sb.WriteString(log)
 		}
 
-		// Live Bottom Status Spinner Indicator (when thinking/acting/verifying)
+		// Live agent activity slot: spinner + current step + the last few tool
+		// calls, rendered ABOVE the input. Activity is transient — it never
+		// enters the conversation history (that's what made process rows pile
+		// up above the answer and hide the user's prompt).
 		if m.status != "Ready" && m.status != "Failed" {
 			spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 			frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
-			sb.WriteString(spinnerStyle.Render(frame+" "+m.status) + "\n\n")
+			sb.WriteString(spinnerStyle.Render(frame+" "+m.status) + "\n")
+			actStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
+			for _, act := range m.activity {
+				sb.WriteString(actStyle.Render("  · "+act) + "\n")
+			}
+			sb.WriteString("\n")
+		} else {
+			sb.WriteString("\n\n")
 		}
 
 		// Input Box (Borderless & Minimalist, multi-line textarea that grows)
@@ -709,11 +1373,22 @@ func (m Model) View() tea.View {
 		}
 		tokensStr := fmt.Sprintf("Tokens: %d/%dk", m.context.TotalTokens(), m.context.MaxWindow()/1000)
 
-		footerBanner := fmt.Sprintf(" BROCODE CLI | Mode: %s | Provider: %s | Model: %s | Session: %s | %s ",
-			modeBadgeStyle.Render(m.mode+" (Shift+Tab)"), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr))
+		// Live LSP indicator: count of available language servers (binary on
+		// PATH) with a colored badge — teal when at least one is usable.
+		lspBadge := ""
+		if m.lspMgr != nil {
+			n := len(m.lspMgr.AvailableServers())
+			if n > 0 {
+				lspStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86"))
+				lspBadge = " | " + lspStyle.Render(fmt.Sprintf("🧠 LSP:%d", n))
+			}
+		}
+
+		footerBanner := fmt.Sprintf(" BROCODE🔥 | Mode: %s | Provider: %s | Model: %s | Session: %s | %s%s ",
+			modeBadgeStyle.Render(m.mode+" (Shift+Tab)"), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
 
 		sb.WriteString(bannerStyle.Render(footerBanner) + "\n")
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(" ENTER send · Alt+Enter newline · Tab/Shift+Tab mode · ↑/↓ history · /sessions · /models · /help "))
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(" ENTER send · Alt+Enter newline · Tab/Shift+Tab mode · ↑/↓ history · PgUp/PgDn scroll · /sessions · /models · /lsp · /help "))
 		content = sb.String()
 	}
 
@@ -721,9 +1396,98 @@ func (m Model) View() tea.View {
 	return v
 }
 
-func (m Model) renderSessionsModal() string {
+// buildLog renders the message history + live streaming block. It also
+// records the rendered line where the last user message starts, so the view
+// can park the scroll position there after a turn completes (the user's own
+// prompt must never silently disappear from the history).
+func (m *Model) buildLog(contentWidth int) string {
 	var sb strings.Builder
-	sb.WriteString("=== Session Manager (/sessions, /history) ===\n\n")
+	line := 0
+	m.lastUserLine = 0
+	m.foundUserLine = false
+	for _, msg := range m.messages {
+		isUser := strings.HasPrefix(msg, "YOU:\n") || strings.HasPrefix(msg, "👤 ")
+		if isUser {
+			m.lastUserLine = line
+			m.foundUserLine = true
+		}
+		rendered := formatMessage(msg, contentWidth)
+		sb.WriteString(rendered + "\n\n")
+		line += strings.Count(rendered, "\n") + 3 // rendered lines + blank separator
+	}
+	if m.streaming && m.pendingStream != "" {
+		label := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("BROCODE")
+		bar := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("205")).Padding(0, 1)
+		if contentWidth > 0 {
+			bar = bar.Width(contentWidth)
+		}
+		sb.WriteString(bar.Render(label+"\n"+m.pendingStream) + "\n\n")
+	}
+	return sb.String()
+}
+
+// lastAssistantReasoning returns the reasoning text of the most recent
+// assistant turn stored in the context manager (used to show thinking).
+func (m *Model) lastAssistantReasoning() string {
+	msgs := m.context.Messages()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" && msgs[i].Reasoning != "" {
+			return msgs[i].Reasoning
+		}
+	}
+	return ""
+}
+
+// logKey is a cheap fingerprint of the message list (count + last message) so
+// the cache only invalidates when the history actually changes.
+func (m *Model) logKey() string {
+	if len(m.messages) == 0 {
+		return "0|"
+	}
+	return fmt.Sprintf("%d|%s", len(m.messages), m.messages[len(m.messages)-1])
+}
+
+// updateLogHeight fits the log viewport between the status slot, the (dynamic
+// height) input, and the footer so the terminal never scrolls the history.
+// Returns the computed height so View() can re-park when it changes.
+func (m *Model) updateLogHeight() int {
+	taH := m.promptInput.Height()
+	if taH < 1 {
+		taH = 1
+	}
+	// Reserve room for the live activity slot (spinner + up to 5 steps) while
+	// a turn is running, plus the input, banner and hint.
+	actH := 0
+	if m.status != "Ready" && m.status != "Failed" && len(m.activity) > 0 {
+		actH = len(m.activity)
+	}
+	h := m.height - taH - 5 - actH
+	if h < 3 {
+		h = 3
+	}
+	if h != m.logViewport.Height() {
+		m.logViewport.SetHeight(h)
+	}
+	return h
+}
+
+// parkAtUserPrompt sets the log scroll so the user's last prompt stays
+// visible. SetYOffset clamps to the viewport's max offset, so when the content
+// is short the viewport lands at the bottom (prompt visible); when a long
+// answer scrolls past it the offset stays at the prompt line.
+func (m *Model) parkAtUserPrompt() {
+	if !m.foundUserLine {
+		m.logViewport.GotoBottom()
+		return
+	}
+	m.logViewport.SetYOffset(m.lastUserLine)
+}
+
+func (m *Model) renderSessionsModal() string {
+	// Build the session list inside a scrollable viewport so long histories
+	// never overflow the terminal (previously /history silently cut off the
+	// older sessions).
+	var sb strings.Builder
 
 	greenBadge := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
 	activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
@@ -753,8 +1517,24 @@ func (m Model) renderSessionsModal() string {
 		}
 	}
 
-	sb.WriteString("\n[↑/↓ navigate · ENTER switch session · /new create clean session · ESC close]")
-	return lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2).Render(sb.String())
+	sb.WriteString("\n[↑/↓ navigate · ENTER switch session · PgUp/PgDn scroll · /new create clean session · ESC close]")
+
+	body := sb.String()
+	// NOTE: do not GotoTop here — that would reset the user's manual scroll
+	// on every key press. Scroll position is reset when the modal opens.
+	m.sessionsViewport.SetContent(body)
+	h := m.height - 4
+	if h < 6 {
+		h = 6
+	}
+	m.sessionsViewport.SetHeight(h)
+	w := m.width - 8
+	if w < 10 {
+		w = 10
+	}
+	m.sessionsViewport.SetWidth(w)
+
+	return lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2).Render(m.sessionsViewport.View())
 }
 
 func (m Model) renderModelsModal() string {
@@ -799,9 +1579,13 @@ func (m Model) renderConnectModal() string {
 	sb.WriteString("=== Connect LLM Provider (/connect) ===\n\n")
 
 	greenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	stepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Bold(true)
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
-	if m.connectStep == 0 {
-		sb.WriteString("Step 1/2: Select Provider to Connect:\n\n")
+	switch m.connectStep {
+	case 0:
+		sb.WriteString(stepStyle.Render("Step 1 — Select Provider") + "\n\n")
 		for i, p := range provider.BuiltinProviders {
 			cursor := "  "
 			if i == m.connectProviderSel {
@@ -817,13 +1601,51 @@ func (m Model) renderConnectModal() string {
 
 			sb.WriteString(fmt.Sprintf("%s %-25s (ID: %s)%s\n", cursor, p.Name, p.ID, badge))
 		}
-		sb.WriteString("\n[↑/↓ navigate · ENTER select provider · ESC cancel]")
-	} else {
-		target := provider.BuiltinProviders[m.connectProviderSel]
-		sb.WriteString(fmt.Sprintf("Step 2/2: Enter API Key for %s (%s):\n\n", target.Name, target.ID))
+		// Custom entry at the end of the list
+		cursor := "  "
+		if m.connectProviderSel == len(provider.BuiltinProviders) {
+			cursor = "❯ "
+		}
+		sb.WriteString(fmt.Sprintf("%s %-25s\n", cursor, "✨ Custom Provider..."))
+		sb.WriteString("\n" + hintStyle.Render("[↑/↓ navigate · ENTER select · ESC cancel]"))
 
-		sb.WriteString("  API Key: " + m.connectTextInput.View() + "\n\n")
-		sb.WriteString("[Type or paste API Key (Cmd+V, Ctrl+V, or terminal paste supported) · ENTER save · ESC back]")
+	case 1:
+		if m.connectCustom {
+			sb.WriteString(stepStyle.Render("Step 2/5 — Custom Provider Name") + "\n\n")
+			sb.WriteString(labelStyle.Render("Provider ID (lowercase, no spaces):") + "\n\n")
+			sb.WriteString("  " + m.connectNameInput.View() + "\n\n")
+			sb.WriteString(hintStyle.Render("[Type provider ID e.g. 9router · ENTER next · ESC back]"))
+		} else {
+			target := "Custom Provider"
+			if m.connectProviderSel < len(provider.BuiltinProviders) {
+				target = provider.BuiltinProviders[m.connectProviderSel].Name
+			}
+			sb.WriteString(stepStyle.Render("Step 2/2 — API Key") + "\n\n")
+			sb.WriteString(labelStyle.Render("API Key for "+target+":") + "\n\n")
+			sb.WriteString("  " + m.connectTextInput.View() + "\n\n")
+			sb.WriteString(hintStyle.Render("[Type or paste API Key (Ctrl+V supported) · ENTER save · ESC back]"))
+		}
+
+	case 2:
+		sb.WriteString(stepStyle.Render("Step 3/5 — API Key") + "\n\n")
+		sb.WriteString(labelStyle.Render("API Key (leave empty if none):") + "\n\n")
+		sb.WriteString("  " + m.connectTextInput.View() + "\n\n")
+		sb.WriteString(hintStyle.Render("[Type or paste API Key (Ctrl+V supported) · ENTER next · ESC back]"))
+
+	case 3:
+		sb.WriteString(stepStyle.Render("Step 4/5 — Base URL") + "\n\n")
+		sb.WriteString(labelStyle.Render("API Base URL (OpenAI-compatible /v1 endpoint):") + "\n\n")
+		sb.WriteString("  " + m.connectBaseURLInput.View() + "\n\n")
+		sb.WriteString(hintStyle.Render("[e.g. https://9router.rosyidrid.com/v1 · ENTER next · ESC back]"))
+
+	case 4:
+		sb.WriteString(stepStyle.Render("Step 5/5 — Models (optional)") + "\n\n")
+		sb.WriteString(labelStyle.Render("Models JSON (can be more than 1):") + "\n\n")
+		sb.WriteString("  " + m.connectModelsInput.View() + "\n\n")
+		sb.WriteString(hintStyle.Render("[" +
+			"{\"model-a\":{\"name\":\"Model A\",\"limit\":{\"context\":1048576,\"output\":32768}}} " +
+			"or [\"model-a\",\"model-b\"]" +
+			" · ENTER save · ESC back]"))
 	}
 
 	return lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2).Render(sb.String())
@@ -872,6 +1694,28 @@ func formatDiffLines(text string) string {
 
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
+// isStatusLine reports whether a trimmed line looks like an OpenCode CLI
+// status header (spinner frames, "build · model" banners, prompt prefixes)
+// that must be stripped from the answer.
+func isStatusLine(trimmed string) bool {
+	if trimmed == "" || trimmed == "[0m" || trimmed == "[?25l" || trimmed == "[?25h" {
+		return true
+	}
+	// "build · <model>" banner can appear with various prefixes (>, │, |, •).
+	if strings.Contains(trimmed, "build ·") || strings.Contains(trimmed, "build •") || strings.Contains(trimmed, "build·") {
+		return true
+	}
+	// OpenCode spinner frames and status prefixes. Plain ASCII "|" is NOT a
+	// status prefix — markdown tables start with it — only the box-drawing
+	// variants and spinner glyphs are.
+	for _, p := range []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "❯", "→", "├", "│", "┃", "⬢"} {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func sanitizeLLMOutput(content string) string {
 	content = ansiRegex.ReplaceAllString(content, "")
 
@@ -882,7 +1726,8 @@ func sanitizeLLMOutput(content string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if skippingHeader {
-			if strings.Contains(trimmed, "build ·") || strings.HasPrefix(trimmed, "> build") || strings.HasPrefix(trimmed, "│ build") || trimmed == "[0m" || trimmed == "" {
+			// Skip consecutive status lines until the first real content line.
+			if isStatusLine(trimmed) {
 				continue
 			}
 			skippingHeader = false
@@ -898,10 +1743,12 @@ func sanitizeLLMOutput(content string) string {
 
 func formatMessage(msg string, width int) string {
 	userLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-	userBarStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("86")).Padding(0, 1)
+	userBarStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("86")).Padding(1, 2)
 
 	botLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	botBarStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("205")).Padding(0, 1)
+	botBarStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("205")).Padding(1, 2)
+
+	thinkingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true)
 
 	processLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	processBarStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
@@ -932,11 +1779,35 @@ func formatMessage(msg string, width int) string {
 		content := strings.TrimPrefix(strings.TrimPrefix(msg, "BROCODE:\n"), "🤖 ")
 		content = sanitizeLLMOutput(content)
 
-		formattedContent := renderMarkdown(content)
-		if strings.Contains(formattedContent, "--- ") || strings.Contains(formattedContent, "+++ ") || strings.Contains(formattedContent, "@@ ") {
-			formattedContent = formatDiffLines(formattedContent)
+		// A "💭 " prefix carries the model's reasoning (thinking). Render it
+		// dimmed and italic above the actual answer so the agent's deliberation
+		// is visible, like opencode's thinking block.
+		body := content
+		var thinking string
+		if strings.HasPrefix(body, "💭 ") {
+			if idx := strings.Index(body, "\n\n"); idx >= 0 {
+				thinking = body[:idx]
+				body = body[idx+2:]
+			}
 		}
-		return botBarStyle.Render(botLabelStyle.Render("BROCODE") + "\n" + formattedContent)
+
+		// Wrap markdown to the actual content width (border 1 + padding 2×2 are
+		// consumed by the box), so lines use the full terminal instead of a
+		// hardcoded 90 columns.
+		wrap := width - 5
+		if wrap < 40 {
+			wrap = 90
+		}
+		formattedBody := renderMarkdown(body, wrap)
+		if strings.Contains(formattedBody, "--- ") || strings.Contains(formattedBody, "+++ ") || strings.Contains(formattedBody, "@@ ") {
+			formattedBody = formatDiffLines(formattedBody)
+		}
+
+		if thinking != "" {
+			return botBarStyle.Render(botLabelStyle.Render("BROCODE") + "\n" +
+				thinkingStyle.Render(thinking) + "\n\n" + formattedBody)
+		}
+		return botBarStyle.Render(botLabelStyle.Render("BROCODE") + "\n" + formattedBody)
 	}
 
 	if strings.HasPrefix(msg, "ERROR: ") || strings.HasPrefix(msg, "❌ ") {

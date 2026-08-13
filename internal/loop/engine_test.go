@@ -2,6 +2,8 @@ package loop
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
@@ -11,6 +13,14 @@ import (
 
 type mockAdapter struct {
 	toolCalls []provider.ToolCall
+}
+
+type failAdapter struct {
+	err error
+}
+
+func (m *failAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	return nil, m.err
 }
 
 func (m *mockAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
@@ -69,5 +79,227 @@ func TestPlannerModeToolGuard(t *testing.T) {
 	}
 	if !foundBashGuard {
 		t.Errorf("bash tool call was not blocked by PLANNER guard")
+	}
+}
+
+func TestAskUserToolFlow(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	var asked []tool.AskQuestion
+	askTool := tools.Lookup("ask_user").(*tool.AskUserTool)
+	askTool.Ask = func(_ context.Context, qs []tool.AskQuestion) ([]tool.AskResult, error) {
+		asked = qs
+		return []tool.AskResult{{Question: qs[0].Question, Answers: []string{"PostgreSQL"}}}, nil
+	}
+
+	adapter := &mockAdapter{
+		toolCalls: []provider.ToolCall{
+			{ID: "tc_ask", Name: "ask_user", Arguments: `{"questions":[{"question":"Which database?","options":["SQLite","PostgreSQL"]}]}`},
+		},
+	}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	res, err := engine.RunTurn(context.Background(), "set up a database", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if res != "Done testing" {
+		t.Errorf("unexpected final answer: %s", res)
+	}
+	if len(asked) != 1 || asked[0].Question != "Which database?" {
+		t.Errorf("ask handler not called with expected questions: %+v", asked)
+	}
+
+	// The answers must land in the context so the model sees them on the next loop iteration.
+	found := false
+	for _, msg := range ctxMgr.Messages() {
+		if strings.Contains(msg.Content, "PostgreSQL") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected user answer to be present in context after ask_user")
+	}
+}
+
+func TestPermissionGateFlow(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	// Approve gated commands once when asked.
+	tools.SetUserAskHandler(func(_ context.Context, qs []tool.AskQuestion) ([]tool.AskResult, error) {
+		return []tool.AskResult{{Question: qs[0].Question, Answers: []string{"✅ Allow once"}}}, nil
+	})
+
+	adapter := &mockAdapter{
+		toolCalls: []provider.ToolCall{
+			{ID: "tc_rm", Name: "bash", Arguments: `{"command":"rm -rf /"}`},
+			{ID: "tc_chmod", Name: "bash", Arguments: `{"command":"chmod +x fake.sh"}`},
+		},
+	}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	if _, err := engine.RunTurn(context.Background(), "test", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+
+	denied := false
+	run := false
+	for _, msg := range ctxMgr.Messages() {
+		if msg.ToolCallID == "tc_rm" && strings.Contains(msg.Content, "PERMISSION DENIED") {
+			denied = true
+		}
+		if msg.ToolCallID == "tc_chmod" && strings.Contains(msg.Content, "Command") {
+			run = true
+		}
+	}
+	if !denied {
+		t.Error("rm -rf / should have been hard-denied by the permission gate")
+	}
+	if !run {
+		t.Error("approved gated command should have executed")
+	}
+}
+
+func TestEngineFallbackOnPrimaryFailure(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	engine := NewEngine(&failAdapter{err: fmt.Errorf("provider down")}, tools, ctxMgr, "primary-model")
+	engine.AddFallback(Fallback{Adapter: &mockAdapter{}, Model: "fallback-model"})
+
+	res, err := engine.RunTurn(context.Background(), "hello", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if res != "Done testing" {
+		t.Errorf("expected fallback model answer, got %q", res)
+	}
+}
+
+// repeatingAdapter always returns the SAME tool call, simulating a model that
+// is stuck in a loop (re-running grep on the same file forever).
+type repeatingAdapter struct {
+	calls int
+}
+
+func (m *repeatingAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	m.calls++
+	return &provider.CompletionResponse{
+		Reasoning: "spinning",
+		ToolCalls: []provider.ToolCall{
+			{ID: "tc", Name: "grep", Arguments: `{"pattern":"filter"}`},
+		},
+	}, nil
+}
+
+// TestEngineLoopGuard ensures a model that repeats the exact same tool call is
+// stopped: the loop must terminate with an answer (or error) instead of
+// spinning through every iteration.
+func TestEngineLoopGuard(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &repeatingAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.maxIterations = 25
+
+	res, err := engine.RunTurn(context.Background(), "explore the filter code", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+
+	// The loop guard should have stopped the repetition long before hitting
+	// the iteration cap (maxIterations=25).
+	if adapter.calls >= 15 {
+		t.Fatalf("loop guard did not stop repetition: %d completions ran", adapter.calls)
+	}
+
+	// The turn must abort with a clear message instead of spinning forever.
+	if !strings.Contains(res, "Turn aborted") {
+		t.Errorf("expected loop-guard abort message, got %q", res)
+	}
+	if engine.State() != StateBlocked {
+		t.Errorf("expected StateBlocked after loop guard, got %v", engine.State())
+	}
+}
+
+// toolOnlyAdapter always returns tool calls (never an answer), simulating a
+// model that explores forever without producing a final response.
+type toolOnlyAdapter struct {
+	calls int
+}
+
+func (m *toolOnlyAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	m.calls++
+	return &provider.CompletionResponse{
+		Reasoning: "exploring",
+		ToolCalls: []provider.ToolCall{
+			{ID: "tc", Name: "grep", Arguments: fmt.Sprintf(`{"pattern":"filter%d"}`, m.calls)},
+		},
+	}, nil
+}
+
+// TestEngineToolBudget ensures a model that calls tools but never writes an
+// answer is stopped at the tool-only budget instead of burning all 25
+// iterations.
+func TestEngineToolBudget(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &toolOnlyAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	res, err := engine.RunTurn(context.Background(), "explore", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	// Budget is 20 tool rounds; the 2 reminder rounds and the abort round do
+	// not call the adapter (they only inject messages / return).
+	if adapter.calls != maxToolOnlyRounds {
+		t.Fatalf("tool budget cut off at %d completions, want %d", adapter.calls, maxToolOnlyRounds)
+	}
+	if !strings.Contains(res, "Turn aborted") {
+		t.Errorf("expected tool-budget abort message, got %q", res)
+	}
+	if engine.State() != StateBlocked {
+		t.Errorf("expected StateBlocked, got %v", engine.State())
+	}
+}
+
+// TestEngineToolBudgetResetsAfterAnswer ensures a model that explores for a
+// few rounds then answers is NOT cut off.
+func TestEngineToolBudgetResetsAfterAnswer(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	// mockAdapter emits toolCalls once, then answers — well under the budget.
+	adapter := &mockAdapter{
+		toolCalls: []provider.ToolCall{
+			{ID: "tc1", Name: "grep", Arguments: `{"pattern":"filter"}`},
+		},
+	}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	res, err := engine.RunTurn(context.Background(), "explore", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if res != "Done testing" {
+		t.Errorf("expected normal answer, got %q", res)
+	}
+	if engine.State() != StateDone {
+		t.Errorf("expected StateDone, got %v", engine.State())
+	}
+}
+
+func TestEngineNoFallbackFails(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	engine := NewEngine(&failAdapter{err: fmt.Errorf("provider down")}, tools, ctxMgr, "primary-model")
+	if _, err := engine.RunTurn(context.Background(), "hello", nil); err == nil {
+		t.Errorf("expected failure when primary fails and no fallback exists")
 	}
 }

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -61,6 +62,7 @@ type openAIChatRequest struct {
 	Messages    []openAIChatMessage `json:"messages"`
 	Tools       []openAITool        `json:"tools,omitempty"`
 	Temperature float64             `json:"temperature,omitempty"`
+	Stream      bool                `json:"stream,omitempty"`
 }
 
 type openAIChatResponse struct {
@@ -81,10 +83,35 @@ type openAIChatResponse struct {
 	} `json:"usage"`
 }
 
-func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
-	apiReq := openAIChatRequest{
+// openAIStreamChunk is a single SSE delta for /chat/completions with stream=true.
+type openAIStreamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+func buildOpenAIRequest(req CompletionRequest, stream bool) (*openAIChatRequest, error) {
+	apiReq := &openAIChatRequest{
 		Model:       req.Model,
 		Temperature: req.Temperature,
+		Stream:      stream,
 	}
 
 	for _, msg := range req.Messages {
@@ -118,13 +145,17 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*C
 		apiReq.Tools = append(apiReq.Tools, oTool)
 	}
 
+	return apiReq, nil
+}
+
+func (a *OpenAIAdapter) doPost(ctx context.Context, apiReq *openAIChatRequest) (*http.Response, error) {
 	bodyBytes, err := json.Marshal(apiReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	endpoint := a.BaseURL + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http request: %w", err)
 	}
@@ -138,15 +169,29 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*C
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		return nil, fmt.Errorf("API error HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return resp, nil
+}
+
+func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
+	apiReq, err := buildOpenAIRequest(req, false)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := a.doPost(ctx, apiReq)
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var apiResp openAIChatResponse
@@ -183,5 +228,81 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*C
 		})
 	}
 
+	return res, nil
+}
+
+// StreamComplete implements StreamingAdapter: content deltas are forwarded via
+// onDelta while tool-call fragments accumulate across SSE chunks.
+func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionRequest, onDelta func(string)) (*CompletionResponse, error) {
+	apiReq, err := buildOpenAIRequest(req, true)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := a.doPost(ctx, apiReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	res := &CompletionResponse{}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+
+		var chunk openAIStreamChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue // tolerate keep-alive/ping frames
+		}
+		if len(chunk.Choices) == 0 {
+			if chunk.Usage.TotalTokens > 0 {
+				res.Usage = Usage{
+					PromptTokens:     chunk.Usage.PromptTokens,
+					CompletionTokens: chunk.Usage.CompletionTokens,
+					TotalTokens:      chunk.Usage.TotalTokens,
+				}
+			}
+			continue
+		}
+
+		choice := chunk.Choices[0]
+		if d := choice.Delta.Content; d != "" {
+			res.Content += d
+			if onDelta != nil {
+				onDelta(d)
+			}
+		}
+		if d := choice.Delta.ReasoningContent; d != "" {
+			res.Reasoning += d
+		}
+		if choice.FinishReason != "" {
+			res.FinishReason = choice.FinishReason
+		}
+		for _, tc := range choice.Delta.ToolCalls {
+			for len(res.ToolCalls) <= tc.Index {
+				res.ToolCalls = append(res.ToolCalls, ToolCall{})
+			}
+			if tc.ID != "" && res.ToolCalls[tc.Index].ID == "" {
+				res.ToolCalls[tc.Index].ID = tc.ID
+			}
+			if tc.Function.Name != "" {
+				res.ToolCalls[tc.Index].Name = tc.Function.Name
+			}
+			res.ToolCalls[tc.Index].Arguments += tc.Function.Arguments
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("stream read failed: %w", err)
+	}
 	return res, nil
 }

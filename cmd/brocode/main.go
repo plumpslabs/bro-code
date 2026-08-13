@@ -1,15 +1,21 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
+	"github.com/plumpslabs/bro-code/internal/lsp"
+	"github.com/plumpslabs/bro-code/internal/mcp"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/store"
+	"github.com/plumpslabs/bro-code/internal/subagent"
 	"github.com/plumpslabs/bro-code/internal/tool"
 	"github.com/plumpslabs/bro-code/internal/ui"
 )
@@ -110,18 +116,69 @@ func main() {
 	var initialMessages []string
 
 	if shouldContinue && st != nil {
+		// Old resume logic re-persisted the whole log on every `-c`, leaving
+		// duplicated history in the database. Purge those before restoring so
+		// a resumed session never shows the same prompt multiple times.
+		if removed, err := st.CleanupReplayDuplicates(sessionID); err == nil && removed > 0 {
+			fmt.Printf("✓ Purged %d duplicated history events\n", removed)
+		}
 		events, err := st.GetSessionEvents(sessionID)
 		if err == nil && len(events) > 0 {
-			initialMessages = append(initialMessages, fmt.Sprintf("✅ Resumed session %s (%d events restored)", sessionID, len(events)))
+			initialMessages = append(initialMessages, fmt.Sprintf("✅ Resumed session %s (%d events total)", sessionID, len(events)))
+			// A session can accumulate thousands of events (every tool result is
+			// persisted). Restoring ALL of them would overflow the context
+			// window and make startup slow — restore only the newest events that
+			// fit ~80% of the window, and say so.
+			skipped := 0
+			restored := 0
 			for _, ev := range events {
-				text := bcontext.ExtractEventContent(ev.PayloadJSON)
-				if ev.Type == "user_msg" {
-					_ = ctxMgr.AppendUserMessage(text)
-					initialMessages = append(initialMessages, "YOU:\n"+text)
-				} else if ev.Type == "assistant_msg" {
-					_ = ctxMgr.AppendAssistantTurn("", text, nil)
-					initialMessages = append(initialMessages, "BROCODE:\n"+text)
+				if ctxMgr.TotalTokens() > int(float64(ctxMgr.MaxWindow())*0.8) && restored > 0 {
+					skipped = len(events) - restored
+					break
 				}
+
+				// Parse the payload so assistant turns keep their real
+				// structure (reasoning/content/tool_calls) instead of being
+				// rendered as raw JSON — a tool-call-only turn has empty
+				// Content, and the old ExtractEventContent fallback dumped the
+				// whole payload into the history and the LLM context.
+				var msg provider.Message
+				_ = json.Unmarshal([]byte(ev.PayloadJSON), &msg)
+				text := msg.Content
+				if text == "" {
+					text = bcontext.ExtractEventContent(ev.PayloadJSON)
+				}
+
+				switch ev.Type {
+				case "user_msg":
+					// Import into memory without re-persisting, so a resume never
+					// duplicates history in the store.
+					ctxMgr.ImportUserMessage(text)
+					// Engine-injected reminders (loop guard, verification failures)
+					// are persisted as user_msg — restore them for the model but
+					// don't present them as if the user had typed them.
+					if isEngineReminder(text) {
+						initialMessages = append(initialMessages, "⚙️ "+text)
+					} else {
+						initialMessages = append(initialMessages, "YOU:\n"+text)
+					}
+				case "assistant_msg":
+					ctxMgr.ImportAssistantTurn(msg.Reasoning, text, msg.ToolCalls)
+					if strings.TrimSpace(text) != "" {
+						initialMessages = append(initialMessages, "BROCODE:\n"+text)
+					} else if len(msg.ToolCalls) > 0 {
+						// Tool-call-only turn: show a compact summary, not raw JSON.
+						initialMessages = append(initialMessages, "BROCODE: 🔧 "+toolCallSummary(msg.ToolCalls))
+					}
+				case "tool_result":
+					// Restore the tool result paired with its assistant tool call
+					// so providers that require the pairing don't break.
+					ctxMgr.ImportToolResult(msg.ToolCallID, text)
+				}
+				restored++
+			}
+			if skipped > 0 {
+				initialMessages = append(initialMessages, fmt.Sprintf("💾 Restored the %d most recent events; %d older events omitted to stay within the context window.", restored, skipped))
 			}
 		} else {
 			initialMessages = append(initialMessages, fmt.Sprintf("⚡ Continued session %s.", sessionID))
@@ -130,11 +187,53 @@ func main() {
 		initialMessages = append(initialMessages, "⚡ BroCode engine active. Type a prompt or /help for commands.")
 	}
 
-	// 6. Initialize Tool Registry
+	// 6. Initialize Tool Registry (anchor the permission gate to the project dir)
 	tools := tool.NewRegistry()
+	tools.SetRepoRoot(cwd)
 
-	// 7. Launch Bubble Tea v2 App
-	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, initialMessages...)
+	// Granular per-tool sandbox (.brocode/sandbox.json): deny / allow-only /
+	// command patterns. Loaded once; applies to every tool call this session.
+	tools.SetSandbox(tool.LoadSandbox(cwd))
+
+	// 7. Load MCP servers (.mcp.json, .brocode/mcp.json, global, opencode)
+	mcpMgr := mcp.NewManager()
+	mcpMgr.LoadDefaults()
+	if len(mcpMgr.ServerNames()) > 0 {
+		mcpCtx, mcpCancel := context.WithCancel(context.Background())
+		defer mcpCancel()
+		mcpMgr.Start(mcpCtx)
+		for _, mt := range mcpMgr.Tools() {
+			tools.Register(mt)
+		}
+		for name, errMsg := range mcpMgr.Errors() {
+			if errMsg != "" {
+				initialMessages = append(initialMessages, fmt.Sprintf("⚠️ MCP server %s failed: %s", name, errMsg))
+			}
+		}
+		if n := len(mcpMgr.Tools()); n > 0 {
+			initialMessages = append(initialMessages, fmt.Sprintf("🔌 MCP connected: %d tools from %d servers (%s)", n, len(mcpMgr.ServerNames()), strings.Join(mcpMgr.ServerNames(), ", ")))
+		}
+		defer mcpMgr.Close()
+	}
+
+	// 7b. LSP code intelligence (lazy: language server spawned on first use)
+	lspMgr := lsp.NewManager()
+	lsp.RegisterTools(tools, lspMgr)
+	defer lspMgr.Close()
+
+	// 7c. Sub-agents: isolated agent loops sharing the active adapter+model.
+	// Registered on the main registry so the model can delegate work to them.
+	subRunner := &subagent.Runner{Adapter: adapter, Model: activeModel, Tools: tools}
+	tools.Register(&subagent.Tool{Runner: subRunner})
+
+	// 7d. Scout: background research tasks that run WHILE the main turn keeps
+	// executing. The scout tool returns a receipt immediately; the engine
+	// drains finished findings into the model's context at each loop step.
+	scoutMgr := subagent.NewScoutManager(subRunner)
+	tools.Register(&subagent.ScoutTool{Manager: scoutMgr})
+
+	// 8. Launch Bubble Tea v2 App
+	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr, initialMessages...)
 	p := tea.NewProgram(&appModel)
 	appModel.SetProgram(p)
 
@@ -142,4 +241,31 @@ func main() {
 		fmt.Printf("Error running BroCode TUI: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// isEngineReminder reports whether a persisted user_msg was injected by the
+// engine (loop guard, tool budget, verification failure) rather than typed by
+// the user. Such messages must be restored for the model's context but should
+// not be displayed as if the user had said them.
+func isEngineReminder(text string) bool {
+	for _, prefix := range []string{
+		"⚠️ You have been calling tools",
+		"⚠️ [LOOP GUARD]",
+		"Level 1 verification check failed:",
+	} {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// toolCallSummary renders a compact, human-readable list of tool calls for
+// resumed history instead of dumping the raw arguments JSON.
+func toolCallSummary(calls []provider.ToolCall) string {
+	names := make([]string, 0, len(calls))
+	for _, tc := range calls {
+		names = append(names, tc.Name)
+	}
+	return strings.Join(names, " → ")
 }

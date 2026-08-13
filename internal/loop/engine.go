@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
+	"github.com/plumpslabs/bro-code/internal/hooks"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
@@ -58,17 +60,109 @@ const SystemPrompt = `You are BroCode, an autonomous AI coding assistant.
 Rules:
 1. Always reason through your plan BEFORE executing any tool or returning an answer.
 2. CONTINUATION RULE: After receiving tool execution results, DO NOT stop to ask the user unless technical ambiguity cannot be resolved by tools. Continue the tool loop until the goal is achieved.
-3. Use native function calling for tool execution.`
+3. Use native function calling for tool execution.
+4. When you need a decision, preference, or confirmation that tools cannot determine (e.g. choosing a database or architecture, destructive operations, or unclear requirements), call the ask_user tool with 1-3 clear multiple-choice questions instead of guessing.`
+
+// Fallback is an alternative adapter+model pair tried when the primary
+// provider fails (automatic model routing).
+type Fallback struct {
+	Adapter provider.ProviderAdapter
+	Model   string
+}
+
+// ScoutDrainer delivers completed background research findings. Implemented by
+// *subagent.ScoutManager; defined here as an interface to avoid an import
+// cycle (subagent imports loop for its isolated sub-loops).
+type ScoutDrainer interface {
+	// Drain returns one formatted report per finished job and removes them.
+	Drain() []string
+	// Pending returns the number of jobs still running.
+	Pending() int
+}
 
 // Engine orchestrates the ReAct loop and verification ladder.
 type Engine struct {
-	adapter       provider.ProviderAdapter
-	tools         *tool.Registry
-	context       *bcontext.Manager
-	model         string
-	mode          string // "BUILDER" or "PLANNER"
-	maxIterations int
-	state         LoopState
+	adapter         provider.ProviderAdapter
+	tools           *tool.Registry
+	context         *bcontext.Manager
+	model           string
+	mode            string // "BUILDER" or "PLANNER"
+	maxIterations   int
+	state           LoopState
+	fallbacks       []Fallback
+	streamHandler   func(delta string)
+	progressHandler TurnOutputHandler
+	// lastToolCall tracks the previous tool invocation within a turn so the
+	// loop guard can detect the model repeating the exact same call and stop
+	// it from spinning (grep the same file 3x in a row, etc.).
+	lastToolCall provider.ToolCall
+	// lastToolCallRepeats counts consecutive identical repetitions of
+	// lastToolCall. Persisted across loop iterations (not reset each turn
+	// iteration) so a model stuck re-issuing the same call is caught.
+	lastToolCallRepeats int
+	// toolOnlyRounds counts consecutive loop iterations where the model only
+	// called tools and never produced an answer. Once it exceeds
+	// maxToolOnlyRounds the loop stops so a tool-happy model cannot burn all
+	// 25 iterations without ever answering.
+	toolOnlyRounds int
+	// toolReminderSent guards the single "answer now" reminder injected when
+	// the tool-only budget is exhausted.
+	toolReminderSent bool
+	// toolReminder2Sent guards the second, stronger reminder sent one round
+	// after the first — with the list of files already explored so a model
+	// deep in legitimate exploration can answer from what it has.
+	toolReminder2Sent bool
+	// explored tracks the files/directories the model has actually read or
+	// searched this turn, so the budget reminders can tell it what it already
+	// knows instead of just "stop calling tools".
+	explored []string
+	// projectCtx is a compact structural overview of the project (tree + docs)
+	// injected into the system prompt so the agent starts oriented instead of
+	// blind-grepping for file locations.
+	projectCtx string
+	// hooks runs user-defined lifecycle commands (on-turn-start, on-tool-call,
+	// on-turn-end, ...) at the corresponding points in the loop. Optional.
+	hooks *hooks.Manager
+	// scouts runs background research tasks started with the scout tool while
+	// the main turn continues. Completed results are drained into the context
+	// at each loop iteration. Optional.
+	scouts ScoutDrainer
+}
+
+// SetHooks wires a lifecycle hooks manager. Nil disables hooks.
+func (e *Engine) SetHooks(h *hooks.Manager) {
+	e.hooks = h
+}
+
+// SetScoutManager wires the background scout manager. Nil disables scout
+// result delivery (the scout tool itself then reports an error).
+func (e *Engine) SetScoutManager(sm ScoutDrainer) {
+	e.scouts = sm
+}
+
+// maxToolOnlyRounds caps how many consecutive tool-only iterations a turn may
+// run. After this many rounds of tool calls with no answer, the engine forces
+// the model to answer directly instead of looping forever. 20 is generous
+// enough for legitimate deep exploration (many read_file/grep rounds in a big
+// monorepo) while still guaranteeing a turn always finishes with an answer
+// well before the 25-iteration hard cap.
+const maxToolOnlyRounds = 20
+
+// SetProjectContext injects a compact structural overview of the project into
+// every turn's system prompt (see search.BuildProjectContext). Empty disables.
+func (e *Engine) SetProjectContext(pc string) {
+	e.projectCtx = pc
+}
+
+// AddFallback registers a fallback provider+model tried on primary failure.
+func (e *Engine) AddFallback(fb Fallback) {
+	e.fallbacks = append(e.fallbacks, fb)
+}
+
+// SetStreamHandler wires a callback receiving content deltas while the model
+// streams its answer. Nil disables streaming (adapters fall back to Complete).
+func (e *Engine) SetStreamHandler(fn func(delta string)) {
+	e.streamHandler = fn
 }
 
 // NewEngine creates an agent loop engine instance.
@@ -88,6 +182,14 @@ func (e *Engine) SetMode(m string) {
 	e.mode = m
 }
 
+// SetMaxIterations overrides the loop iteration cap (default 25). Used by the
+// benchmark harness to bound each case.
+func (e *Engine) SetMaxIterations(n int) {
+	if n > 0 {
+		e.maxIterations = n
+	}
+}
+
 func (e *Engine) Mode() string {
 	if e.mode == "" {
 		return "BUILDER"
@@ -103,12 +205,45 @@ func (e *Engine) State() LoopState {
 // RunTurn executes the ReAct loop until a terminal state is reached.
 type TurnOutputHandler func(state LoopState, info string)
 
-func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOutputHandler) (string, error) {
+func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOutputHandler) (answer string, err error) {
+	e.progressHandler = onUpdate
+	defer func() { e.progressHandler = nil }()
+	// Lifecycle hook on every exit path: fire on-turn-end when the turn
+	// produced an answer (or a hard abort message), on-turn-error otherwise.
+	defer func() {
+		ev := hooks.EventTurnEnd
+		if err != nil {
+			ev = hooks.EventTurnError
+		}
+		e.hookRun(context.Background(), ev, map[string]string{
+			"error":  errString(err),
+			"mode":   e.Mode(),
+			"answer": answer,
+			"query":  userQuery,
+		})
+	}()
+
+	// A real user prompt is the accept signal for last turn's snapshots:
+	// each snapshot lives exactly one turn, then the rollback window closes.
+	if cleaned := tool.CleanupStaleSnapshots(); cleaned > 0 && onUpdate != nil {
+		onUpdate(e.state, fmt.Sprintf("Cleaned %d stale snapshots", cleaned))
+	}
+
 	if userQuery != "" {
 		if err := e.context.AppendUserMessage(userQuery); err != nil {
 			return "", err
 		}
 	}
+
+	// Lifecycle hook: turn start (before any LLM call). Output is informational
+	// only — hooks cannot replace a user prompt.
+	e.hookRun(ctx, hooks.EventTurnStart, map[string]string{
+		"query": userQuery,
+		"mode":  e.Mode(),
+	})
+
+	// Deliver any scout findings that finished since the last turn ended.
+	e.drainScouts(onUpdate)
 
 	iteration := 0
 
@@ -121,6 +256,41 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 			return "", fmt.Errorf("reached max iterations (%d)", e.maxIterations)
 		}
+
+		// Tool-only budget: if the model keeps calling tools and never writes
+		// an answer, remind it at the threshold with what it has already
+		// explored, remind it again more firmly one round later, and only then
+		// abort. Legitimate deep exploration in big monorepos needs room, but
+		// a tool-happy model must still be cut off with an answer.
+		if e.toolOnlyRounds >= maxToolOnlyRounds {
+			if !e.toolReminderSent {
+				e.toolReminderSent = true
+				_ = e.context.AppendUserMessage("⚠️ You have been calling tools for many rounds without answering. STOP calling tools NOW and answer the user's question directly using the information you have already gathered." + e.exploredSummary())
+				if onUpdate != nil {
+					onUpdate(e.state, "⚠️ Tool budget exhausted — forcing model to answer")
+				}
+				continue
+			}
+			if !e.toolReminder2Sent {
+				e.toolReminder2Sent = true
+				_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. Do NOT call any more tools. Write your complete answer to the user's question now, based on everything you have read." + e.exploredSummary())
+				if onUpdate != nil {
+					onUpdate(e.state, "⚠️ Final warning — answer immediately or the turn will be stopped")
+				}
+				continue
+			}
+			e.state = StateBlocked
+			msg := "Turn aborted: the model kept calling tools without producing an answer after two warnings. " + e.exploredSummary()
+			if onUpdate != nil {
+				onUpdate(e.state, msg)
+			}
+			return msg, nil
+		}
+
+		// Scout results that completed during the previous loop iteration are
+		// delivered before the model reasons again, so it can incorporate
+		// background findings without re-invoking anything.
+		e.drainScouts(onUpdate)
 
 		// 1. Thinking State
 		e.state = StateThinking
@@ -135,6 +305,8 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		}
 
 		sysPrompt := fmt.Sprintf(`You are BroCode CLI, an autonomous AI coding assistant.
+%s`, e.projectContextBlock())
+		sysPrompt += fmt.Sprintf(`
 CRITICAL OVERRIDE DIRECTIVE FOR MODE INQUIRIES:
 - YOUR ACTIVE BROCODE ENGINE MODE IS CURRENTLY: %s
 - IF THE USER ASKS "kamu di mode apa?", "sekarang kamu di mode apa?", "mode apa?", OR ANY QUESTION ABOUT MODE, YOU MUST RESPOND DIRECTLY WITH:
@@ -151,7 +323,12 @@ Engine Mode Rules (%s):
 		} else {
 			sysPrompt += `1. Always reason through your plan BEFORE executing any tool or returning an answer.
 2. CONTINUATION RULE: After receiving tool execution results, DO NOT stop to ask the user unless technical ambiguity cannot be resolved by tools. Continue the tool loop until the goal is achieved.
-3. Use native function calling for tool execution.`
+3. Use native function calling for tool execution.
+4. DEEP EXPLORATION: Before answering questions about code, thoroughly explore the codebase first. Use glob to find relevant files, grep to search for definitions and usages, read_file to read the actual code, and bash (git status/log) to understand repo state. Never answer from memory or a single grep hit — read the relevant files and verify your claims against the real code before answering.
+5. When you need a decision, preference, or confirmation that tools cannot determine (e.g. choosing a database or architecture, destructive operations, or unclear requirements), call the ask_user tool with 1-3 clear multiple-choice questions instead of guessing.
+6. Some risky shell commands (rm, sudo, git push --force, etc.) require the user's approval. If a command is denied or blocked, do NOT retry it — adapt and use a safe alternative.
+7. Use the git tool to inspect repo state (status/diff/log/branch), fetch_url to read a specific page, web_search to find docs/errors on the web, review_changes to let the user approve or roll back your edits, and undo to revert a bad file edit made this turn.
+8. Answer in the user's language (Indonesian if they write Indonesian).`
 		}
 
 		// Auto-compact context if token count exceeds threshold
@@ -181,10 +358,24 @@ Engine Mode Rules (%s):
 			onUpdate(e.state, "Thinking & analyzing request...")
 		}
 
-		resp, err := e.adapter.Complete(ctx, req)
+		resp, err := e.complete(ctx, req)
 		if err != nil {
-			e.state = StateFailed
-			return "", fmt.Errorf("LLM completion failed: %w", err)
+			// Automatic model routing: try each fallback provider in order.
+			for _, fb := range e.fallbacks {
+				fbReq := req
+				fbReq.Model = fb.Model
+				resp, err = e.completeWith(ctx, fb.Adapter, fbReq)
+				if err == nil {
+					if onUpdate != nil {
+						onUpdate(e.state, fmt.Sprintf("⚠️ Primary provider failed — using fallback model %s", fb.Model))
+					}
+					break
+				}
+			}
+			if resp == nil {
+				e.state = StateFailed
+				return "", fmt.Errorf("LLM completion failed: %w", err)
+			}
 		}
 
 		// Thinking enforcement (§2.2)
@@ -202,6 +393,13 @@ Engine Mode Rules (%s):
 		hasCodeChanges := false
 		if len(resp.ToolCalls) > 0 {
 			e.state = StateActing
+			// This round was tool-only (no answer text); count it toward the
+			// budget so a model that never answers gets cut off.
+			e.toolOnlyRounds++
+			// Loop guard: if the model repeats the exact same tool call
+			// (name + args) multiple times in a row it is spinning, not
+			// progressing. Block the repeat and tell the model to answer from
+			// the results it already has instead of re-running the tool.
 			for _, tc := range resp.ToolCalls {
 				if tc.Name == "write_file" || tc.Name == "edit_file" {
 					hasCodeChanges = true
@@ -222,10 +420,82 @@ Engine Mode Rules (%s):
 					onUpdate(e.state, fmt.Sprintf("%s", toolInfo))
 				}
 
+				// Track what the model has actually explored so budget reminders
+				// can tell it what it already knows ("you've read X, Y, Z —
+				// answer now") instead of a generic stop message.
+				e.recordExplored(tc)
+
+				// Same-call repetition detection: identical consecutive calls
+				// (same tool + same arguments) indicate the model is stuck.
+				// The repeat counter lives on the engine (not per iteration) so
+				// re-issuing the same call across loop iterations is caught.
+				if isRepeatToolCall(tc, e.lastToolCall) {
+					e.lastToolCallRepeats++
+					if e.lastToolCallRepeats >= 4 {
+						// The model ignored the guard warning and is still
+						// spinning — abort the whole turn instead of burning the
+						// remaining iterations on a loop that will never finish.
+						e.state = StateBlocked
+						msg := fmt.Sprintf("Turn aborted: the model kept repeating tool call '%s' with identical arguments after being told to stop. Please rephrase your request or ask for a more specific task.", tc.Name)
+						if onUpdate != nil {
+							onUpdate(e.state, msg)
+						}
+						return msg, nil
+					}
+					if e.lastToolCallRepeats >= 2 {
+						guardMsg := fmt.Sprintf("⚠️ [LOOP GUARD]: You are repeating tool call '%s' with identical arguments — stop and answer directly using the information you already gathered. Do NOT call the same tool again.", tc.Name)
+						if onUpdate != nil {
+							onUpdate(e.state, "⚠️ Loop detected — instructing model to answer directly")
+						}
+						_ = e.context.AppendToolResult(tc.ID, guardMsg)
+						continue
+					}
+				} else {
+					e.lastToolCallRepeats = 0
+				}
+				e.lastToolCall = tc
+
+				// Permission gate: risky bash commands ask the user for approval
+				// (Allow once / Always allow / Deny) via the interactive modal.
+				approved, reason, gerr := e.tools.GateAction(ctx, tc)
+				if gerr != nil {
+					_ = e.context.AppendToolResult(tc.ID, fmt.Sprintf("Tool error: %v", gerr))
+					continue
+				}
+				if !approved {
+					guardMsg := fmt.Sprintf("⛔ [PERMISSION DENIED]: %s", reason)
+					if onUpdate != nil {
+						onUpdate(e.state, guardMsg)
+					}
+					_ = e.context.AppendToolResult(tc.ID, guardMsg)
+					continue
+				}
+
+				// Lifecycle hook: before tool execution. A policy hook may veto or
+				// override the tool by returning non-empty output, which REPLACES
+				// the normal tool result.
+				hookOverride := e.hookRun(ctx, hooks.EventToolCall, map[string]string{
+					"tool": tc.Name,
+					"args": tc.Arguments,
+				})
+				if hookOverride != "" {
+					e.state = StateObserving
+					if err := e.context.AppendToolResult(tc.ID, hookOverride); err != nil {
+						return "", err
+					}
+					continue
+				}
+
 				toolOutput, err := e.tools.Execute(ctx, tc.Name, tc.Arguments)
 				if err != nil {
 					toolOutput = fmt.Sprintf("Tool error: %v", err)
 				}
+
+				// Lifecycle hook: after tool execution, with the tool's output.
+				e.hookRun(ctx, hooks.EventToolResult, map[string]string{
+					"tool":   tc.Name,
+					"output": toolOutput,
+				})
 
 				e.state = StateObserving
 				if err := e.context.AppendToolResult(tc.ID, toolOutput); err != nil {
@@ -250,7 +520,12 @@ Engine Mode Rules (%s):
 			}
 		}
 
-		// 4. Terminal Done State
+		// 4. Terminal Done State — the model answered, so any tool-only budget
+		// accumulated earlier no longer applies.
+		e.toolOnlyRounds = 0
+		e.toolReminderSent = false
+		e.toolReminder2Sent = false
+		e.explored = nil
 		e.state = StateDone
 		if onUpdate != nil {
 			onUpdate(e.state, "Completed")
@@ -260,15 +535,158 @@ Engine Mode Rules (%s):
 	}
 }
 
-// Level 1 verification check (syntax/vet)
+// recordExplored keeps a capped, de-duplicated list of files/directories the
+// model has touched this turn (read_file, list_dir, grep, glob, bash find).
+func (e *Engine) recordExplored(tc provider.ToolCall) {
+	var target string
+	var m map[string]any
+	if json.Unmarshal([]byte(tc.Arguments), &m) == nil {
+		switch tc.Name {
+		case "read_file", "edit_file", "write_file":
+			target, _ = m["path"].(string)
+		case "list_dir", "grep", "glob":
+			target, _ = m["path"].(string)
+			if target == "" {
+				target, _ = m["pattern"].(string)
+			}
+		case "bash":
+			cmd, _ := m["command"].(string)
+			if strings.HasPrefix(strings.TrimSpace(cmd), "find ") {
+				target = cmd
+			}
+		}
+	}
+	if target == "" {
+		return
+	}
+	for _, ex := range e.explored {
+		if ex == target {
+			return
+		}
+	}
+	e.explored = append(e.explored, target)
+	if len(e.explored) > 12 {
+		e.explored = e.explored[len(e.explored)-12:]
+	}
+}
+
+// projectContextBlock renders the injected project overview (tree + docs) as
+// a system-prompt section, or an empty string when none was provided.
+func (e *Engine) projectContextBlock() string {
+	if strings.TrimSpace(e.projectCtx) == "" {
+		return ""
+	}
+	return "You are working in this project:\n\n" + e.projectCtx
+}
+
+// exploredSummary renders the list of files/directories the model has already
+// read or searched, used by the tool-budget reminders and the abort message.
+func (e *Engine) exploredSummary() string {
+	if len(e.explored) == 0 {
+		return ""
+	}
+	return "\n\nFiles you have already examined: " + strings.Join(e.explored, ", ")
+}
+
+// isRepeatToolCall reports whether a tool call is an exact repeat of the
+// previous one in this turn (same name and identical arguments).
+func isRepeatToolCall(tc, prev provider.ToolCall) bool {
+	if prev.Name == "" {
+		return false
+	}
+	if tc.Name != prev.Name {
+		return false
+	}
+	// Normalize whitespace-only differences in the arguments JSON so
+	// formatting changes don't defeat the detection.
+	a := strings.TrimSpace(tc.Arguments)
+	b := strings.TrimSpace(prev.Arguments)
+	if a == b {
+		return true
+	}
+	// Structural comparison: identical JSON objects with different key order
+	// should still count as repeats.
+	var ma, mb map[string]any
+	if json.Unmarshal([]byte(a), &ma) == nil && json.Unmarshal([]byte(b), &mb) == nil {
+		ja, _ := json.Marshal(ma)
+		jb, _ := json.Marshal(mb)
+		return string(ja) == string(jb)
+	}
+	return false
+}
+
+// complete runs a completion through the primary adapter, streaming when the
+// adapter supports it and a stream handler is wired.
+func (e *Engine) complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	return e.completeWith(ctx, e.adapter, req)
+}
+
+func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	// Prefer realtime progress (local CLI tools etc.) so the UI shows what
+	// the agent is doing, then token streaming, then plain completion.
+	if pa, ok := a.(provider.ProgressingAdapter); ok && e.progressHandler != nil {
+		return pa.CompleteWithProgress(ctx, req, func(line string) {
+			e.progressHandler(e.state, line)
+		})
+	}
+	if sa, ok := a.(provider.StreamingAdapter); ok && e.streamHandler != nil {
+		return sa.StreamComplete(ctx, req, e.streamHandler)
+	}
+	return a.Complete(ctx, req)
+}
+
+// hookRun fires a lifecycle hook event with structured env data. Output is
+// returned so on-tool-call hooks can override tool results; other events
+// discard it.
+func (e *Engine) hookRun(ctx context.Context, ev hooks.Event, data map[string]string) string {
+	if e.hooks == nil {
+		return ""
+	}
+	return e.hooks.Run(ctx, ev, data)
+}
+
+// drainScouts delivers completed background scout findings into the model's
+// context as tool results so the next reasoning step can use them.
+func (e *Engine) drainScouts(onUpdate TurnOutputHandler) {
+	if e.scouts == nil {
+		return
+	}
+	reports := e.scouts.Drain()
+	if len(reports) == 0 {
+		return
+	}
+	for _, r := range reports {
+		_ = e.context.AppendToolResult("scout_result", r)
+		if onUpdate != nil {
+			onUpdate(e.state, "📡 Scout findings delivered")
+		}
+	}
+}
+
+// errString converts an error into a stable string for hook env (empty when
+// the error is nil).
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// Level 1 verification check (build + vet) — only for Go projects.
 func runLevel1Verification(ctx context.Context) string {
 	if _, err := os.Stat("go.mod"); os.IsNotExist(err) {
 		return ""
 	}
-	cmd := exec.CommandContext(ctx, "go", "vet", "./...")
-	out, err := cmd.CombinedOutput()
-	if err != nil && len(out) > 0 {
-		return string(out)
+	for _, args := range [][]string{
+		{"go", "build", "./..."},
+		{"go", "vet", "./..."},
+		{"go", "test", "./..."},
+	} {
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		out, err := cmd.CombinedOutput()
+		if err != nil && len(out) > 0 {
+			return string(out)
+		}
 	}
 	return ""
 }

@@ -144,6 +144,43 @@ func (m *Manager) AppendAssistantTurn(reasoning, content string, toolCalls []pro
 	return nil
 }
 
+// ImportUserMessage restores a user message into memory (tokens counted)
+// WITHOUT re-persisting it to the store. Used when replaying a session's
+// events so resuming never duplicates history.
+func (m *Manager) ImportUserMessage(content string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.messages = append(m.messages, provider.Message{Role: "user", Content: content})
+	m.totalTokens += estimateTokens(content)
+}
+
+// ImportAssistantTurn restores an assistant turn into memory (tokens counted)
+// WITHOUT re-persisting it to the store. See ImportUserMessage.
+func (m *Manager) ImportAssistantTurn(reasoning, content string, toolCalls []provider.ToolCall) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.messages = append(m.messages, provider.Message{Role: "assistant", Content: content, Reasoning: reasoning, ToolCalls: toolCalls})
+	m.totalTokens += estimateTokens(reasoning + content)
+}
+
+// ImportToolResult restores a tool result into memory (tokens counted)
+// WITHOUT re-persisting it to the store. Used when replaying a session's
+// events so resuming never duplicates history. Keeps the assistant tool_calls
+// → tool result pairing intact for providers that require it.
+func (m *Manager) ImportToolResult(toolCallID, content string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.messages = append(m.messages, provider.Message{
+		Role:       "user",
+		Content:    content,
+		ToolCallID: toolCallID,
+	})
+	m.totalTokens += estimateTokens(content)
+}
+
 // AppendToolResult adds a tool execution result to the context.
 func (m *Manager) AppendToolResult(toolCallID, content string) error {
 	m.mu.Lock()
@@ -237,8 +274,50 @@ func TruncateToolOutput(content string, maxChars int) string {
 	return content[:maxChars] + "\n\n[output truncated for context prevention]"
 }
 
+// estimateTokens approximates LLM token counts more accurately than a flat
+// len/4. Rough per-token character densities: English prose ≈4 chars/token,
+// code ≈3.5, CJK/Asian text ≈1.2 (each character is often its own token).
+// The estimate is weighted per line so mixed content (code + prose + Asian
+// replies) lands closer to real tokenizer counts, keeping the compaction
+// threshold honest instead of firing too early or overflowing late.
 func estimateTokens(text string) int {
-	return len(text) / 4
+	if text == "" {
+		return 0
+	}
+
+	lines := strings.Split(text, "\n")
+	total := 0
+	for _, line := range lines {
+		if line == "" {
+			total++
+			continue
+		}
+
+		ascii := 0
+		cjk := 0
+		for _, r := range line {
+			if r > 0x2E7F && r < 0x9FFF { // CJK unified ideographs & compat
+				cjk++
+			} else {
+				ascii++
+			}
+		}
+
+		trimmed := strings.TrimSpace(line)
+		isCode := strings.ContainsAny(trimmed, "{}();=\"'") || strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "func ") || strings.HasPrefix(trimmed, "const ")
+
+		charsPerToken := 4.0 // prose default
+		if isCode {
+			charsPerToken = 3.5 // code packs more tokens per char
+		}
+
+		lineTokens := float64(ascii)/charsPerToken + float64(cjk)*0.8 // CJK ≈ 1.25 chars/token
+		if lineTokens < 1 {
+			lineTokens = 1
+		}
+		total += int(lineTokens)
+	}
+	return total
 }
 
 // ExtractEventContent extracts clean human-readable content from event JSON payload string.

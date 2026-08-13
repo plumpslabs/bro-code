@@ -138,6 +138,60 @@ func (s *Store) GetSessionEvents(sessionID string) ([]Event, error) {
 	return events, nil
 }
 
+// CleanupReplayDuplicates removes events that were duplicated by old resume
+// logic (which re-persisted the whole log on every `-c`). It detects the
+// smallest prefix that the full event list repeats exactly, keeps only that
+// prefix, and deletes the repeated tail. Returns the number of events removed.
+func (s *Store) CleanupReplayDuplicates(sessionID string) (int, error) {
+	events, err := s.GetSessionEvents(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	n := len(events)
+	if n < 4 {
+		return 0, nil
+	}
+
+	keep := n
+	for k := 1; k <= n/2; k++ {
+		// prefix of length k must equal the next k events…
+		match := true
+		for i := 0; i < k; i++ {
+			if events[i].Type != events[k+i].Type || events[i].PayloadJSON != events[k+i].PayloadJSON {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		// …and the whole tail must be a pure repetition of that prefix.
+		full := true
+		for j := k; j < n; j++ {
+			if events[j].Type != events[j%k].Type || events[j].PayloadJSON != events[j%k].PayloadJSON {
+				full = false
+				break
+			}
+		}
+		if full {
+			keep = k
+			break
+		}
+	}
+
+	if keep >= n {
+		return 0, nil
+	}
+
+	// Events carry monotonically increasing seq per session; keep seq <= keep.
+	res, err := s.db.Exec("DELETE FROM events WHERE session_id = ? AND seq > ?", sessionID, keep)
+	if err != nil {
+		return 0, err
+	}
+	removed, _ := res.RowsAffected()
+	return int(removed), nil
+}
+
 // ListSessions retrieves all sessions from the SQLite database.
 func (s *Store) ListSessions() ([]Session, error) {
 	rows, err := s.db.Query("SELECT id, created_at, project_path, status FROM sessions ORDER BY created_at DESC")

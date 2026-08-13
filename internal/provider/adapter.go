@@ -55,3 +55,20 @@ type Usage struct {
 type ProviderAdapter interface {
 	Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error)
 }
+
+// StreamingAdapter is an optional capability: providers that can emit content
+// deltas token-by-token. onDelta receives each content fragment as it arrives;
+// the returned response still holds the fully accumulated result.
+type StreamingAdapter interface {
+	ProviderAdapter
+	StreamComplete(ctx context.Context, req CompletionRequest, onDelta func(string)) (*CompletionResponse, error)
+}
+
+// ProgressingAdapter is an optional capability: providers whose execution
+// produces realtime status/progress lines (e.g. a local CLI running tools).
+// onProgress receives each status line as it appears; the returned response
+// still holds the final accumulated result.
+type ProgressingAdapter interface {
+	ProviderAdapter
+	CompleteWithProgress(ctx context.Context, req CompletionRequest, onProgress func(string)) (*CompletionResponse, error)
+}

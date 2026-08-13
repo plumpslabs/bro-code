@@ -1,0 +1,129 @@
+package tool
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/plumpslabs/bro-code/internal/search"
+)
+
+// CodeSymbolsTool returns a compact structural map (functions, structs,
+// classes, methods + line numbers) of one or more files — the agent sees a
+// file's shape without reading its whole body into context.
+type CodeSymbolsTool struct{}
+
+func (t *CodeSymbolsTool) Name() string { return "code_symbols" }
+func (t *CodeSymbolsTool) Description() string {
+	return "Return a compact map of symbols (functions, methods, structs, classes, interfaces, enums) with their line numbers for one or more files. Use to understand a file's structure quickly without reading the whole file — then read_file the exact lines you need."
+}
+func (t *CodeSymbolsTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"paths": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "File paths to extract symbols from (1-5 files)",
+			},
+		},
+		"required": []string{"paths"},
+	}
+}
+func (t *CodeSymbolsTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	if len(args.Paths) == 0 {
+		return "", fmt.Errorf("code_symbols requires at least one path")
+	}
+	if len(args.Paths) > 5 {
+		args.Paths = args.Paths[:5]
+	}
+
+	// Resolve relative to cwd and verify existence.
+	resolved := make([]string, 0, len(args.Paths))
+	for _, p := range args.Paths {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return "", err
+		}
+		if st, err := os.Stat(abs); err != nil || st.IsDir() {
+			continue // skip missing or directory paths
+		}
+		resolved = append(resolved, abs)
+	}
+	if len(resolved) == 0 {
+		return "No readable files found. Check the paths and try again.", nil
+	}
+
+	out := search.FormatSymbolSummary(resolved)
+	if strings.TrimSpace(out) == "" {
+		return "No symbols found in the given files (unsupported language or empty files).", nil
+	}
+	return CapOutput(out), nil
+}
+
+// SearchCodeTool performs a BM25 relevance search over the codebase — ranks
+// files by how relevant they are to a natural-language query, beyond regex
+// string matching.
+type SearchCodeTool struct{}
+
+func (t *SearchCodeTool) Name() string { return "search_code" }
+func (t *SearchCodeTool) Description() string {
+	return "Semantic-ish code search: rank files by relevance to a query (BM25 over file contents). Unlike grep it matches meaning, not exact strings — use for 'where is X handled', 'which file does auth', vague concepts, or when grep returns nothing useful. Returns top file paths with a snippet around the match."
+}
+func (t *SearchCodeTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{"type": "string", "description": "Natural-language query or keywords to search for"},
+			"path":  map[string]any{"type": "string", "description": "Directory to search (default: current directory)"},
+			"limit": map[string]any{"type": "integer", "description": "Max results (default 5, max 10)"},
+		},
+		"required": []string{"query"},
+	}
+}
+func (t *SearchCodeTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Query string `json:"query"`
+		Path  string `json:"path"`
+		Limit int    `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(args.Query) == "" {
+		return "", fmt.Errorf("search_code requires a query")
+	}
+	if args.Path == "" {
+		args.Path = "."
+	}
+	if args.Limit <= 0 {
+		args.Limit = 5
+	} else if args.Limit > 10 {
+		args.Limit = 10
+	}
+
+	docs, err := search.IndexDir(args.Path)
+	if err != nil {
+		return "", err
+	}
+	idx := search.NewBM25(docs)
+	results := idx.Search(args.Query, args.Limit)
+	return CapOutput(search.FormatResults(results, args.Query)), nil
+}
+
+// SortSymbolLines is a convenience for tests: returns symbols sorted by line.
+func SortSymbolLines(syms []search.SymbolItem) []search.SymbolItem {
+	sorted := append([]search.SymbolItem(nil), syms...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Line < sorted[j].Line })
+	return sorted
+}
