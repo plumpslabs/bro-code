@@ -1,0 +1,93 @@
+package skill
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// Skill represents a loaded SKILL.md document.
+type Skill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Path        string `json:"path"`
+	Content     string `json:"content"`
+}
+
+// Loader manages lazy loading of skill files.
+type Loader struct {
+	skills []Skill
+}
+
+// NewLoader initializes skill discovery across project and home locations.
+func NewLoader(workspaceDir string) *Loader {
+	l := &Loader{}
+	l.scanDir(filepath.Join(workspaceDir, ".agents", "skills"))
+	l.scanDir(filepath.Join(workspaceDir, ".brocode", "skills"))
+
+	home, _ := os.UserHomeDir()
+	l.scanDir(filepath.Join(home, ".config", "brocode", "skills"))
+	return l
+}
+
+func (l *Loader) scanDir(dirPath string) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			skillFile := filepath.Join(dirPath, entry.Name(), "SKILL.md")
+			if data, err := os.ReadFile(skillFile); err == nil {
+				content := string(data)
+				name, desc := parseFrontmatter(content, entry.Name())
+				l.skills = append(l.skills, Skill{
+					Name:        name,
+					Description: desc,
+					Path:        skillFile,
+					Content:     content,
+				})
+			}
+		}
+	}
+}
+
+// Match performs fuzzy matching against skill name and description.
+func (l *Loader) Match(query string) []Skill {
+	var matches []Skill
+	q := strings.ToLower(query)
+	for _, s := range l.skills {
+		if strings.Contains(strings.ToLower(s.Name), q) || strings.Contains(strings.ToLower(s.Description), q) {
+			matches = append(matches, s)
+		}
+	}
+	return matches
+}
+
+func parseFrontmatter(content, defaultName string) (string, string) {
+	lines := strings.Split(content, "\n")
+	name := defaultName
+	desc := ""
+
+	inFrontmatter := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "---" {
+			if !inFrontmatter {
+				inFrontmatter = true
+				continue
+			} else {
+				break
+			}
+		}
+		if inFrontmatter {
+			if strings.HasPrefix(trimmed, "name:") {
+				name = strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
+			}
+			if strings.HasPrefix(trimmed, "description:") {
+				desc = strings.TrimSpace(strings.TrimPrefix(trimmed, "description:"))
+			}
+		}
+	}
+	return name, desc
+}

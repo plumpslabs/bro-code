@@ -1,96 +1,145 @@
-// Command brocode is the bro-code coding agent CLI.
-//
-// Modes:
-//   - no arguments        → TUI (Bubble Tea v2 chat UI, landing screen)
-//   - -c                  → TUI, resume this project's newest saved session (~/.brocode/projects/<project>/session_<base36-ms>.jsonl)
-//   - --search <query>    → headless, print BM25 results (for CI/automation)
-//   - --diff              → headless, print a sample Myers unified diff
-//   - --version           → print version and exit
-//
-// Headless and TUI share the same pipeline (Principle: terminal-native,
-// headless-capable — not duplicated code paths).
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
-
-	"github.com/plumpslabs/bro-code/internal/diff"
-	"github.com/plumpslabs/bro-code/internal/search"
-	"github.com/plumpslabs/bro-code/internal/tui"
-	"github.com/plumpslabs/bro-code/internal/web"
-)
-
-// Build-time injected variables (see Makefile LDFLAGS).
-var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
+	bcontext "github.com/plumpslabs/bro-code/internal/context"
+	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/store"
+	"github.com/plumpslabs/bro-code/internal/tool"
+	"github.com/plumpslabs/bro-code/internal/ui"
 )
 
 func main() {
-	headlessSearch := flag.String("search", "", "headless: search tools/skills in the sample corpus")
-	showDiff := flag.Bool("diff", false, "headless: print a sample Myers unified diff")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	resume := flag.Bool("c", false, "resume the last session (no session file → fresh start)")
+	flagProvider := flag.String("provider", "", "LLM provider ID (opencode, deepseek, poolside, anthropic, openai, openrouter, groq, google, ollama)")
+	flagModel := flag.String("model", "", "Model name (e.g. deepseek-v4-flash-free, laguna-s-2.1, claude-3-7-sonnet)")
+	flagContinueLong := flag.Bool("continue", false, "Continue most recent active session")
+	flagContinueShort := flag.Bool("c", false, "Continue most recent active session (shorthand)")
+	flagSession := flag.String("session", "", "Resume specific session ID")
 	flag.Parse()
 
-	if *showVersion {
-		fmt.Printf("brocode %s (commit %s, built %s)\n", version, commit, date)
-		return
-	}
+	// 1. Load Configurations
+	cfg := provider.LoadConfig()
 
-	if flag.Arg(0) == "web" {
-		web.StartDashboard()
-		return
-	}
-
-	// Shared pipeline: corpus → index → (TUI | headless).
-	ix := search.New(search.SampleCorpus())
-
-	switch {
-	case *headlessSearch != "":
-		printSearch(ix, *headlessSearch)
-	case *showDiff:
-		fmt.Print(diff.Sample())
-	default:
-		runTUI(ix, *resume)
-	}
-}
-
-func printSearch(ix *search.Index, q string) {
-	results := ix.Search(q, 5)
-	if len(results) == 0 {
-		fmt.Printf("query %q: no results\n", q)
-		return
-	}
-	fmt.Printf("results for %q:\n", q)
-	for _, r := range results {
-		fmt.Printf("  %6.3f  %s (%s)\n", r.Score, r.Title, r.ID)
-	}
-}
-
-func runTUI(ix *search.Index, resume bool) {
-	p := tea.NewProgram(tui.New(ix, version, commit, resume))
-	final, err := p.Run()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+	// 2. Auto-Detect Usable Providers
+	detected := provider.AutoDetect(cfg)
+	if len(detected) == 0 {
+		fmt.Println("No active LLM providers found.")
 		os.Exit(1)
 	}
-	// Persist the conversation only if it actually started. Each quit writes a
-	// NEW session file (retention-capped), so /history lists every past
-	// conversation of the project. Failure to save is a warning, not an error
-	// — the user's session must never be held hostage by the disk.
-	if m, ok := final.(tui.Model); ok && m.Started() {
-		if p, err := tui.SaveSession(m.Messages()); err == nil {
-			fmt.Printf("✓ Session saved for project '%s' (id: %s)\n", m.ProjectName(), m.SessionID())
-			fmt.Printf("  File: %s\n", p)
-			fmt.Println("  Resume anytime in this project with: brocode -c")
-		} else {
-			fmt.Fprintln(os.Stderr, "warning: could not save session:", err)
+
+	// 3. Resolve Active Provider & Model based on Precedence Rules (§10.1)
+	var activeProvider provider.DetectedProvider
+	if *flagProvider != "" {
+		for _, d := range detected {
+			if d.Info.ID == *flagProvider {
+				activeProvider = d
+				break
+			}
 		}
+	}
+
+	if activeProvider.Info.ID == "" && cfg.DefaultProvider != "" {
+		for _, d := range detected {
+			if d.Info.ID == cfg.DefaultProvider {
+				activeProvider = d
+				break
+			}
+		}
+	}
+
+	if activeProvider.Info.ID == "" {
+		activeProvider = detected[0] // Fallback to auto-detected default (opencode CLI / Zen gateway)
+	}
+
+	activeModel := *flagModel
+	if activeModel == "" && cfg.DefaultModel != "" {
+		activeModel = cfg.DefaultModel
+	}
+	if activeModel == "" {
+		if len(activeProvider.Info.DefaultModels) > 0 {
+			activeModel = activeProvider.Info.DefaultModels[0]
+		} else {
+			activeModel = "deepseek-v4-flash-free"
+		}
+	}
+
+	// 4. Instantiate Provider Adapter
+	var adapter provider.ProviderAdapter
+	if activeProvider.Info.ID == "opencode" {
+		adapter = provider.NewOpenCodeAdapter()
+	} else if activeProvider.Info.Protocol == "anthropic" {
+		adapter = provider.NewAnthropicAdapter(activeProvider.Info.DefaultBaseURL, activeProvider.APIKey)
+	} else {
+		adapter = provider.NewOpenAIAdapter(activeProvider.Info.DefaultBaseURL, activeProvider.APIKey)
+	}
+
+	// 5. Initialize SQLite Store & Session Management
+	st, err := store.NewStore("")
+	if err != nil {
+		fmt.Printf("Warning: SQLite store initialization failed (%v). Running in-memory.\n", err)
+	} else {
+		defer st.Close()
+	}
+
+	cwd, _ := os.Getwd()
+	var sessionID string
+	shouldContinue := *flagContinueLong || *flagContinueShort || *flagSession != ""
+
+	if *flagSession != "" {
+		sessionID = *flagSession
+	} else if (*flagContinueLong || *flagContinueShort) && st != nil {
+		sessions, err := st.ListSessionsByProjectPath(cwd)
+		if err == nil && len(sessions) > 0 {
+			sessionID = sessions[0].ID
+		}
+	}
+
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("sess_%d", time.Now().Unix())
+		if st != nil {
+			_ = st.CreateSession(sessionID, cwd)
+		}
+	}
+
+	ctxMgr := bcontext.NewManager(sessionID, st, 128000)
+	var initialMessages []string
+
+	if shouldContinue && st != nil {
+		events, err := st.GetSessionEvents(sessionID)
+		if err == nil && len(events) > 0 {
+			initialMessages = append(initialMessages, fmt.Sprintf("✅ Resumed session %s (%d events restored)", sessionID, len(events)))
+			for _, ev := range events {
+				text := bcontext.ExtractEventContent(ev.PayloadJSON)
+				if ev.Type == "user_msg" {
+					_ = ctxMgr.AppendUserMessage(text)
+					initialMessages = append(initialMessages, "YOU:\n"+text)
+				} else if ev.Type == "assistant_msg" {
+					_ = ctxMgr.AppendAssistantTurn("", text, nil)
+					initialMessages = append(initialMessages, "BROCODE:\n"+text)
+				}
+			}
+		} else {
+			initialMessages = append(initialMessages, fmt.Sprintf("⚡ Continued session %s.", sessionID))
+		}
+	} else {
+		initialMessages = append(initialMessages, "⚡ BroCode engine active. Type a prompt or /help for commands.")
+	}
+
+	// 6. Initialize Tool Registry
+	tools := tool.NewRegistry()
+
+	// 7. Launch Bubble Tea v2 App
+	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, initialMessages...)
+	p := tea.NewProgram(&appModel)
+	appModel.SetProgram(p)
+
+	if _, err := p.Run(); err != nil {
+		fmt.Printf("Error running BroCode TUI: %v\n", err)
+		os.Exit(1)
 	}
 }
