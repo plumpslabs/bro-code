@@ -12,9 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"time"
-	
+
 	"github.com/plumpslabs/bro-code/internal/agentic"
 
 	tea "charm.land/bubbletea/v2"
@@ -149,60 +151,240 @@ func stripAttribution(s string) string {
 	return s
 }
 
-// systemPromptForMode returns the System Directive instructing the LLM on its
-// persona and role. The prompt enforces transparent reasoning: the agent MUST
-// show WHY before DOING, and each tool call must be preceded by a rationale.
-func systemPromptForMode() string {
-	basePersona := "You are BroCode — a cautious, high-performance senior-engineer agent.\n" +
-		"You embody the philosophy: Understand → Investigate → Decide → Change → Verify → Review.\n\n" +
-		"CRITICAL DIRECTIVES:\n" +
-		"1. NEVER make a change merely because you can. If you don't know WHY a change is needed, DO NOT touch it.\n" +
-		"2. MINIMAL CHANGE PRINCIPLE: Find the root cause and apply the smallest safe change. Do not refactor entire modules for a bug fix.\n" +
-		"3. BLAST RADIUS AWARENESS: Before editing, analyze what else depends on this code. If it's HIGH risk (auth, db, core), you MUST investigate first.\n" +
-		"4. EVIDENCE BEFORE CLAIM: Never hallucinate project state. Use search/grep before claiming a dependency or pattern exists.\n" +
-		"5. STOP CONDITIONS: Halt and ask the user if: requirement is ambiguous, target behavior is unclear, production impact is unknown, or existing implementation conflicts.\n" +
-		"6. DIRTY STATE: Do not overwrite uncommitted user changes without explicitly preserving their intent.\n" +
-		"7. VERIFICATION LAYER: Verification is not just tests. It is: syntax -> build -> test -> diff review. ALWAYS verify after changing.\n" +
-		"8. FILE EDITING FORMAT: To edit or create files, you MUST use Markdown code blocks with the precise filepath in the language header, like this: ```go:path/to/file.go\n[full file content]\n```.\n" +
-		"9. AGENTIC TOOLS: You can run bash commands to investigate before writing code. To run a command, output a ```bash\n(commands here)\n``` block. The system will execute it and automatically return the output to you. To read files, use `cat` or `grep` in the bash block. Once you output a tool block, you must wait for the SYSTEM TOOL RESULT before continuing.\n" +
-		"10. TRUE AUTONOMY & SILENT EXECUTION: DO NOT ask the user for permission to create files, edit files, or run commands. DO NOT output conversational filler like 'Step 1: I will create the folder'. Just execute the tool blocks immediately. If you need to reason out loud, you MUST wrap it in a line starting with `+ Thought`.\n\n" +
-		"Tone: Crisp, deliberate, expert. You act autonomously directly in the user's workspace. Never ask the user to run commands you can run yourself."
+// attributionFooterRe extracts the "provider/model" pair from the reply footer
+// brocode appends to every answer (e.g. "⚡ opencode/deepseek-v4-flash-free ·
+// 3.2s · 133 tokens"). Used to detect a mid-session model switch: the chat
+// history records which model actually answered each prior turn.
+var attributionFooterRe = regexp.MustCompile(`⚡\s+([^/\s]+)/(\S+?)\s+·`)
 
-	if data, err := os.ReadFile("AGENTS.md"); err == nil {
-		basePersona += "\n\nPROJECT DIRECTIVES (AGENTS.md):\n" + string(data)
+// lastAttributionModel scans the chat for the MOST RECENT agent reply's
+// attribution footer and returns the provider/model that answered it. Empty
+// strings when no agent reply exists yet (fresh session or /clear).
+func lastAttributionModel(chat []chatMsg) (string, string) {
+	for i := len(chat) - 1; i >= 0; i-- {
+		cm := chat[i]
+		if cm.role != roleAgent {
+			continue
+		}
+		text := cm.text
+		if text == "" {
+			text = cm.content
+		}
+		// Take the LAST footer match in the message, not the first — a model
+		// reply could quote a footer in prose, and the real footer brocode
+		// appends is always at the very end.
+		if all := attributionFooterRe.FindAllStringSubmatch(text, -1); len(all) > 0 {
+			m := all[len(all)-1]
+			return m[1], m[2]
+		}
+	}
+	return "", ""
+}
+
+// modelIdentityNote tells the active model WHO it is and — critically — when
+// the user switched provider/model mid-session, that prior turns were answered
+// by a DIFFERENT model. A freshly switched model inherits the whole chat
+// history but has no way to know it was swapped in; without this note it may
+// misread earlier turns as its own output, copy the prior model's (possibly
+// wrong) tool format, or lose track of what changed. The note is injected into
+// the user prompt metadata — never the system prompt — so switching models
+// does not invalidate the system-prefix cache.
+func modelIdentityNote(chat []chatMsg, provider, model string, window int) string {
+	note := fmt.Sprintf("Active model: %s/%s", provider, model)
+	if window > 0 {
+		note += fmt.Sprintf(" | Context window: %s tokens", fmtTokens(window))
+	}
+	prevP, prevM := lastAttributionModel(chat)
+	if prevP != "" && (prevP != provider || prevM != model) {
+		note += fmt.Sprintf(" | NOTE: active model switched mid-session from %s/%s — earlier turns in this conversation were answered by that model; continue seamlessly with full context", prevP, prevM)
+	}
+	return note
+}
+
+func systemPromptForMode(plannerMode bool) string {
+	cwd, _ := os.Getwd()
+	// Environment block (P5): cwd + platform + date ground the model in the
+	// concrete machine, the same way Claude Code / OpenCode inject it. The
+	// line is stable within a day, so the system-prefix cache is untouched
+	// across prompts in the same session (P3 tracking: prefix stays stable).
+	// The directive block is deliberately LEAN: opencode/Claude-style prompts
+	// are short and let the model drive. Over-directing (18 numbered
+	// imperatives, several of which contradicted each other — "synthesize and
+	// answer now" vs "STRICTLY FORBIDDEN from prose on search-ish words") made
+	// free models overthink, stall, or answer the wrong thing. The loop-level
+	// safety (stall recovery, permission gate, budgets) lives in code, not
+	// prompt text.
+	// Lean agent prompt, modeled on the researched opencode/Claude structure:
+	// provider header → environment → concise actionable rules → AGENTS.md.
+	// NO "mandatory tool-call" imperatives — tool use is driven by the tool
+	// schema + the harness loop (stall recovery, budgets, explore subagent),
+	// exactly like Claude Code / opencode.
+	basePersona := fmt.Sprintf("You are BroCode, an expert coding assistant working in `%s`.\n", cwd) +
+		fmt.Sprintf("ENVIRONMENT: %s/%s | today: %s\n\n", runtime.GOOS, runtime.GOARCH, time.Now().Format("2006-01-02")) +
+		"RULES (ALWAYS/NEVER):\n" +
+		"- ALWAYS reason step-by-step before answering: understand the request → investigate for evidence → reason over what you found → then answer. Never answer from memory or assumption alone.\n" +
+		"- ALWAYS trace actual code paths for feature questions: `search` for the terms, then `read` the matched files and follow the logic (callers → implementation → callers) before explaining how something works. Do not guess from file names alone.\n" +
+		"- ALWAYS investigate before claiming or changing: use `search`/`read` for evidence; never assert project state from memory.\n" +
+		"- ALWAYS answer the user directly and concisely once you have evidence — do not keep calling tools after the question is answerable.\n" +
+		"- ALWAYS use the native tools (bash, search, read, write_file, edit_file, ask); never hand-write XML/code blocks for tool use. Delegate deep multi-file tracing to the `explore` subagent instead of dumping many files into context.\n" +
+		"- ALWAYS make the smallest safe change (root cause first; consider blast radius; verify with build/test after changing).\n" +
+		"- ALWAYS mirror the user's language; act autonomously without filler narration ('Step 1: …') or permission-asking for normal edits.\n" +
+		"- NEVER run risky commands without user consent (the permission gate enforces this); if denied, adapt — do not retry.\n" +
+		"- NEVER invent slash commands; suggest only real ones: /help /models /connect /search /compact /mcp /diff /tools /theme /clear /usage /memory /history.\n\n"
+
+	// Mode block: a short agent-specific section, like opencode's plan/build
+	// agent prompts. Read-only enforcement is ALSO structural (plannerMode
+	// narrows toolsPayload to search/read/ask/explore), so the text is just
+	// orientation, not the only guard.
+	if plannerMode {
+		basePersona += "MODE: PLANNER — read-only. Do not edit files or run mutating commands. Investigate, ask clarifying questions, and write the execution plan to 'brocode_plan.md' with markdown checkboxes (- [ ] Task).\n\n"
+	} else {
+		basePersona += "MODE: BUILDER — if 'brocode_plan.md' exists, execute its tasks in order and tick them (- [x]) only after verified completion.\n\n"
 	}
 
+	basePersona += "Tone: Crisp, deliberate, expert. You act autonomously directly in the user's workspace. Never ask the user to run commands you can run yourself."
+
+	if data := cachedProjectDirectives(); data != "" {
+		basePersona += "\n\nPROJECT DIRECTIVES (AGENTS.md):\n" + data
+	}
+
+	// AGENTS.md often references TOOLS FROM OTHER ECOSYSTEMS (kuma_context /
+	// kuma_memory / matcha / mcp tools configured for opencode or Claude Code
+	// on this repo). Those tools DO NOT EXIST in brocode — calling them burns
+	// a round on "unsupported tool" feedback and stalls the loop. State this
+	// explicitly so a weak free model that "MUST call kuma_context" per
+	// AGENTS.md knows to adapt instead of retrying a phantom tool.
+	basePersona += "\n\nIMPORTANT: This project's AGENTS.md may mention tools from other ecosystems (e.g. kuma_context, kuma_memory, kuma_safety, matcha, or MCP tools configured for opencode/Claude Code). Those tools are NOT available in brocode. NEVER call them — ignore those instructions and use brocode's native tools (bash, search, read) instead. If AGENTS.md says a step is optional when a tool is unavailable, treat it as unavailable and proceed normally."
+
 	return basePersona
+}
+
+// ── AGENTS.md cache ─────────────────────────────────────────────────────
+// systemPromptForMode reads AGENTS.md on EVERY message build (once per
+// request). AGENTS.md is a project file that changes rarely, so caching it
+// with mtime/size validation (same pattern as the config cache) turns a disk
+// read per request into one stat per request — and zero I/O when unchanged.
+var (
+	agentsCachePath string
+	agentsCacheMod  time.Time
+	agentsCacheSize int64
+	agentsCacheData string
+)
+
+// cachedProjectDirectives returns project directives, re-read only when any
+// candidate file's mtime or size changes (stat-validated cache). The file is
+// picked in opencode/Claude-discovery order: AGENTS.md first, then the
+// project-brief conventions file (MATCHA_PROJECT.md — the CRM repo's domain
+// brief opencode reads at startup), then CLAUDE.md / CONTEXT.md as fallbacks.
+// Only the FIRST file found is used (local search stops at the first hit,
+// mirroring the hierarchy). Reading MATCHA_PROJECT.md matters: it is the
+// domain context that let opencode answer "rotation = CRM lead rotation"
+// while brocode — which only looked for AGENTS.md (absent in that repo) —
+// had zero domain grounding and answered about a tiptap line-shape component
+// instead.
+func cachedProjectDirectives() string {
+	var candidates = []string{"AGENTS.md", "MATCHA_PROJECT.md", "CLAUDE.md", "CONTEXT.md"}
+	var current string
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			current = c
+			break
+		}
+	}
+	if current == "" {
+		agentsCachePath = ""
+		agentsCacheData = ""
+		return ""
+	}
+	fi, _ := os.Stat(current)
+	if agentsCachePath == current && fi != nil && agentsCacheMod.Equal(fi.ModTime()) && agentsCacheSize == fi.Size() {
+		return agentsCacheData
+	}
+	data, err := os.ReadFile(current)
+	if err != nil {
+		return ""
+	}
+	agentsCachePath = current
+	agentsCacheMod = fi.ModTime()
+	agentsCacheSize = fi.Size()
+	agentsCacheData = string(data)
+	return agentsCacheData
 }
 
 // zenMessages builds the OpenAI-style messages array from the bounded chat
 // history (prior turns give the model context) plus the current prompt. The
 // last chat entry is the just-appended user prompt from send(), so it is
 // skipped and re-added explicitly as q. Assistant replies are sent WITHOUT
-// their attribution footer.
-func zenMessages(chat []chatMsg, q string) []map[string]string {
+// their attribution footer. provider/model/window describe the CURRENT active
+// model so the model knows its own identity and any mid-session switch.
+// isTransientTurn reports whether q is an agentic-loop turn (tool result or
+// ask answer) rather than a real user prompt. These turns are transient
+// system events: they carry their own payload and must never trigger
+// workspace enrichment (project-tree walk + 300-file keyword scan) — a
+// mismatch between the prefixes used here and in send()/update.go made every
+// tool round re-walk the repo, adding seconds and thousands of tokens per
+// round. The agentic loop feeds results back as "Tool Execution Output:",
+// the ask tool as "[SYSTEM ASK RESULT]".
+func isTransientTurn(q string) bool {
+	return strings.HasPrefix(q, "[SYSTEM TOOL RESULT]") ||
+		strings.HasPrefix(q, "Tool Execution Output:") ||
+		strings.HasPrefix(q, "[SYSTEM ASK RESULT]")
+}
+
+func zenMessages(chat []chatMsg, q, provider, model string, window int, plannerMode bool) []map[string]string {
 	messages := make([]map[string]string, 0, len(chat)+2)
 	messages = append(messages, map[string]string{
 		"role":    "system",
-		"content": systemPromptForMode(),
+		"content": systemPromptForMode(plannerMode),
 	})
 	for i := 0; i < len(chat)-1; i++ {
+		var role, content string
 		switch chat[i].role {
 		case roleUser:
-			c := chat[i].text
-			if c == "" {
-				c = chat[i].content
+			role = "user"
+			content = chat[i].text
+			if content == "" {
+				content = chat[i].content
 			}
-			messages = append(messages, map[string]string{"role": "user", "content": c})
 		case roleAgent:
-			c := chat[i].text
-			if c == "" {
-				c = chat[i].content
+			role = "assistant"
+			content = stripAttribution(chat[i].text)
+			if content == "" {
+				content = chat[i].content
 			}
-			messages = append(messages, map[string]string{"role": "assistant", "content": stripAttribution(c)})
+		case roleTool:
+			// Agentic-loop tool feedback is conversation data: the assistant
+			// reply that follows it answers that output. Dropping these turns
+			// left the model with back-to-back assistant messages and a blank
+			// context gap ("what is the agent responding to?"). Sent as a
+			// user turn with the raw [SYSTEM TOOL RESULT] payload — the same
+			// convention the loop uses for the live tool-result prompt.
+			role = "user"
+			content = chat[i].content
+			if content == "" {
+				content = chat[i].text
+			}
+		case roleSystem:
+			// Only the L2 compaction ledger (the folded-context summary) is
+			// conversation data — UI chatter (theme changes, OAuth notices,
+			// interrupt banners) must not reach the model. Dropping the ledger
+			// silently erased everything compaction folded: the model saw a
+			// mid-conversation gap.
+			content = chat[i].text
+			if content == "" {
+				content = chat[i].content
+			}
+			if strings.Contains(content, "L2 ledger") {
+				role = "system"
+			}
+		}
+		// Never send a blank row (empty content after all fallbacks) — a
+		// zero-length message would read as a broken/blank turn to the model.
+		if role != "" && strings.TrimSpace(content) != "" {
+			messages = append(messages, map[string]string{"role": role, "content": content})
 		}
 	}
-	
+
 	complexity, score := agentic.EvaluateComplexity(q)
 	route := "FAST PATH (Minimal inspection)"
 	if complexity == agentic.DeepPath {
@@ -210,24 +392,294 @@ func zenMessages(chat []chatMsg, q string) []map[string]string {
 	} else if complexity == agentic.NormalPath {
 		route = "NORMAL PATH (Inspect -> implement -> verify)"
 	}
-	
-	// Inject the dynamic routing context seamlessly into the user prompt
-	routedPrompt := fmt.Sprintf("%s\n\n[SYSTEM METADATA: Task Complexity Score: %d | Assigned Route: %s. Adjust your workflow depth accordingly.]", q, score, route)
-	
-	messages = append(messages, map[string]string{"role": "user", "content": routedPrompt})
+
+	// Inject the routing context AND the model-identity note into the user
+	// prompt. Both are per-request metadata — they belong at the end of the
+	// last user message so the stable system-prompt prefix (and its cache) is
+	// never touched. The old "CRITICAL RUNTIME DIRECTIVES" block was REMOVED:
+	// it re-injected aggressive imperatives into every prompt ("EXPLAIN PASTED
+	// TEXT FIRST", "MANDATORY TOOL EXECUTION") that duplicated — and
+	// contradicted — the lean system prompt, and told weak models to act
+	// before understanding, producing the wrong-topic answers the user
+	// reported.
+	routedPrompt := fmt.Sprintf(
+		"%s\n\n[SYSTEM METADATA: Task Complexity Score: %d | Assigned Route: %s | %s. Adjust your workflow depth accordingly.]",
+		q, score, route, modelIdentityNote(chat, provider, model, window))
+
+	messages = append(messages, map[string]string{
+		"role":    "user",
+		"content": routedPrompt,
+	})
 	return messages
+}
+
+// toolsPayload returns the native OpenAI JSON Tools schema for function
+// calling. plannerMode narrows the surface to the read-only core (search,
+// read, ask) — the model physically cannot emit write/edit/bash tool calls in
+// plan mode (P3 enforcement at the tool level, on top of the existing
+// text-block gates in builder.go).
+func toolsPayload(plannerMode bool) []map[string]interface{} {
+	all := []map[string]interface{}{
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "bash",
+				"description": "Execute a shell command in the workspace.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"command": map[string]interface{}{
+							"type":        "string",
+							"description": "The shell command to execute.",
+						},
+					},
+					"required": []string{"command"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "search",
+				"description": "Search workspace files instantly using pre-indexed BM25 relevance search.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "The search query keywords.",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "read",
+				"description": "Read file content from the workspace.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "File path to read.",
+						},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "write_file",
+				"description": "Create or completely overwrite a file.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "File path to write.",
+						},
+						"content": map[string]interface{}{
+							"type":        "string",
+							"description": "The full content to write into the file.",
+						},
+					},
+					"required": []string{"path", "content"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "edit_file",
+				"description": "Search and replace a specific block of text in an existing file. Use this to modify files safely.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "File path to edit.",
+						},
+						"search": map[string]interface{}{
+							"type":        "string",
+							"description": "The exact existing code block to replace.",
+						},
+						"replace": map[string]interface{}{
+							"type":        "string",
+							"description": "The new code block that will replace the search block.",
+						},
+					},
+					"required": []string{"path", "search", "replace"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "ask",
+				"description": "Ask the user a clarifying question before proceeding.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"question": map[string]interface{}{
+							"type":        "string",
+							"description": "The question to ask the user.",
+						},
+						"options": map[string]interface{}{
+							"type": "array",
+							"items": map[string]interface{}{
+								"type": "string",
+							},
+							"description": "List of options for the user to select from.",
+						},
+					},
+					"required": []string{"question", "options"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "explore",
+				"description": "Delegate focused read-only codebase research to a subagent. Use for deep multi-file investigation (e.g. 'map the rotation pipeline'): the subagent searches and reads many files and returns a condensed report with file:line findings. Keeps the main context lean — only the report comes back.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"question": map[string]interface{}{
+							"type":        "string",
+							"description": "The focused research question for the subagent.",
+						},
+					},
+					"required": []string{"question"},
+				},
+			},
+		},
+	}
+	if !plannerMode {
+		return all
+	}
+	// Plan mode: keep the read-only core — search, read, ask + explore
+	// (delegated research is read-only by construction). The model physically
+	// cannot emit write/edit/bash tool calls (P3 enforcement at the tool
+	// level, on top of the existing text-block gates in builder.go).
+	out := make([]map[string]interface{}, 0, 4)
+	for _, t := range all {
+		fn, _ := t["function"].(map[string]interface{})
+		name, _ := fn["name"].(string)
+		if name == "search" || name == "read" || name == "ask" || name == "explore" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // parseZenResponse extracts the answer text, the optional reasoning trace and
 // the real token usage from a Zen chat-completions response (OpenAI shape
-// plus reasoning_content, which is what the gateway returns for thinking
-// models).
+// plus reasoning_content). It sanitizes trailing SSE markers (e.g. `data: [DONE]`)
+// that proxy gateways like 9router/OpenRouter append to non-streaming HTTP responses.
+// zenToolCall is one native tool call emitted by the model (OpenAI shape).
+// Shared by the non-streaming parser (parseZenResponse) and the SSE path
+// (zenChatReply) so both produce identical executable blocks (P2).
+type zenToolCall struct {
+	ID        string
+	Name      string
+	Arguments string // raw JSON arguments string, parsed per-tool below
+}
+
+// toolCallsToBlocks renders native tool calls as the executable text blocks
+// the tool runner understands (```bash fences, <tool_call> XML, cat >
+// heredocs, SEARCH/REPLACE hunks). Any leading content text is preserved
+// above the blocks. Unknown tool names are skipped rather than echoed raw
+// (the runner would reject them with a confusing error).
+func toolCallsToBlocks(text string, tcs []zenToolCall) string {
+	var sb strings.Builder
+	if text != "" {
+		sb.WriteString(text + "\n\n")
+	}
+	for _, tc := range tcs {
+		name := strings.ToLower(tc.Name)
+		var args map[string]interface{}
+		_ = json.Unmarshal([]byte(tc.Arguments), &args)
+
+		switch name {
+		case "bash", "sh":
+			if cmd, ok := args["command"].(string); ok && strings.TrimSpace(cmd) != "" {
+				sb.WriteString(fmt.Sprintf("```bash\n%s\n```\n", strings.TrimSpace(cmd)))
+			}
+		case "search":
+			if query, ok := args["query"].(string); ok && strings.TrimSpace(query) != "" {
+				sb.WriteString(fmt.Sprintf("<tool_call>search\n%s\n</tool_call>\n", strings.TrimSpace(query)))
+			}
+		case "read":
+			if path, ok := args["path"].(string); ok && strings.TrimSpace(path) != "" {
+				sb.WriteString(fmt.Sprintf("<tool_call>read\n%s\n</tool_call>\n", strings.TrimSpace(path)))
+			}
+		case "write_file":
+			if path, ok := args["path"].(string); ok {
+				if content, ok := args["content"].(string); ok {
+					// Use builder.go's cat block format for file writing
+					sb.WriteString(fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF\n", strings.TrimSpace(path), content))
+				}
+			}
+		case "edit_file":
+			if path, ok := args["path"].(string); ok {
+				if search, ok := args["search"].(string); ok {
+					if replace, ok := args["replace"].(string); ok {
+						// Use builder.go's SEARCH/REPLACE format
+						sb.WriteString(fmt.Sprintf("<<<<<<< SEARCH: %s\n%s\n=======\n%s\n>>>>>>> REPLACE\n", strings.TrimSpace(path), search, replace))
+					}
+				}
+			}
+		case "ask":
+			if question, ok := args["question"].(string); ok {
+				if optionsList, ok := args["options"].([]interface{}); ok {
+					sb.WriteString(fmt.Sprintf("<tool_call>ask\n<ask_question>%s\n", strings.TrimSpace(question)))
+					for _, opt := range optionsList {
+						if optStr, ok := opt.(string); ok {
+							sb.WriteString(fmt.Sprintf("- %s\n", strings.TrimSpace(optStr)))
+						}
+					}
+					sb.WriteString("</ask_question>\n</tool_call>\n")
+				}
+			}
+		case "explore":
+			if question, ok := args["question"].(string); ok && strings.TrimSpace(question) != "" {
+				sb.WriteString(fmt.Sprintf("<tool_call>explore\n%s\n</tool_call>\n", strings.TrimSpace(question)))
+			}
+		}
+	}
+	return sb.String()
+}
+
+// It natively parses OpenAI tool_calls JSON payloads.
 func parseZenResponse(body []byte) (text, reasoning string, tok tokenUsage, err error) {
+	s := strings.TrimSpace(string(body))
+	if idx := strings.Index(s, "data: [DONE]"); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	if first := strings.IndexByte(s, '{'); first >= 0 {
+		if last := strings.LastIndexByte(s, '}'); last > first {
+			s = s[first : last+1]
+		}
+	}
+
 	var resp struct {
 		Choices []struct {
 			Message struct {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
@@ -236,12 +688,38 @@ func parseZenResponse(body []byte) (text, reasoning string, tok tokenUsage, err 
 			TotalTokens      int `json:"total_tokens"`
 		} `json:"usage"`
 	}
-	if err := json.Unmarshal(body, &resp); err != nil {
+	if err := json.Unmarshal([]byte(s), &resp); err != nil {
 		return "", "", tokenUsage{}, err
 	}
 	if len(resp.Choices) > 0 {
-		text = resp.Choices[0].Message.Content
-		reasoning = strings.TrimSpace(resp.Choices[0].Message.ReasoningContent)
+		msg := resp.Choices[0].Message
+		text = msg.Content
+		reasoning = strings.TrimSpace(msg.ReasoningContent)
+
+		// Convert native OpenAI tool_calls into clean execution blocks (shared
+		// helper — the SSE path produces the same blocks, P2).
+		if len(msg.ToolCalls) > 0 {
+			tcs := make([]zenToolCall, 0, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				tcs = append(tcs, zenToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+			}
+			text = toolCallsToBlocks(text, tcs)
+		}
+	}
+
+	// Handle thinking models (like DeepSeek / Poolside) that output raw <think> ... </think> tags
+	if strings.Contains(text, "<think>") {
+		if start := strings.Index(text, "<think>"); start >= 0 {
+			if end := strings.Index(text, "</think>"); end > start {
+				th := strings.TrimSpace(text[start+7 : end])
+				if reasoning == "" {
+					reasoning = th
+				} else {
+					reasoning = reasoning + "\n" + th
+				}
+				text = strings.TrimSpace(text[:start] + text[end+8:])
+			}
+		}
 	}
 	tok.input = resp.Usage.PromptTokens
 	tok.output = resp.Usage.CompletionTokens
@@ -265,7 +743,8 @@ func zenChatReply(m Model, q, model, endpoint string, traceCh chan<- agentTraceM
 	wf.phaseThinking() // → thinking… · opencode/model
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"model":       model,
-		"messages":    zenMessages(m.chat, q),
+		"messages":    zenMessages(m.chat, q, "opencode", model, m.window, m.plannerMode),
+		"tools":       toolsPayload(m.plannerMode),
 		"temperature": 0.7,
 		"max_tokens":  4096,
 		"stream":      true,
@@ -353,6 +832,12 @@ func zenChatReply(m Model, q, model, endpoint string, traceCh chan<- agentTraceM
 	var tok tokenUsage
 	phase := "reasoning"
 	chunkCount := 0
+	// Native tool-call fragments accumulated per index across SSE deltas (P2).
+	var streamToolCalls []struct {
+		ID   string
+		Name string
+		Args strings.Builder
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
@@ -367,13 +852,25 @@ func zenChatReply(m Model, q, model, endpoint string, traceCh chan<- agentTraceM
 			break
 		}
 
-		// Parse the SSE chunk (OpenAI streaming delta format)
+		// Parse the SSE chunk (OpenAI streaming delta format). delta.tool_calls
+		// ARE parsed here (P2): the gateway streams native tool calls as
+		// fragments — {index, id, function:{name, arguments}} — where name
+		// appears once and arguments arrive in pieces that must be
+		// concatenated per index.
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
 					Content          string `json:"content"`
 					ReasoningContent string `json:"reasoning_content"`
 					Role             string `json:"role"`
+					ToolCalls        []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
 				} `json:"delta"`
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
@@ -419,6 +916,26 @@ func zenChatReply(m Model, q, model, endpoint string, traceCh chan<- agentTraceM
 			chunkCount++
 		}
 
+		// Native tool call fragments — accumulate by index (P2).
+		for _, tc := range delta.ToolCalls {
+			for len(streamToolCalls) <= tc.Index {
+				streamToolCalls = append(streamToolCalls, struct {
+					ID   string
+					Name string
+					Args strings.Builder
+				}{})
+			}
+			if tc.ID != "" {
+				streamToolCalls[tc.Index].ID = tc.ID
+			}
+			if tc.Function.Name != "" {
+				streamToolCalls[tc.Index].Name = tc.Function.Name
+			}
+			if tc.Function.Arguments != "" {
+				streamToolCalls[tc.Index].Args.WriteString(tc.Function.Arguments)
+			}
+		}
+
 		// Check for finish
 		if chunk.Choices[0].FinishReason != nil {
 			break
@@ -429,15 +946,32 @@ func zenChatReply(m Model, q, model, endpoint string, traceCh chan<- agentTraceM
 	text := strings.TrimSpace(fullContent.String())
 	reasoningText := strings.TrimSpace(reasoning.String())
 
-	if text == "" && reasoningText != "" {
-		text = reasoningText
+	// Native tool calls streamed over SSE are converted to executable blocks
+	// HERE — no non-streaming retry needed (P2). Blocks for content-less tool
+	// replies become the whole reply text and feed the existing tool runner.
+	if len(streamToolCalls) > 0 {
+		tcs := make([]zenToolCall, 0, len(streamToolCalls))
+		for _, stc := range streamToolCalls {
+			if stc.Name == "" {
+				continue // fragment with no name — skip, never emit empty blocks
+			}
+			tcs = append(tcs, zenToolCall{ID: stc.ID, Name: stc.Name, Arguments: stc.Args.String()})
+		}
+		if len(tcs) > 0 {
+			text = toolCallsToBlocks(text, tcs)
+		}
 	}
 
+	// A stream that delivered ONLY reasoning (no content, no tool call) is
+	// NOT a finished answer: the model stalled promising to search. Retry
+	// non-streaming BEFORE promoting the trace to the reply text — the retry
+	// may still return real content (AGENTIC_OVERHAUL D2).
 	if text == "" {
-		// Non-streaming fallback retry: stream gave 0 tokens → retry once synchronously with stream: false
+		// Non-streaming fallback retry: stream gave 0 content tokens → retry once synchronously with stream: false
 		fallbackBody, _ := json.Marshal(map[string]interface{}{
 			"model":       model,
-			"messages":    zenMessages(m.chat, q),
+			"messages":    zenMessages(m.chat, q, "opencode", model, m.window, m.plannerMode),
+			"tools":       toolsPayload(m.plannerMode),
 			"temperature": 0.7,
 			"max_tokens":  4096,
 			"stream":      false,
@@ -456,6 +990,60 @@ func zenChatReply(m Model, q, model, endpoint string, traceCh chan<- agentTraceM
 						}
 						if fbTok.total > 0 {
 							tok = fbTok
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Reasoning-only promotion — AFTER the retry, so a thinking trace is never
+	// presented as the answer while a tool call or real content is recoverable.
+	if text == "" && reasoningText != "" {
+		text = reasoningText
+
+		// Stall recovery (AGENTIC_OVERHAUL P0): the reply is STILL
+		// reasoning-only — no content, no tool call — so the turn would
+		// dead-end on a thinking trace. Re-prompt ONCE with a [SYSTEM TOOL
+		// RESULT] the model cannot ignore. The trigger is the OBSERVED stall
+		// itself (no prompt classifier — a reasoning-only reply is always a
+		// failed turn, whatever the language), and it only costs a call when
+		// the evidence pass actually matches files. Bounded: this is the
+		// third and final model call per user prompt (stream + retry +
+		// recovery). rawQ strips the workspace-context prefix
+		// attachFileContext added, so the evidence pass sees the real prompt.
+		rawQ := stripEnrichedPrompt(q)
+		// Tool/ask-result turns carry their own payload and must never trigger
+		// the evidence re-prompt (the model already holds the tool output; a
+		// second evidence injection would be a redundant full model call).
+		if !isTransientTurn(rawQ) {
+			if ev := explorationEvidence(rawQ, nil); ev != "" {
+				msgs := zenMessages(m.chat, q, "opencode", model, m.window, m.plannerMode)
+				msgs = append(msgs, map[string]string{
+					"role":    "user",
+					"content": "[SYSTEM TOOL RESULT]\n" + ev + "\nYour previous reply contained only reasoning with no tool call and no answer. Use this evidence to answer now, or continue investigating with the `search` / `read` tools.",
+				})
+				if body, err := json.Marshal(map[string]interface{}{
+					"model":       model,
+					"messages":    msgs,
+					"tools":       toolsPayload(m.plannerMode),
+					"temperature": 0.7,
+					"max_tokens":  4096,
+					"stream":      false,
+				}); err == nil {
+					if recReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(string(body))); err == nil {
+						recReq.Header.Set("Content-Type", "application/json")
+						if recResp, err := client.Do(recReq); err == nil {
+							recData, recErr := io.ReadAll(recResp.Body)
+							recResp.Body.Close()
+							if recErr == nil {
+								if rText, _, rTok, pErr := parseZenResponse(recData); pErr == nil && rText != "" {
+									text = rText
+									if rTok.total > 0 {
+										tok = rTok
+									}
+								}
+							}
 						}
 					}
 				}
@@ -507,7 +1095,7 @@ func zenChatReply(m Model, q, model, endpoint string, traceCh chan<- agentTraceM
 // in-flight request can be aborted (context cancel / subprocess kill) when
 // the user presses ESC. run tags the result so stale/interrupted runs are
 // dropped in Update.
-func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<- agentQuestionMsg, answerCh chan string, cancel *func(), run int) tea.Cmd {
+func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<- agentAskMsg, answerCh chan string, cancel *func(), run int) tea.Cmd {
 	selectedMod := m.selectedModel
 	if selectedMod == "" {
 		selectedMod = openCodeFreeModels[0]
@@ -517,6 +1105,28 @@ func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<-
 	return func() tea.Msg {
 		defer close(traceCh) // Always close so waitForTrace stops
 		defer close(askCh)   // …and waitForAsk
+
+		// Workspace context enrichment (project tree + file attachments +
+		// keyword search) runs HERE in the background goroutine — never in
+		// the UI update loop. send() used to attach it synchronously, which
+		// froze the whole TUI (Enter AND typing) on every prompt while the
+		// project was walked and every file was read. Tool-result turns skip
+		// enrichment: they are transient system events that don't need (and
+		// shouldn't burn tokens on) workspace context. The guard must match
+		// the EXACT prefixes send() uses for those transient turns — the
+		// agentic loop feeds results back as "Tool Execution Output:" (not
+		// "[SYSTEM TOOL RESULT]"), and a mismatch here made every tool round
+		// re-walk the tree + rescan up to 300 files, bloating per-round
+		// latency and tokens (observed: ~2.2s + ~6k tokens per read round).
+		if isTransientTurn(q) {
+			// Tool-result turns: strip the transport prefix, then attach the
+			// CHEAP cached tree (orientation only — free models forget
+			// structure between rounds). No heavy re-walk / 300-file scan.
+			q = strings.TrimPrefix(q, "Tool Execution Output:\n")
+			q = attachTransientContext(q)
+		} else {
+			q = attachFileContext(q, m.plannerMode)
+		}
 
 		// OpenCode provider: native HTTP to the Zen gateway — no CLI wrapper.
 		if m.provider == "opencode" {
@@ -699,12 +1309,15 @@ func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<-
 			// Phase 1: thinking
 			wf.phaseThinking()
 
-			// Build OpenAI-compatible request body
+			// Build OpenAI-compatible request body. The messages come from
+			// zenMessages(m.chat, q) — the SAME history builder the other
+			// OpenAI-compatible providers use. Sending only the current query
+			// made every groq turn context-free ("gas" after a long plan was
+			// answered as if it were a first message).
 			reqBody := map[string]interface{}{
-				"model": groqModel,
-				"messages": []map[string]string{
-					{"role": "user", "content": q},
-				},
+				"model":       groqModel,
+				"messages":    zenMessages(m.chat, q, "groq", groqModel, m.window, m.plannerMode),
+				"tools":       toolsPayload(m.plannerMode),
 				"temperature": 0.7,
 				"max_tokens":  4096,
 			}
@@ -825,10 +1438,9 @@ func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<-
 			wf.phaseThinking()
 
 			reqBody := map[string]interface{}{
-				"model": poolModel,
-				"messages": []map[string]string{
-					{"role": "user", "content": q},
-				},
+				"model":       poolModel,
+				"messages":    zenMessages(m.chat, q, "poolside", poolModel, m.window, m.plannerMode),
+				"tools":       toolsPayload(m.plannerMode),
 				"temperature": 0.7,
 				"max_tokens":  4096,
 			}
@@ -921,31 +1533,47 @@ func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<-
 				return agentResultMsg{reply: reply, tokens: tok, run: run}
 			}
 		}
+		// Dynamic Custom Providers from config.jsonc
+		cfg := LoadAppConfig()
+		cfgProvider, isCustom := cfg.Provider[m.provider]
+		if isCustom || m.provider == "custom" {
+			var endpoint, apiKey string
+			headers := make(map[string]string)
 
-		if m.provider == "custom" {
-			keyData := loadAPIKey("custom")
-			parts := strings.Split(keyData, "|")
-			endpoint := "http://localhost:11434/v1/chat/completions"
-			apiKey := ""
-			if len(parts) >= 1 && parts[0] != "" {
-				endpoint = parts[0]
-				if !strings.HasSuffix(endpoint, "/chat/completions") {
-					endpoint = strings.TrimRight(endpoint, "/") + "/chat/completions"
+			if isCustom {
+				endpoint = cfgProvider.Options.BaseURL
+				apiKey = cfgProvider.Options.APIKey
+				if cfgProvider.Options.Headers != nil {
+					headers = cfgProvider.Options.Headers
+				}
+			} else {
+				// Legacy custom fallback
+				keyData := loadAPIKey("custom")
+				parts := strings.Split(keyData, "|")
+				endpoint = "http://localhost:11434/v1/chat/completions"
+				if len(parts) >= 1 && parts[0] != "" {
+					endpoint = parts[0]
+				}
+				if len(parts) >= 2 {
+					apiKey = parts[1]
 				}
 			}
-			if len(parts) >= 2 {
-				apiKey = parts[1]
+
+			if !strings.HasSuffix(endpoint, "/chat/completions") {
+				endpoint = strings.TrimRight(endpoint, "/") + "/chat/completions"
 			}
+
 			customModel := m.selectedModel
 			if customModel == "" {
 				customModel = "default"
 			}
 
-			wf := newWorkflow(traceCh, "custom", customModel, startTime)
+			wf := newWorkflow(traceCh, m.provider, customModel, startTime)
 			wf.phaseThinking()
 			reqBody := map[string]interface{}{
 				"model":       customModel,
-				"messages":    zenMessages(m.chat, q),
+				"messages":    zenMessages(m.chat, q, m.provider, customModel, m.window, m.plannerMode),
+				"tools":       toolsPayload(m.plannerMode),
 				"temperature": 0.7,
 				"max_tokens":  8192,
 			}
@@ -956,13 +1584,16 @@ func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<-
 			if err != nil {
 				wf.phaseError(err.Error())
 				return agentResultMsg{reply: mockReply{
-					text:  parseCLIError("custom", "", err),
-					items: []activityItem{{tool: "custom", label: "request build failed", status: "error", detail: err.Error()}},
+					text:  parseCLIError(m.provider, "", err),
+					items: []activityItem{{tool: m.provider, label: "request build failed", status: "error", detail: err.Error()}},
 				}, run: run}
 			}
 			req.Header.Set("Content-Type", "application/json")
 			if apiKey != "" {
 				req.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			for k, v := range headers {
+				req.Header.Set(k, v)
 			}
 
 			client := &http.Client{Timeout: 600 * time.Second}
@@ -986,24 +1617,32 @@ func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<-
 			}
 
 			wf.phaseReceiving()
-			text, _, tok, err := parseZenResponse(respBody)
+			text, reasoning, tok, err := parseZenResponse(respBody)
 			if err != nil {
 				wf.phaseError(err.Error())
 				return agentResultMsg{reply: mockReply{
-					text:  parseCLIError("custom", string(respBody), err),
-					items: []activityItem{{tool: "custom", label: "parse error", status: "error", detail: err.Error()}},
+					text:  parseCLIError(m.provider, string(respBody), err),
+					items: []activityItem{{tool: m.provider, label: "parse error", status: "error", detail: err.Error()}},
 				}, run: run}
 			}
 
 			elapsed := time.Since(startTime)
 			if text != "" {
-				attr := fmt.Sprintf("\n\n  ⚡ custom/%s · %.1fs · %s tokens", customModel, elapsed.Seconds(), fmtTokens(tok.total))
+				var col *collapse
+				if reasoning != "" {
+					col = &collapse{
+						summary: "thinking trace (" + fmt.Sprintf("%d chars", len(reasoning)) + ")",
+						content: reasoning,
+					}
+				}
+				attr := fmt.Sprintf("\n\n  ⚡ %s/%s · %.1fs · %s tokens", m.provider, customModel, elapsed.Seconds(), fmtTokens(tok.total))
 				text += attr
 				wf.phaseDone(elapsed, fmt.Sprintf("%d tokens", tok.total))
 				reply := mockReply{
-					text: text,
+					text:     text,
+					collapse: col,
 					items: []activityItem{{
-						tool: "custom", label: fmt.Sprintf("custom %s", customModel), status: "ok",
+						tool: m.provider, label: fmt.Sprintf("%s %s", m.provider, customModel), status: "ok",
 						detail: fmt.Sprintf("%.1fs · %d tokens", elapsed.Seconds(), tok.total),
 					}},
 				}
@@ -1023,7 +1662,7 @@ func (m Model) agentWorkCmd(q string, traceCh chan<- agentTraceMsg, askCh chan<-
 // process log and interactive question UX are demonstrable without a real
 // tool-calling model. It streams dimmed tool entries, spawns a mock subagent,
 // asks the user how to continue, then finishes with a tailored reply.
-func mockAgentRun(m Model, q string, traceCh chan<- agentTraceMsg, askCh chan<- agentQuestionMsg, answerCh <-chan string, startTime time.Time, run int) tea.Msg {
+func mockAgentRun(m Model, q string, traceCh chan<- agentTraceMsg, askCh chan<- agentAskMsg, answerCh <-chan string, startTime time.Time, run int) tea.Msg {
 	const tick = agentLatency / 5
 
 	steps := []struct {
@@ -1044,14 +1683,27 @@ func mockAgentRun(m Model, q string, traceCh chan<- agentTraceMsg, askCh chan<- 
 	sendPhase(traceCh, "spawning subagent…", "(spawn @finder) → locate symbols & dependency tree")
 	time.Sleep(tick)
 
-	// Ask the user — the run pauses until they answer or cancel.
-	askCh <- agentQuestionMsg{
-		prompt: "Task completed. How to proceed?",
-		options: []string{
-			"Show answer summary",
-			"Show change diff",
-			"Run tests & report results",
-			"Jelaskan detail implementasi",
+	// Ask the user — the run pauses until they answer or cancel. The popover
+	// supports MULTIPLE questions (radio + checkbox) in one go.
+	askCh <- agentAskMsg{
+		title: "agent needs your input",
+		questions: []askQuestion{
+			{
+				header:   "How to proceed",
+				question: "Task completed. How to proceed?",
+				options: []string{
+					"Show answer summary",
+					"Show change diff",
+					"Run tests & report results",
+					"Jelaskan detail implementasi",
+				},
+			},
+			{
+				header:      "Extras",
+				question:    "What else to include? (pick any)",
+				options:     []string{"Trace log", "Token usage", "Next-step suggestions"},
+				multiSelect: true,
+			},
 		},
 		run: run,
 	}
@@ -1091,7 +1743,7 @@ func mockAgentRun(m Model, q string, traceCh chan<- agentTraceMsg, askCh chan<- 
 
 // freebuffNativeAgentRun executes Freebuff via native API with saved credentials.
 // Follows the unified provider workflow: thinking → processing → receiving → done.
-func freebuffNativeAgentRun(m Model, q string, traceCh chan<- agentTraceMsg, askCh chan<- agentQuestionMsg, answerCh <-chan string, startTime time.Time, cancel *func(), run int) tea.Msg {
+func freebuffNativeAgentRun(m Model, q string, traceCh chan<- agentTraceMsg, askCh chan<- agentAskMsg, answerCh <-chan string, startTime time.Time, cancel *func(), run int) tea.Msg {
 	selectedMod := m.selectedModel
 	if selectedMod == "" {
 		selectedMod = freebuffNativeModels[0]
@@ -1156,7 +1808,7 @@ func freebuffNativeAgentRun(m Model, q string, traceCh chan<- agentTraceMsg, ask
 
 // codebuffNativeAgentRun executes Codebuff via native API with saved credentials.
 // Follows the unified provider workflow: thinking → processing → receiving → done.
-func codebuffNativeAgentRun(m Model, q string, traceCh chan<- agentTraceMsg, askCh chan<- agentQuestionMsg, answerCh <-chan string, startTime time.Time, cancel *func(), run int) tea.Msg {
+func codebuffNativeAgentRun(m Model, q string, traceCh chan<- agentTraceMsg, askCh chan<- agentAskMsg, answerCh <-chan string, startTime time.Time, cancel *func(), run int) tea.Msg {
 	selectedMod := m.selectedModel
 	if selectedMod == "" {
 		selectedMod = codebuffNativeModels[0]
@@ -1293,8 +1945,9 @@ func (m Model) waitForTrace() tea.Cmd {
 	}
 }
 
-// waitForAsk relays a pending agent question. The goroutine closes askCh when
-// the run finishes, which returns nil here and stops the relay.
+// waitForAsk relays a pending agent ask (one or more questions). The goroutine
+// closes askCh when the run finishes, which returns nil here and stops the
+// relay.
 func (m Model) waitForAsk() tea.Cmd {
 	ch := m.askCh
 	if ch == nil {
@@ -1305,6 +1958,6 @@ func (m Model) waitForAsk() tea.Cmd {
 		if !ok {
 			return nil // run finished without asking
 		}
-		return agentQuestionMsg{prompt: q.prompt, options: q.options}
+		return agentAskMsg{title: q.title, questions: q.questions, run: q.run}
 	}
 }

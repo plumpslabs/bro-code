@@ -100,16 +100,31 @@ func (m Model) ctxColor(pct float64) lipgloss.Style {
 	switch {
 	case pct >= 80:
 		return m.styles.err
-	case pct >= compactTriggerPct*100:
+	case pct >= m.compactTriggerPct()*100:
 		return m.styles.statusRight
 	default:
 		return m.styles.statusLeft
 	}
 }
 
-// modelWindowFor returns the exact context window size for a given model or provider.
+// modelWindowFor returns the exact context window size for a given model or
+// provider. A custom provider's own declared limit (config.jsonc →
+// provider.<id>.models.<model>.limit.context) is authoritative and wins over
+// every heuristic — that's how a user with a 1M-token local model gets a 1M
+// window instead of the 128k fallback.
 func modelWindowFor(provider, model string) int {
 	model = strings.ToLower(model)
+
+	// Config-defined custom models declare their own window — the single
+	// source of truth for custom providers (settings > heuristic). Matched
+	// case-insensitively because model names are lowercased above.
+	if p, ok := LoadAppConfig().Provider[provider]; ok {
+		for mid, cm := range p.Models {
+			if strings.EqualFold(mid, model) && cm.Limit.Context > 0 {
+				return cm.Limit.Context
+			}
+		}
+	}
 
 	// Explicit context tags in model name
 	if strings.Contains(model, "-2m") {
@@ -159,7 +174,11 @@ func modelWindowFor(provider, model string) int {
 		return 1_000_000
 	}
 	if provider == "groq" {
-		return 8_192 // Groq typical limit
+		// Modern Groq models (llama-3.3-70b, deepseek-r1-distill, qwen, etc.)
+		// expose 128k+ windows. The old 8k fallback made unknown Groq models
+		// trigger auto-compaction at ~5.7k tokens — far too aggressive and
+		// destructive for a provider whose models are 128k-class.
+		return 128_000
 	}
 
 	return 128_000 // Standard fallback
@@ -191,13 +210,14 @@ func (m Model) renderPanel() string {
 	}
 	sb.WriteString(m.kv("model", clip(modName, w-9), w))
 
-	// Used — settlement numbers when the API reported them, otherwise the
-	// calibrated forecast (doctrine P3), explicitly labeled "~" so nobody
-	// mistakes an estimate for a bill. Percent is color-coded by pressure.
-	used := m.actualTokens.total
+	// Used — the effective context pressure: the provider's last reported
+	// INPUT when available (settlement — what the API actually counted),
+	// otherwise the calibrated forecast (doctrine P3), explicitly labeled
+	// "~" so nobody mistakes an estimate for a bill. Percent is color-coded
+	// by pressure and matches what auto-compaction fires on.
+	used := m.contextPressure()
 	label := ""
-	if used == 0 {
-		used = m.ctxUsed
+	if m.actualTokens.input == 0 {
 		label = "~" // forecast, not settlement
 	}
 	win := "—"

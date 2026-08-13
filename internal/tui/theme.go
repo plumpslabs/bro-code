@@ -95,6 +95,7 @@ type styles struct {
 	userBar     lipgloss.Style // vertical bar on the left of user messages
 	agent       lipgloss.Style
 	sys         lipgloss.Style
+	tool        lipgloss.Style // agentic tool events (⚙) — dim, italic, system-like
 	prompt      lipgloss.Style
 	statusLeft  lipgloss.Style
 	statusRight lipgloss.Style
@@ -106,7 +107,6 @@ type styles struct {
 	selReverse  lipgloss.Style // drag-select highlight (reverse video)
 	builderMode lipgloss.Style
 	plannerMode lipgloss.Style
-	matchaMode  lipgloss.Style
 
 	chatBoxOn  lipgloss.Style
 	sideBoxIn  lipgloss.Style
@@ -138,6 +138,7 @@ func newStyles(t Theme) styles {
 		userBar:     lipgloss.NewStyle().Foreground(t.Primary),
 		agent:       lipgloss.NewStyle().Foreground(t.Secondary),
 		sys:         lipgloss.NewStyle().Italic(true).Foreground(t.Muted),
+		tool:        lipgloss.NewStyle().Italic(true).Foreground(t.Secondary),
 		prompt:      lipgloss.NewStyle().Bold(true).Foreground(t.Primary),
 		statusLeft:  lipgloss.NewStyle().Foreground(t.Muted),
 		statusRight: lipgloss.NewStyle().Foreground(t.Accent),
@@ -149,7 +150,6 @@ func newStyles(t Theme) styles {
 		selReverse:  lipgloss.NewStyle().Reverse(true),
 		builderMode: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#fbbf24")),
 		plannerMode: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#34d399")),
-		matchaMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#2dd4bf")),
 
 		chatBoxOn:  box(t.BorderActive),
 		sideBoxIn:  box(t.Border),

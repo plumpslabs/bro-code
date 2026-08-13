@@ -88,7 +88,7 @@ func (f *DedupFilter) OnExit(exitCode int) string { return "" }
 
 // TruncateFilter limits the total number of lines emitted.
 type TruncateFilter struct {
-	MaxLines   int
+	MaxLines     int
 	linesEmitted int
 	truncated    bool
 }

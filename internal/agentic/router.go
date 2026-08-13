@@ -8,9 +8,9 @@ import (
 type TaskComplexity int
 
 const (
-	FastPath TaskComplexity = iota // Score 0-3 (direct edit/verify)
-	NormalPath                     // Score 4-6 (inspect -> implement -> verify)
-	DeepPath                       // Score 7+ (investigate -> plan -> impact -> implement -> review)
+	FastPath   TaskComplexity = iota // Score 0-3 (direct edit/verify)
+	NormalPath                       // Score 4-6 (inspect -> implement -> verify)
+	DeepPath                         // Score 7+ (investigate -> plan -> impact -> implement -> review)
 )
 
 // EvaluateComplexity scores a prompt and returns the routing path.

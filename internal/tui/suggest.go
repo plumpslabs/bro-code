@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 )
@@ -16,6 +17,8 @@ type commandItem struct {
 
 // commandList is the source for the "/" suggestion popup.
 var commandList = []commandItem{
+	{"/planner", "switch to PLANNER mode (strict no-edit plan/brainstorm)"},
+	{"/builder", "switch to BUILDER mode (real-time execution & edits)"},
 	{"/connect", "connect an LLM provider (UI)"},
 	{"/models", "select active AI model"},
 	{"/search", "search tools & skills (BM25)"},
@@ -25,7 +28,6 @@ var commandList = []commandItem{
 	{"/mcp", "MCP server status"},
 	{"/usage", "usage & context window"},
 	{"/compact", "compact context window now"},
-	{"/mouse", "toggle mouse scroll & native copy mode"},
 	{"/memory", "session memory plan"},
 	{"/tools", "list indexed tools & skills"},
 	{"/theme", "open theme picker"},
@@ -36,15 +38,13 @@ var commandList = []commandItem{
 	{"/quit", "quit brocode"},
 }
 
-// subagentList is the source for "@" subagent mentions.
-var subagentList = []commandItem{
-	{"@matcha-planner", "Intent Discovery & Roadmap"},
-	{"@matcha-finder", "Codebase Reuse Engine (DRY Guard)"},
-	{"@matcha-auditor", "Preemptive Security & Stack Audit"},
-	{"@matcha-reviewer", "L0-L3 Quality & Gatekeeper Reviewer"},
-	{"@matcha-cleaner", "Tech Debt & Codebase Cleaner"},
-	{"@matcha-debugger", "1-Hypothesis-at-a-Time Debugger"},
-}
+// subagentList is the source for "@" subagent mentions. It is EMPTY by
+// design: brocode runs a single agent loop, so built-in "@matcha-*" roles
+// would be pure decoration (they never spawned a real agent, and their
+// "delegated to model X" traces were fictional). Only REAL custom agents
+// discovered from .brocode/agents/<name>.md (project) and
+// ~/.brocode/agents/<name>.md (global) appear here.
+var subagentList = []commandItem{}
 
 // suggestFiltered returns the items starting with prefix (slash commands or @ subagents).
 func suggestFiltered(input string) []commandItem {
@@ -86,7 +86,26 @@ func suggestFiltered(input string) []commandItem {
 //   - Global-level:  ~/.brocode/agents/<name>.md
 //
 // NOTE: .agents/ is for plans/skills/reports — NOT subagents.
+//
+// The result is cached with a short TTL: this is called from
+// suggestVisible/renderSuggest on EVERY keystroke while the popup is up, and a
+// full disk walk + per-file read per keypress was pure churn. Agent definition
+// files change rarely — a 10s TTL is invisible in practice (a newly added
+// agent shows up within 10s of typing @) and turns per-keypress I/O into one
+// walk per 10 seconds. The TUI is single-threaded (update loop + View), so no
+// mutex is needed.
+var (
+	subagentCache   []commandItem
+	subagentCacheAt time.Time
+)
+
+const subagentCacheTTL = 10 * time.Second
+
 func loadDiscoveredSubagents() []commandItem {
+	if subagentCache != nil && time.Since(subagentCacheAt) < subagentCacheTTL {
+		return subagentCache
+	}
+
 	items := append([]commandItem(nil), subagentList...)
 	seen := make(map[string]bool)
 	for _, it := range items {
@@ -127,7 +146,12 @@ func loadDiscoveredSubagents() []commandItem {
 			return nil
 		})
 	}
-	return items
+	subagentCache = items
+	subagentCacheAt = time.Now()
+	// Defensive copy on the way out (same style as the built-in list copy
+	// above): callers only read, but a future mutation must never corrupt
+	// the shared cache.
+	return append([]commandItem(nil), subagentCache...)
 }
 
 // suggestIndent indents the popup so it doesn't hug the left edge. A

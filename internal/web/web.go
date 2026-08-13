@@ -15,10 +15,10 @@ import (
 //go:embed index.html
 var htmlContent embed.FS
 
-// apiKeysFile is the path to the stored API keys.
-func apiKeysFile() string {
+// configFile is the path to the main BroCode configuration.
+func configFile() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".brocode", "keys.json")
+	return filepath.Join(home, ".brocode", "config.jsonc")
 }
 
 // StartDashboard launches the local web server with auto-incrementing port logic
@@ -43,7 +43,7 @@ func StartDashboard() {
 	}
 
 	url := fmt.Sprintf("http://127.0.0.1:%d/", startPort)
-	
+
 	fmt.Println("!  BROCODE_SERVER_PASSWORD is not set; server is unsecured.")
 	fmt.Println()
 	fmt.Println("  █▀▀▄ █▀▀█ █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀")
@@ -66,9 +66,12 @@ func StartDashboard() {
 
 	http.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			data, err := os.ReadFile(apiKeysFile())
+			data, err := os.ReadFile(configFile())
 			if err != nil {
-				w.Write([]byte(`{}`))
+				w.Write([]byte(`{
+  "$schema": "https://brocode.dev/config.schema.json",
+  "providers": {}
+}`))
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -76,24 +79,31 @@ func StartDashboard() {
 			return
 		}
 		if r.Method == http.MethodPost {
-			var input map[string]string
+			var input map[string]interface{}
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 				http.Error(w, err.Error(), 400)
 				return
 			}
-			// Load existing
-			keys := make(map[string]string)
-			data, err := os.ReadFile(apiKeysFile())
+
+			// Load existing config or create new
+			config := make(map[string]interface{})
+			data, err := os.ReadFile(configFile())
 			if err == nil {
-				_ = json.Unmarshal(data, &keys)
+				_ = json.Unmarshal(data, &config)
 			}
-			// Merge input
+
+			// Merge input (shallow merge at root level for now)
 			for k, v := range input {
-				keys[k] = v
+				config[k] = v
 			}
-			out, _ := json.MarshalIndent(keys, "", "  ")
-			_ = os.MkdirAll(filepath.Dir(apiKeysFile()), 0o700)
-			_ = os.WriteFile(apiKeysFile(), out, 0o600)
+
+			// Ensure schema
+			config["$schema"] = "https://brocode.dev/config.schema.json"
+
+			out, _ := json.MarshalIndent(config, "", "  ")
+			_ = os.MkdirAll(filepath.Dir(configFile()), 0o700)
+			_ = os.WriteFile(configFile(), out, 0o600)
+
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"status":"success"}`))
 			return

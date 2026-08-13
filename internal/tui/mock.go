@@ -353,6 +353,13 @@ Keys:
   ?          this help
   q/ctrl+c   quit (q only when the input is empty)
 
+Mouse:
+  wheel      always scrolls the chat (no mode to toggle)
+  click-drag select text in the chat to copy it (auto-copies to clipboard)
+  ctrl+y     copy the last reply
+
+Inside tmux, wheel scrolling needs "set -g mouse on" in ~/.tmux.conf.
+
 While the agent works, its live steps (grep/read/bash/subagent) stream
 into the chat as a dimmed process log. When the agent asks you a question,
 ↑↓ chooses an option, type a custom answer, enter submits, esc cancels.

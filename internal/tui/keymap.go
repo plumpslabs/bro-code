@@ -10,13 +10,14 @@ import (
 // a system, not a memory exercise). Key names are canonical Bubble Tea v2
 // strings — "enter", "up", "pgup", "ctrl+c", "q", etc.
 type keymap struct {
-	Quit     key.Binding
-	Send     key.Binding
-	Scroll   key.Binding
-	Help     key.Binding
-	Collapse key.Binding
-	Copy     key.Binding
-	Prompt   key.Binding
+	Quit       key.Binding
+	Send       key.Binding
+	Scroll     key.Binding
+	Help       key.Binding
+	Collapse   key.Binding
+	Copy       key.Binding
+	Prompt     key.Binding
+	ToggleMode key.Binding
 }
 
 var keys = keymap{
@@ -48,12 +49,16 @@ var keys = keymap{
 		key.WithKeys("ctrl+e"),
 		key.WithHelp("ctrl+e", "long prompt edit"),
 	),
+	ToggleMode: key.NewBinding(
+		key.WithKeys("shift+tab"),
+		key.WithHelp("shift+tab", "planner/builder mode"),
+	),
 }
 
 // shortHelp renders the one-line hint shown in the status bar, built from the
 // bindings themselves so it can never drift from the actual keymap.
 func (k keymap) shortHelp() string {
-	bindings := []key.Binding{k.Send, k.Scroll, k.Collapse, k.Copy, k.Prompt, k.Help, k.Quit}
+	bindings := []key.Binding{k.Send, k.ToggleMode, k.Scroll, k.Collapse, k.Copy, k.Prompt, k.Help, k.Quit}
 	parts := make([]string, 0, len(bindings))
 	for _, b := range bindings {
 		h := b.Help()

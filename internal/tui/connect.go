@@ -72,7 +72,72 @@ var defaultProviders = []provider{
 	{name: "zhipu", method: "api key (GLM)", detected: false},
 	{name: "mimo", method: "api key (Xiaomi)", detected: false},
 	{name: "claude", method: "api key", detected: false},
-	{name: "custom", method: "api key (URL|KEY)", detected: false},
+}
+
+// GetProviders returns the default providers plus any custom providers from config.jsonc
+func GetProviders() []provider {
+	list := make([]provider, len(defaultProviders))
+	copy(list, defaultProviders)
+
+	cfg := LoadAppConfig()
+	for id, p := range cfg.Provider {
+		// A settings entry whose id collides with a built-in provider (e.g.
+		// "groq") would create a duplicate row — the default row already
+		// represents it, and its settings models still show via discovery.
+		if hasDefaultProvider(id) {
+			continue
+		}
+		list = append(list, provider{
+			name:     id,
+			method:   "config (" + p.Name + ")",
+			detected: false,
+		})
+	}
+	// Append the legacy "custom" provider at the end — unless the settings
+	// already define a provider under that id (no duplicate rows).
+	if _, inCfg := cfg.Provider["custom"]; !inCfg {
+		list = append(list, provider{name: "custom", method: "api key (URL|KEY)", detected: false})
+	}
+	return list
+}
+
+// hasDefaultProvider reports whether name is one of the built-in providers.
+func hasDefaultProvider(name string) bool {
+	for _, p := range defaultProviders {
+		if p.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// providerActive reports whether a provider is actually usable right now:
+// defined in config.jsonc (custom providers), authenticated (native / free /
+// detected CLI), or holding a saved API key. Unconfigured providers never
+// contribute models to the picker, so the /models list cannot show phantom
+// models for providers that were never set up (user report: "provider belum
+// active udah di list modelna").
+func providerActive(name string) bool {
+	cfg := LoadAppConfig()
+	if _, inCfg := cfg.Provider[name]; inCfg {
+		return true // custom providers from settings are always active
+	}
+	switch name {
+	case "opencode":
+		return true // free zen gateway, no key needed
+	case "freebuff", "codebuff":
+		detected, _ := DetectFreebuffCredentials()
+		return detected
+	case "antigravity":
+		detected, _ := DetectAntigravity()
+		return detected
+	case "custom":
+		// Legacy custom (keys.json "url|key") is only "configured" when it
+		// exists in settings — the model list must not invent models for it.
+		return false
+	default:
+		return loadAPIKey(name) != ""
+	}
 }
 
 // Static fallback models (used when API is unavailable or no credentials)
@@ -107,7 +172,6 @@ var poolsideModels = []string{
 	"poolside/laguna-s-2.1",
 	"poolside/laguna-xs-2.1",
 }
-
 
 // MiniMax models (OpenAI-compatible API)
 var minimaxModels = []string{
@@ -224,22 +288,32 @@ func fetchZenModels(endpoint string) ([]string, error) {
 }
 
 // allModelEntries returns every known model across all providers, grouped by
-// provider in /connect order. Uses dynamic discovery when available, falls
-// back to static lists when API is unavailable or no credentials exist.
+// provider in /connect order. Uses the on-disk model cache (NEVER network —
+// opening the picker must not freeze the UI; a stale cache is refreshed in
+// the background via modelsRefreshCmd), and falls back to static lists for
+// active providers without cached entries.
 func (m Model) allModelEntries() []modelEntry {
 	var out []modelEntry
 
-	// Try to get all models from dynamic discovery
-	discovered := DiscoverAllModels()
+	// Cached/discovered models — network-free. A stale cache shows config
+	// providers + static opencode immediately while the background refresh
+	// (modelsRefreshCmd, kicked on /models open) fills in the live lists.
+	discovered := cachedModelEntries()
 
-	for _, p := range defaultProviders {
+	for _, p := range GetProviders() {
 		var models []string
 
 		// Use discovered models if available, otherwise fallback to static
 		if dModels, ok := discovered[p.name]; ok && len(dModels) > 0 {
 			models = dModels
 		} else {
-			// Fallback to static lists
+			// Only show static fallbacks for providers that are actually
+			// active (native/free, authenticated, or holding a saved key).
+			// Custom providers get their models exclusively from settings —
+			// there is no hardcoded fallback list for them.
+			if !providerActive(p.name) {
+				continue
+			}
 			switch p.name {
 			case "opencode":
 				models = openCodeFreeModels
@@ -263,8 +337,6 @@ func (m Model) allModelEntries() []modelEntry {
 				models = mimoModels
 			case "claude":
 				models = claudeStaticModels
-			case "custom":
-				models = []string{"default", "llama-3-70b", "deepseek-coder", "qwen2-72b"}
 			}
 		}
 
@@ -373,12 +445,8 @@ func (m Model) renderConnectModalBox() string {
 		maxProviders = 15
 	}
 
-	// Detect providers
-	agyDetected, _ := DetectAntigravity()
-	freebuffDetected, _ := DetectFreebuffCredentials()
-	codebuffDetected, _ := DetectFreebuffCredentials() // Same credentials for both
-
 	var sb strings.Builder
+	provs := GetProviders()
 
 	// Scroll window: show providers around the selected one
 	start := 0
@@ -386,8 +454,8 @@ func (m Model) renderConnectModalBox() string {
 		start = m.connectSel - maxProviders + 2
 	}
 	end := start + maxProviders
-	if end > len(defaultProviders) {
-		end = len(defaultProviders)
+	if end > len(provs) {
+		end = len(provs)
 	}
 
 	if start > 0 {
@@ -395,8 +463,13 @@ func (m Model) renderConnectModalBox() string {
 		sb.WriteString("\n")
 	}
 
+	// Detect providers
+	agyDetected, _ := DetectAntigravity()
+	freebuffDetected, _ := DetectFreebuffCredentials()
+	codebuffDetected, _ := DetectFreebuffCredentials() // Same credentials for both
+
 	for i := start; i < end; i++ {
-		p := defaultProviders[i]
+		p := provs[i]
 		statusStr := p.method
 		if p.name == "opencode" {
 			statusStr = m.styles.ok.Render("✓ free (zen)")
@@ -415,7 +488,7 @@ func (m Model) renderConnectModalBox() string {
 		} else if p.name == "antigravity" && agyDetected {
 			statusStr = m.styles.ok.Render("✓ configured")
 		} else if strings.Contains(p.method, "api key") {
-			if loadAPIKey(p.name) != "" {
+			if keySaved(p.name) {
 				statusStr = m.styles.ok.Render("✓ key saved")
 			} else {
 				statusStr = m.styles.err.Render("✗ no key")
@@ -434,8 +507,8 @@ func (m Model) renderConnectModalBox() string {
 		}
 	}
 
-	if end < len(defaultProviders) {
-		sb.WriteString(m.styles.statusLeft.Render(fmt.Sprintf("    ... %d more below", len(defaultProviders)-end)))
+	if end < len(provs) {
+		sb.WriteString(m.styles.statusLeft.Render(fmt.Sprintf("    ... %d more below", len(provs)-end)))
 		sb.WriteString("\n")
 	}
 
@@ -443,6 +516,20 @@ func (m Model) renderConnectModalBox() string {
 	sb.WriteString(m.styles.popoverFooter.Render("1-4 select provider · enter choose · esc/q close"))
 
 	return m.popoverFrame("connect provider", sb.String(), w)
+}
+
+// keySaved reports whether the provider actually holds a usable saved key.
+// The legacy custom entry is stored as "url|key" — a bare "|" (empty URL,
+// empty key) must NOT count as configured.
+func keySaved(name string) bool {
+	key := loadAPIKey(name)
+	if key == "" {
+		return false
+	}
+	if name == "custom" {
+		return strings.Split(key, "|")[0] != ""
+	}
+	return true
 }
 
 // renderConnect is the full-viewport /connect view helper.

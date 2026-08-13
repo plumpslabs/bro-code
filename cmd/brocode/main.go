@@ -2,7 +2,7 @@
 //
 // Modes:
 //   - no arguments        → TUI (Bubble Tea v2 chat UI, landing screen)
-//   - -c                  → TUI, resume the last saved session (~/.brocode/sessions)
+//   - -c                  → TUI, resume this project's newest saved session (~/.brocode/projects/<project>/session_<base36-ms>.jsonl)
 //   - --search <query>    → headless, print BM25 results (for CI/automation)
 //   - --diff              → headless, print a sample Myers unified diff
 //   - --version           → print version and exit
@@ -80,13 +80,14 @@ func runTUI(ix *search.Index, resume bool) {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	// Persist the conversation only if it actually started (Principle 5:
-	// single latest.jsonl, bounded). Failure to save is a warning, not an
-	// error — the user's session must never be held hostage by the disk.
+	// Persist the conversation only if it actually started. Each quit writes a
+	// NEW session file (retention-capped), so /history lists every past
+	// conversation of the project. Failure to save is a warning, not an error
+	// — the user's session must never be held hostage by the disk.
 	if m, ok := final.(tui.Model); ok && m.Started() {
-		if err := tui.SaveSession(m.Messages()); err == nil {
+		if p, err := tui.SaveSession(m.Messages()); err == nil {
 			fmt.Printf("✓ Session saved for project '%s' (id: %s)\n", m.ProjectName(), m.SessionID())
-			fmt.Printf("  File: %s\n", tui.SessionFilePath())
+			fmt.Printf("  File: %s\n", p)
 			fmt.Println("  Resume anytime in this project with: brocode -c")
 		} else {
 			fmt.Fprintln(os.Stderr, "warning: could not save session:", err)

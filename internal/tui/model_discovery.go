@@ -223,15 +223,71 @@ func discoverAnthropicModels(apiKey string) ([]string, error) {
 	return models, nil
 }
 
+// overlayConfigProviders merges custom providers from the CURRENT settings
+// (config.jsonc) into a model map, so a provider just added shows up
+// immediately instead of waiting out the cache TTL.
+func overlayConfigProviders(models map[string][]string) map[string][]string {
+	for id, p := range LoadAppConfig().Provider {
+		var pModels []string
+		for mid := range p.Models {
+			pModels = append(pModels, mid)
+		}
+		sort.Strings(pModels)
+		if len(pModels) > 0 {
+			models[id] = pModels
+		}
+	}
+	return models
+}
+
+// cachedModelEntries returns the model list WITHOUT any network I/O: the
+// on-disk cache when fresh, otherwise just the config-defined providers plus
+// the opencode static fallback. The /models render path uses this so opening
+// the picker can never block the UI on network — the background refresh
+// (modelsRefreshCmd) fills in the live lists and re-renders when done.
+func cachedModelEntries() map[string][]string {
+	cache := loadModelCache()
+	if isCacheFresh(cache) && len(cache.Models) > 0 {
+		// A stale cache may hold phantom lists for providers whose key was
+		// removed or whose config entry was cleared — drop those entries so
+		// the picker never resurrects models for unconfigured providers.
+		return overlayConfigProviders(activeModelsOnly(cache.Models))
+	}
+	out := overlayConfigProviders(make(map[string][]string))
+	out["opencode"] = openCodeFreeModels // the picker is never empty while refreshing
+	return out
+}
+
+// modelsCacheStale reports whether the on-disk model cache needs a refresh.
+// /models uses it to kick an async refresh instead of fetching synchronously
+// inside the render path (which froze the UI for up to tens of seconds when
+// the 24h TTL expired).
+func modelsCacheStale() bool {
+	cache := loadModelCache()
+	return !isCacheFresh(cache) || len(cache.Models) == 0
+}
+
 // DiscoverAllModels fetches models from all configured providers.
-// Returns a map of provider → model IDs. Providers without credentials are skipped.
+// Returns a map of provider → model IDs. Providers without credentials are
+// skipped — an unconfigured provider never contributes models (static
+// fallbacks are only added for providers that are actually active).
 func DiscoverAllModels() map[string][]string {
 	cache := loadModelCache()
 	if isCacheFresh(cache) && len(cache.Models) > 0 {
-		return cache.Models
+		return cachedModelEntries()
 	}
 
 	models := make(map[string][]string)
+
+	cfg := LoadAppConfig()
+	for id, p := range cfg.Provider {
+		var pModels []string
+		for mid := range p.Models {
+			pModels = append(pModels, mid)
+		}
+		sort.Strings(pModels)
+		models[id] = pModels
+	}
 
 	// OpenCode Zen gateway (free, no key needed)
 	if zenModels, err := fetchZenModels(zenModelsEndpoint); err == nil && len(zenModels) > 0 {
@@ -240,96 +296,92 @@ func DiscoverAllModels() map[string][]string {
 		models["opencode"] = openCodeFreeModels // fallback to static
 	}
 
-	// Groq (OpenAI-compatible)
+	// Groq (OpenAI-compatible) — only when a key is configured
 	if groqKey := loadAPIKey("groq"); groqKey != "" {
 		if groqModels, err := discoverModelsFromAPI("https://api.groq.com", "Authorization", groqKey); err == nil && len(groqModels) > 0 {
 			models["groq"] = groqModels
+		} else {
+			models["groq"] = groqModels // fallback to static
 		}
 	}
-	if len(models["groq"]) == 0 {
-		models["groq"] = groqModels // fallback to static
-	}
 
-	// Poolside (OpenAI-compatible)
+	// Poolside (OpenAI-compatible) — only when a key is configured
 	if poolKey := loadAPIKey("poolside"); poolKey != "" {
 		if poolModels, err := discoverModelsFromAPI("https://inference.poolside.ai", "Authorization", poolKey); err == nil && len(poolModels) > 0 {
 			models["poolside"] = poolModels
+		} else {
+			models["poolside"] = poolsideModels // fallback to static
 		}
 	}
-	if len(models["poolside"]) == 0 {
-		models["poolside"] = poolsideModels // fallback to static
-	}
 
-
-	// DeepSeek (OpenAI-compatible)
+	// DeepSeek (OpenAI-compatible) — only when a key is configured
 	if dsKey := loadAPIKey("deepseek"); dsKey != "" {
 		if dsModels, err := discoverModelsFromAPI("https://api.deepseek.com", "Authorization", dsKey); err == nil && len(dsModels) > 0 {
 			models["deepseek"] = dsModels
+		} else {
+			models["deepseek"] = deepseekStaticModels // fallback to static
 		}
 	}
-	if len(models["deepseek"]) == 0 {
-		models["deepseek"] = deepseekStaticModels // fallback to static
-	}
 
-	// Anthropic
+	// Claude/Anthropic — only when a key is configured (either slot)
 	if antKey := loadAPIKey("anthropic"); antKey != "" {
 		if antModels, err := discoverAnthropicModels(antKey); err == nil && len(antModels) > 0 {
-			models["anthropic"] = antModels
+			models["claude"] = antModels
+		} else {
+			models["claude"] = claudeStaticModels // fallback to static
 		}
-	}
-	if len(models["anthropic"]) == 0 {
-		models["claude"] = claudeStaticModels // fallback to static (note: provider name mismatch handled in allModelEntries)
+	} else if loadAPIKey("claude") != "" {
+		models["claude"] = claudeStaticModels
 	}
 
-	// Google Gemini (for Antigravity)
-	if gemKey := loadAPIKey("gemini"); gemKey != "" {
-		if gemModels, err := discoverGeminiModels(gemKey); err == nil && len(gemModels) > 0 {
-			models["antigravity"] = gemModels
+	// Antigravity — only when detected (CLI / env) or a Gemini key exists
+	if agyDetected, _ := DetectAntigravity(); agyDetected || loadAPIKey("gemini") != "" {
+		if gemKey := loadAPIKey("gemini"); gemKey != "" {
+			if gemModels, err := discoverGeminiModels(gemKey); err == nil && len(gemModels) > 0 {
+				models["antigravity"] = gemModels
+			}
+		}
+		if len(models["antigravity"]) == 0 {
+			models["antigravity"] = antigravityStaticModels // fallback to static
 		}
 	}
-	if len(models["antigravity"]) == 0 {
-		models["antigravity"] = antigravityStaticModels // fallback to static
-	}
 
-	// MiniMax (OpenAI-compatible)
+	// MiniMax (OpenAI-compatible) — only when a key is configured
 	if mmKey := loadAPIKey("minimax"); mmKey != "" {
 		if mmModels, err := discoverModelsFromAPI("https://api.minimax.io", "Authorization", mmKey); err == nil && len(mmModels) > 0 {
 			models["minimax"] = mmModels
+		} else {
+			models["minimax"] = minimaxModels // fallback to static
 		}
 	}
-	if len(models["minimax"]) == 0 {
-		models["minimax"] = minimaxModels // fallback to static
-	}
 
-	// Zhipu/GLM (OpenAI-compatible)
+	// Zhipu/GLM (OpenAI-compatible) — only when a key is configured
 	if zpKey := loadAPIKey("zhipu"); zpKey != "" {
 		if zpModels, err := discoverModelsFromAPI("https://api.z.ai/api/paas/v4", "Authorization", zpKey); err == nil && len(zpModels) > 0 {
 			models["zhipu"] = zpModels
+		} else {
+			models["zhipu"] = zhipuModels // fallback to static
 		}
 	}
-	if len(models["zhipu"]) == 0 {
-		models["zhipu"] = zhipuModels // fallback to static
-	}
 
-	// MiMo (Xiaomi, OpenAI-compatible)
+	// MiMo (Xiaomi, OpenAI-compatible) — only when a key is configured
 	if mmKey := loadAPIKey("mimo"); mmKey != "" {
 		if mmModels, err := discoverModelsFromAPI("https://api.xiaomimimo.com", "Authorization", mmKey); err == nil && len(mmModels) > 0 {
 			models["mimo"] = mmModels
+		} else {
+			models["mimo"] = mimoModels // fallback to static
 		}
 	}
-	if len(models["mimo"]) == 0 {
-		models["mimo"] = mimoModels // fallback to static
-	}
 
-	// Freebuff (fetch from GitHub source)
-	if fbModels, err := discoverFreebuffModels(); err == nil && len(fbModels) > 0 {
-		models["freebuff"] = fbModels
-	} else {
-		models["freebuff"] = freebuffNativeModels // fallback to static
+	// Freebuff / Codebuff — only when credentials exist
+	if fbDetected, _ := DetectFreebuffCredentials(); fbDetected {
+		if fbModels, err := discoverFreebuffModels(); err == nil && len(fbModels) > 0 {
+			models["freebuff"] = fbModels
+		} else {
+			models["freebuff"] = freebuffNativeModels // fallback to static
+		}
+		models["codebuff"] = models["freebuff"]
 	}
-
-	// Codebuff (same models as Freebuff)
-	models["codebuff"] = models["freebuff"]
 
 	// Save cache
 	cache = modelCache{
@@ -339,6 +391,19 @@ func DiscoverAllModels() map[string][]string {
 	_ = saveModelCache(cache)
 
 	return models
+}
+
+// activeModelsOnly drops cached model lists for providers that are no longer
+// active (key removed, credentials gone, config entry cleared). A stale cache
+// must never resurrect phantom models for unconfigured providers.
+func activeModelsOnly(models map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(models))
+	for name, list := range models {
+		if providerActive(name) {
+			out[name] = list
+		}
+	}
+	return out
 }
 
 // discoverFreebuffModels fetches available models from Freebuff's GitHub source.
