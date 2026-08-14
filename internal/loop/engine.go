@@ -111,6 +111,10 @@ type Engine struct {
 	// injected into the system prompt so the agent starts oriented instead of
 	// blind-grepping for file locations.
 	projectCtx string
+	// repoMap is the deterministic project map (entry points, structure, hot
+	// files by usage) injected alongside the project context so the agent
+	// knows where to start without spending tokens re-discovering it.
+	repoMap string
 	// skillsCtx lists the available skills (from .agents/skills, .brocode/skills,
 	// and the global skills dir) so the model knows what it can load and use.
 	skillsCtx string
@@ -118,6 +122,10 @@ type Engine struct {
 	// excerpt is injected into the system prompt and compaction summaries are
 	// auto-merged into memory so future sessions start warm.
 	mem *memory.Store
+	// usageFn, when set, receives the files the model touched this turn (read,
+	// searched, edited) so the UI can persist cross-session usage counts — the
+	// "the more BroCode is used, the smarter it gets" layer.
+	usageFn func(paths []string)
 	// editedFiles tracks the paths the model wrote or edited this turn so the
 	// convention checker can review them before the turn is declared done.
 	editedFiles []string
@@ -177,11 +185,23 @@ func (e *Engine) SetSkills(sc string) {
 	e.skillsCtx = sc
 }
 
+// SetRepoMap injects the deterministic project map (entry points, structure,
+// hot files by usage) into every turn's system prompt. Empty disables.
+func (e *Engine) SetRepoMap(rm string) {
+	e.repoMap = rm
+}
+
 // SetMemoryStore wires the cross-session project memory. When set, a
 // warm-start excerpt of past sessions' learnings is injected into the system
 // prompt, and compaction summaries are auto-merged back into memory.
 func (e *Engine) SetMemoryStore(st *memory.Store) {
 	e.mem = st
+}
+
+// SetUsageRecorder wires a callback that receives the files the model touched
+// each turn (read, searched, edited) so usage can persist across sessions.
+func (e *Engine) SetUsageRecorder(fn func(paths []string)) {
+	e.usageFn = fn
 }
 
 // SetDiagnosticsChecker wires a native type-error checker (the UI provides
@@ -365,12 +385,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// told to answer in whatever language the user writes in, and must not
 		// be biased by hardcoded phrases or foreign product names.
 		modeDesc := "BUILDER (autonomous coding agent: can read, edit, and run terminal commands)"
-		if currentMode == "PLANNER" {
+		switch currentMode {
+		case "PLANNER":
 			modeDesc = "PLANNER (architecture & strategy agent: read-only — analyze and plan without editing files)"
+		case "MINER":
+			modeDesc = "MINER (project knowledge agent: read-only exploration that persists verified facts into project memory — learn the codebase, then remember it)"
 		}
 
 		sysPrompt := fmt.Sprintf(`You are BroCode CLI, an autonomous AI coding assistant.
 %s`, e.projectContextBlock())
+		if e.repoMap != "" {
+			sysPrompt += "\n\n" + e.repoMap
+		}
 		if e.skillsCtx != "" {
 			sysPrompt += "\n\nAVAILABLE SKILLS:\n" + e.skillsCtx + "\nWhen a task matches a skill, load its SKILL.md file (read_file) and follow its instructions."
 		}
@@ -390,6 +416,12 @@ Engine Mode Rules (%s):
 			sysPrompt += `1. Focus on inspecting codebase, analyzing files, and proposing high-level step-by-step implementation plans.
 2. DO NOT modify any source files or execute write_file/edit_file tools.
 3. Use read_file, list_dir, grep, and glob to research before writing your plan.`
+		} else if currentMode == "MINER" {
+			sysPrompt += `1. MISSION: learn the project deeply and persist VERIFIED knowledge into PROJECT MEMORY using the memory tool (retain). This is how BroCode gets smarter the more it is used.
+2. Read-only: DO NOT modify source files (write_file/edit_file are blocked). You may run read-only bash (git log, git status, ls) to understand history.
+3. VERIFY BEFORE RETAINING: only store facts you confirmed in the code — architecture (service -> repo -> DB), build/test commands that actually exist, conventions (naming, error handling, package manager), decisions, gotchas. Never store guesses; if unsure, read more or skip.
+4. Organize with good sections: Architecture, Build & Test, Conventions, Decisions, Gotchas. Keep each fact short, concrete, and actionable.
+5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`
 		} else {
 			sysPrompt += `1. Always reason through your plan BEFORE executing any tool or returning an answer.
 2. CONTINUATION RULE: After receiving tool execution results, DO NOT stop to ask the user unless technical ambiguity cannot be resolved by tools. Continue the tool loop until the goal is achieved.
@@ -487,14 +519,29 @@ Engine Mode Rules (%s):
 					hasCodeChanges = true
 				}
 
-				// Strict PLANNER Mode Tool Guard
-				if e.Mode() == "PLANNER" && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "bash") {
-					guardMsg := fmt.Sprintf("⚠️ [PLANNER GUARD]: Tool '%s' is disabled in PLANNER mode (read-only architecture mode). Switch to BUILDER mode (Shift+Tab) to execute code changes.", tc.Name)
-					if onUpdate != nil {
-						onUpdate(e.state, guardMsg)
+				// Strict mode tool guards: PLANNER is fully read-only (no bash,
+				// no writes); MINER is read-only on source files but may run
+				// read-only bash (git log/status) and, crucially, may retain
+				// verified facts into project memory.
+				switch e.Mode() {
+				case "PLANNER":
+					if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "bash" {
+						guardMsg := fmt.Sprintf("⚠️ [PLANNER GUARD]: Tool '%s' is disabled in PLANNER mode (read-only architecture mode). Switch to BUILDER mode (Shift+Tab) to execute code changes.", tc.Name)
+						if onUpdate != nil {
+							onUpdate(e.state, guardMsg)
+						}
+						_ = e.context.AppendToolResult(tc.ID, guardMsg)
+						continue
 					}
-					_ = e.context.AppendToolResult(tc.ID, guardMsg)
-					continue
+				case "MINER":
+					if tc.Name == "write_file" || tc.Name == "edit_file" {
+						guardMsg := fmt.Sprintf("⚠️ [MINER GUARD]: Tool '%s' is blocked in MINER mode (read-only knowledge agent). Switch to BUILDER mode (Shift+Tab) to modify code.", tc.Name)
+						if onUpdate != nil {
+							onUpdate(e.state, guardMsg)
+						}
+						_ = e.context.AppendToolResult(tc.ID, guardMsg)
+						continue
+					}
 				}
 
 				toolInfo := formatToolCallInfo(tc.Name, tc.Arguments)
@@ -631,9 +678,23 @@ Engine Mode Rules (%s):
 		e.toolOnlyRounds = 0
 		e.toolReminderSent = false
 		e.toolReminder2Sent = false
-		e.explored = nil
 		e.reviewPasses = 0
 		e.state = StateDone
+
+		// Persist usage: the files the model actually touched this turn feed
+		// cross-session hot-file intelligence. Called before explored resets.
+		if e.usageFn != nil {
+			paths := make([]string, 0, len(e.editedFiles)+len(e.explored))
+			paths = append(paths, e.editedFiles...)
+			for _, ex := range e.explored {
+				if !strings.Contains(ex, " ") { // skip bash commands/find strings
+					paths = append(paths, ex)
+				}
+			}
+			e.usageFn(paths)
+		}
+		e.explored = nil
+
 		if onUpdate != nil {
 			onUpdate(e.state, "Completed")
 		}

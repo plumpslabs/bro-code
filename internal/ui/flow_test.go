@@ -93,6 +93,34 @@ func TestTurnFlowKeepsHistoryAndSettlesStatus(t *testing.T) {
 	}
 }
 
+// TestModeCycleThreeModes verifies Shift+Tab cycles BUILDER → PLANNER →
+// MINER → BUILDER and the engine mode follows.
+func TestModeCycleThreeModes(t *testing.T) {
+	m := newTestApp()
+	if m.mode != "BUILDER" {
+		t.Fatalf("expected default BUILDER, got %s", m.mode)
+	}
+
+	shiftTab := func() {
+		if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}); err != nil {
+			t.Fatalf("shift+tab update failed: %v", err)
+		}
+	}
+
+	shiftTab()
+	if m.mode != "PLANNER" || m.engine.Mode() != "PLANNER" {
+		t.Errorf("expected PLANNER after 1st tab, got %s / %s", m.mode, m.engine.Mode())
+	}
+	shiftTab()
+	if m.mode != "MINER" || m.engine.Mode() != "MINER" {
+		t.Errorf("expected MINER after 2nd tab, got %s / %s", m.mode, m.engine.Mode())
+	}
+	shiftTab()
+	if m.mode != "BUILDER" || m.engine.Mode() != "BUILDER" {
+		t.Errorf("expected BUILDER after 3rd tab (wrap), got %s / %s", m.mode, m.engine.Mode())
+	}
+}
+
 // TestActivityShownLiveDuringTurn verifies the spinner + steps are rendered in
 // the status slot above the input while a turn runs, and clear after it ends.
 func TestActivityShownLiveDuringTurn(t *testing.T) {

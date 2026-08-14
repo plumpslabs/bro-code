@@ -83,6 +83,84 @@ func TestPlannerModeToolGuard(t *testing.T) {
 	}
 }
 
+func TestMinerModeToolGuard(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &mockAdapter{
+		toolCalls: []provider.ToolCall{
+			{ID: "mw1", Name: "write_file", Arguments: `{"path":"test.txt","content":"hello"}`},
+			{ID: "mb1", Name: "bash", Arguments: `{"command":"git log --oneline -5"}`},
+			{ID: "mm1", Name: "memory", Arguments: `{"action":"retain","section":"Architecture","fact":"service -> repo -> DB"}`},
+		},
+	}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetMode("MINER")
+	if engine.Mode() != "MINER" {
+		t.Fatalf("expected mode MINER, got %s", engine.Mode())
+	}
+
+	_, err := engine.RunTurn(context.Background(), "learn the codebase", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+
+	msgs := ctxMgr.Messages()
+	foundWriteGuard, foundBashOK, foundMemoryOK := false, false, false
+	for _, msg := range msgs {
+		switch msg.ToolCallID {
+		case "mw1":
+			if strings.Contains(msg.Content, "MINER GUARD") {
+				foundWriteGuard = true
+			}
+		case "mb1":
+			// Read-only bash is ALLOWED in MINER mode (no guard message; the
+			// real bash tool ran and produced output or an error).
+			foundBashOK = !strings.Contains(msg.Content, "MINER GUARD")
+		case "mm1":
+			// memory retain is the whole point of MINER — must not be blocked.
+			foundMemoryOK = !strings.Contains(msg.Content, "MINER GUARD")
+		}
+	}
+	if !foundWriteGuard {
+		t.Error("write_file must be blocked in MINER mode")
+	}
+	if !foundBashOK {
+		t.Error("read-only bash must NOT be blocked in MINER mode")
+	}
+	if !foundMemoryOK {
+		t.Error("memory retain must NOT be blocked in MINER mode")
+	}
+}
+
+func TestUsageRecorderCalledAtTurnEnd(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &mockAdapter{
+		toolCalls: []provider.ToolCall{
+			{ID: "ur1", Name: "read_file", Arguments: `{"path":"internal/app/handler.go"}`},
+			{ID: "ur2", Name: "edit_file", Arguments: `{"path":"internal/app/handler.go"}`},
+		},
+	}
+
+	var recorded []string
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetUsageRecorder(func(paths []string) { recorded = paths })
+
+	if _, err := engine.RunTurn(context.Background(), "touch a file", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if len(recorded) == 0 {
+		t.Fatal("usage recorder must receive touched files at turn end")
+	}
+	joined := strings.Join(recorded, ",")
+	if !strings.Contains(joined, "internal/app/handler.go") {
+		t.Errorf("expected handler.go in recorded paths, got %v", recorded)
+	}
+}
+
 func TestAskUserToolFlow(t *testing.T) {
 	tools := tool.NewRegistry()
 	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)

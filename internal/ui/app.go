@@ -26,6 +26,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/mcp"
 	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/repo"
 	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/skill"
 	"github.com/plumpslabs/bro-code/internal/store"
@@ -121,7 +122,7 @@ type Model struct {
 	tools          *tool.Registry
 	context        *bcontext.Manager
 	engine         *loop.Engine
-	mode           string // "BUILDER" or "PLANNER"
+	mode           string // "BUILDER", "PLANNER", or "MINER"
 	messages       []string
 	status         string
 
@@ -228,6 +229,11 @@ type Model struct {
 	connectTextInput    textinput.Model
 	connectBaseURLInput textinput.Model
 	connectModelsInput  textarea.Model
+
+	// Deterministic project intelligence (MINER layer): repo map cache + usage
+	// tracking, both persisted under .brocode/. Wired once per session.
+	repoMap *repo.Map
+	usage   *repo.Usage
 
 	// Interactive Ask-User Modal (ask_user tool)
 	ask            *askBroker
@@ -484,10 +490,24 @@ func (m *Model) rebuildEngine() {
 		m.projectCtx = search.BuildProjectContext(cwd)
 	}
 	m.engine.SetProjectContext(m.projectCtx.String())
+	// Deterministic project map (entry points, structure, hot files) — built
+	// without the LLM, cached by content hash, so the agent starts oriented
+	// without spending tokens re-discovering the repo every session.
+	cwd, _ := os.Getwd()
+	if m.repoMap == nil || m.usage == nil {
+		m.usage = repo.NewUsage(cwd)
+		m.repoMap = repo.BuildMap(cwd, m.usage)
+	}
+	m.engine.SetRepoMap(m.repoMap.String())
+	// Cross-session usage: every file the model touches this turn feeds the
+	// hot-file intelligence ("the more BroCode is used, the smarter it gets").
+	m.engine.SetUsageRecorder(func(paths []string) {
+		m.usage.Record(paths)
+		m.usage.Save()
+	})
 	// Available skills (.agents/skills, .brocode/skills, global) are listed in
 	// the system prompt so the model knows what it can load and use — the
 	// general, tool-agnostic standard (never .opencode/ config in the repo).
-	cwd, _ := os.Getwd()
 	m.engine.SetSkills(renderSkills(cwd))
 	// Cross-session project memory: built once, then wired into the engine
 	// (warm start + auto-extract on compaction) and the memory tool.
@@ -736,9 +756,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
-				if m.mode == "BUILDER" {
+				// Shift+Tab cycles BUILDER → PLANNER → MINER → BUILDER.
+				switch m.mode {
+				case "BUILDER":
 					m.mode = "PLANNER"
-				} else {
+				case "PLANNER":
+					m.mode = "MINER"
+				default:
 					m.mode = "BUILDER"
 				}
 				m.engine.SetMode(m.mode)
@@ -1006,7 +1030,14 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.appendMessages("📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen")
+		m.appendMessages("📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
+
+	case "/miner":
+		// Jump straight into MINER mode so the next prompt is a knowledge
+		// mining pass that persists verified facts into project memory.
+		m.mode = "MINER"
+		m.engine.SetMode(m.mode)
+		m.appendMessages("⛏️ MINER mode active — explore the codebase and I'll persist verified knowledge (architecture, build commands, conventions, decisions, gotchas) into project memory. Shift+Tab to switch back to BUILDER.")
 
 	case "/memory":
 		if m.memStore != nil {
@@ -1682,11 +1713,16 @@ func (m *Model) View() tea.View {
 		// Input Box (Borderless & Minimalist, multi-line textarea that grows)
 		promptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 		promptStr := "❯ "
-		if m.mode == "PLANNER" {
+		switch m.mode {
+		case "PLANNER":
 			promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
 			promptStr = "PLAN ❯ "
 			m.promptInput.Placeholder = "Planner Mode: Ask for architecture plans, code analysis, or roadmaps..."
-		} else {
+		case "MINER":
+			promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
+			promptStr = "MINE ❯ "
+			m.promptInput.Placeholder = "Miner Mode: Explore the codebase and persist verified knowledge to project memory..."
+		default:
 			m.promptInput.Placeholder = "Type a prompt or command (/help, /sessions, /new)..."
 		}
 		sb.WriteString(promptStyle.Render(promptStr) + m.promptInput.View() + "\n\n")
@@ -1698,8 +1734,11 @@ func (m *Model) View() tea.View {
 		}
 		tokenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 		modeBadgeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-		if m.mode == "PLANNER" {
+		switch m.mode {
+		case "PLANNER":
 			modeBadgeStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))
+		case "MINER":
+			modeBadgeStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("178"))
 		}
 
 		sessID := m.context.SessionID()
