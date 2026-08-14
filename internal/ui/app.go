@@ -259,6 +259,10 @@ type Model struct {
 type turnResultMsg struct {
 	content string
 	err     error
+	// mode is the engine mode (BUILDER/PLANNER/MINER) the turn ran under,
+	// captured at send time so the answer can be stamped with a mode badge
+	// even if the user toggles mode while the turn is in flight.
+	mode string
 }
 
 // maxChatMessages bounds the in-memory message list rendered by the TUI. The
@@ -701,7 +705,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if r := m.lastAssistantReasoning(); r != "" {
 				display = "💭 " + r + "\n\n" + msg.content
 			}
-			m.appendMessages("BROCODE:\n" + display)
+			// Stamp the mode the turn ran under ("BROCODE:PLANNER\n...") so
+			// every answer shows which engine mode produced it — the mode badge
+			// is rendered by formatMessage. Empty mode falls back to the legacy
+			// unstamped format (e.g. restored sessions).
+			if msg.mode != "" {
+				m.appendMessages("BROCODE:" + msg.mode + "\n" + display)
+			} else {
+				m.appendMessages("BROCODE:\n" + display)
+			}
 			// When the primary provider failed and a fallback served the turn,
 			// say so in the history — otherwise the answer is mistaken for the
 			// active provider's (which is exactly the confusion the user saw:
@@ -939,7 +951,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.quitting {
 					return nil
 				}
-				return turnResultMsg{content: res, err: err}
+				return turnResultMsg{content: res, err: err, mode: m.mode}
 			}
 
 			return m, tea.Batch(runTurnCmd, tickCmd())
@@ -2221,8 +2233,28 @@ func formatMessage(msg string, width int) string {
 		return processBarStyle.Render(processLabelStyle.Render(formatted))
 	}
 
-	if strings.HasPrefix(msg, "BROCODE:\n") || strings.HasPrefix(msg, "🤖 ") {
-		content := strings.TrimPrefix(strings.TrimPrefix(msg, "BROCODE:\n"), "🤖 ")
+	// Assistant messages may be mode-stamped ("BROCODE:PLANNER\n...") so each
+	// answer shows which engine mode produced it as a colored badge next to
+	// the BROCODE label. Legacy "BROCODE:\n" and "🤖 " forms carry no mode
+	// and render without a badge (e.g. sessions restored from disk).
+	mode := ""
+	var content string
+	if strings.HasPrefix(msg, "BROCODE:") {
+		rest := strings.TrimPrefix(msg, "BROCODE:")
+		if i := strings.Index(rest, "\n"); i >= 0 {
+			mode = rest[:i]
+			content = rest[i+1:]
+		} else {
+			content = rest
+		}
+	} else if strings.HasPrefix(msg, "🤖 ") {
+		content = strings.TrimPrefix(msg, "🤖 ")
+	} else {
+		// Not an assistant message at all — let the caller's other branches
+		// (YOU/PROCESS/ERROR/plain) decide.
+		content = ""
+	}
+	if strings.HasPrefix(msg, "BROCODE:") || strings.HasPrefix(msg, "🤖 ") {
 		content = sanitizeLLMOutput(content)
 
 		// A "💭 " prefix carries the model's reasoning (thinking). Render it
@@ -2249,11 +2281,29 @@ func formatMessage(msg string, width int) string {
 			formattedBody = formatDiffLines(formattedBody)
 		}
 
+		// Mode badge: a small colored chip next to the BROCODE label so the
+		// user always knows which engine mode produced this answer.
+		label := botLabelStyle.Render("BROCODE")
+		if mode != "" {
+			badge := lipgloss.NewStyle().Bold(true).Padding(0, 1)
+			switch mode {
+			case "BUILDER":
+				badge = badge.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("42"))
+			case "PLANNER":
+				badge = badge.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("39"))
+			case "MINER":
+				badge = badge.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("214"))
+			default:
+				badge = badge.Foreground(lipgloss.Color("241"))
+			}
+			label += " " + badge.Render(mode)
+		}
+
 		if thinking != "" {
-			return botBarStyle.Render(botLabelStyle.Render("BROCODE") + "\n" +
+			return botBarStyle.Render(label + "\n" +
 				thinkingStyle.Render(thinking) + "\n\n" + formattedBody)
 		}
-		return botBarStyle.Render(botLabelStyle.Render("BROCODE") + "\n" + formattedBody)
+		return botBarStyle.Render(label + "\n" + formattedBody)
 	}
 
 	if strings.HasPrefix(msg, "ERROR: ") || strings.HasPrefix(msg, "❌ ") {

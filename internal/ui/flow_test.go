@@ -224,6 +224,38 @@ func TestActivityResetsOnNewTurn(t *testing.T) {
 	}
 }
 
+// TestTurnResultModeBadge verifies each assistant answer is stamped with the
+// engine mode the turn ran under, and the renderer draws the mode badge.
+func TestTurnResultModeBadge(t *testing.T) {
+	m := newTestApp()
+	m.mode = "PLANNER"
+
+	// Complete a turn while in PLANNER mode; the answer must be stamped.
+	if _, err := m.Update(turnResultMsg{content: "analysis", err: nil, mode: m.mode}); err != nil {
+		t.Fatalf("turn result update failed: %v", err)
+	}
+	if len(m.messages) == 0 {
+		t.Fatal("no messages appended")
+	}
+	last := m.messages[len(m.messages)-1]
+	if !strings.HasPrefix(last, "BROCODE:PLANNER\n") {
+		t.Fatalf("expected mode-stamped message, got %q", last)
+	}
+
+	// Renderer must draw the mode chip next to the BROCODE label. ANSI codes
+	// are stripped first — glamour interleaves them mid-word.
+	rendered := ansiRegex.ReplaceAllString(formatMessage(last, 120), "")
+	if !strings.Contains(rendered, "PLANNER") {
+		t.Fatalf("rendered answer missing PLANNER badge:\n%s", rendered)
+	}
+
+	// Legacy unstamped format still renders (no badge, no crash).
+	legacy := ansiRegex.ReplaceAllString(formatMessage("BROCODE:\nplain answer", 120), "")
+	if !strings.Contains(legacy, "plain answer") {
+		t.Fatalf("legacy format broken:\n%s", legacy)
+	}
+}
+
 // newTestApp builds a fully-initialized app model (real textarea/input
 // widgets) without starting the Bubble Tea program, so View() can be rendered.
 // TestConnectBuiltInAPIKeyTyping verifies keystrokes reach the API-key
