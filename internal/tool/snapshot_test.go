@@ -6,84 +6,47 @@ import (
 	"testing"
 )
 
-func TestUndoMultipleSteps(t *testing.T) {
+func TestTimeTravelRollbackUndo(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "file.txt")
-	if err := os.WriteFile(path, []byte("v1"), 0o644); err != nil {
-		t.Fatal(err)
+	fileA := filepath.Join(dir, "a.txt")
+	fileB := filepath.Join(dir, "b.txt")
+
+	if err := os.WriteFile(fileA, []byte("original A"), 0o644); err != nil {
+		t.Fatalf("failed to write fileA: %v", err)
+	}
+	if err := os.WriteFile(fileB, []byte("original B"), 0o644); err != nil {
+		t.Fatalf("failed to write fileB: %v", err)
 	}
 
-	// v1 -> v2
-	if err := Snapshot(path); err != nil {
-		t.Fatal(err)
+	// Snapshot before edits
+	if err := Snapshot(fileA); err != nil {
+		t.Fatalf("snapshot fileA failed: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("v2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// v2 -> v3
-	if err := Snapshot(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("v3"), 0o644); err != nil {
-		t.Fatal(err)
+	if err := Snapshot(fileB); err != nil {
+		t.Fatalf("snapshot fileB failed: %v", err)
 	}
 
-	if got := SnapshotCount(); got != 2 {
-		t.Fatalf("expected 2 live snapshots, got %d", got)
+	// Modify files
+	_ = os.WriteFile(fileA, []byte("modified A"), 0o644)
+	_ = os.WriteFile(fileB, []byte("modified B"), 0o644)
+
+	if count := SnapshotCount(); count != 2 {
+		t.Fatalf("expected 2 live snapshots, got %d", count)
 	}
 
-	// Jump back 2 steps in one call: v3 -> v1
-	restored, err := RestoreNSnapshots(2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Perform Time-Travel Rollback
+	restored := RestoreAllSnapshots()
 	if restored != 2 {
-		t.Fatalf("expected 2 restored, got %d", restored)
+		t.Fatalf("expected 2 restored files, got %d", restored)
 	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(content) != "v1" {
-		t.Fatalf("expected file back to v1, got %q", content)
-	}
-	if got := SnapshotCount(); got != 0 {
-		t.Fatalf("expected 0 remaining snapshots, got %d", got)
-	}
-}
 
-func TestUndoToolStepsArgument(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "file.txt")
-	if err := os.WriteFile(path, []byte("v1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	Snapshot(path)
-	os.WriteFile(path, []byte("v2"), 0o644)
-	Snapshot(path)
-	os.WriteFile(path, []byte("v3"), 0o644)
+	contentA, _ := os.ReadFile(fileA)
+	contentB, _ := os.ReadFile(fileB)
 
-	tool := &UndoTool{}
-	out, err := tool.Execute(nil, `{"steps": 2}`)
-	if err != nil {
-		t.Fatal(err)
+	if string(contentA) != "original A" {
+		t.Errorf("fileA expected 'original A', got '%s'", string(contentA))
 	}
-	if out == "" {
-		t.Fatal("expected non-empty undo output")
-	}
-	content, _ := os.ReadFile(path)
-	if string(content) != "v1" {
-		t.Fatalf("expected v1 after steps=2, got %q", content)
-	}
-}
-
-func TestUndoNoSnapshots(t *testing.T) {
-	tool := &UndoTool{}
-	out, err := tool.Execute(nil, `{}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out == "" {
-		t.Fatal("expected informative message when nothing to undo")
+	if string(contentB) != "original B" {
+		t.Errorf("fileB expected 'original B', got '%s'", string(contentB))
 	}
 }

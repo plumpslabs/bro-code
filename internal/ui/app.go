@@ -1392,7 +1392,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.appendMessages("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
+		m.appendMessages("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
 
 	case "/miner":
 		// Jump straight into MINER mode so the next prompt is a knowledge
@@ -1533,6 +1533,14 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 
 	case "/clear":
 		m.messages = []string{"⚡ Chat history cleared."}
+
+	case "/undo":
+		count := tool.RestoreAllSnapshots()
+		if count > 0 {
+			m.appendMessages(fmt.Sprintf("↩️ Time-Travel Rollback: Successfully restored %d file(s) back to pre-turn snapshot.", count))
+		} else {
+			m.appendMessages("⚠️ No live snapshots available to roll back.")
+		}
 
 	case "/model":
 		if len(parts) > 1 {
