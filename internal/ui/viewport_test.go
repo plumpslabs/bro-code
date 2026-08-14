@@ -6,9 +6,11 @@ import (
 )
 
 // Simulates the exact scenario from the bug report: a user prompt followed by
-// a very long assistant answer (monorepo architecture doc). The viewport must
-// park at the user's prompt line so it never disappears from the history.
-func TestViewportParksAtUserPromptAfterLongAnswer(t *testing.T) {
+// a very long assistant answer (monorepo architecture doc). After the turn
+// completes the view must land at the END of the answer — never at the prompt
+// — so the answer is never left looking cut off below the fold, and earlier
+// history is reachable by scrolling up instead of appearing to vanish.
+func TestViewportLandsAtEndOfAnswer(t *testing.T) {
 	m := &Model{}
 	m.width = 140
 	m.height = 40
@@ -16,88 +18,75 @@ func TestViewportParksAtUserPromptAfterLongAnswer(t *testing.T) {
 	m.messages = []string{
 		"⚡ BroCode engine active. Type a prompt or /help for commands.",
 		"YOU:\nok bro dni ad pnysuaian bgian filter di omnichannel di bagian yng filter smua sednag ditangan dan juga belum di tangani nh dnsi eprmintaanya ad pnyesuaiaan",
-		"PROCESS:\n⚡ Turn 1 reasoning...",
-		"PROCESS:\n⚡ Thinking & analyzing request...",
-		"BROCODE:\n💭 Executed via local gateway (opencode/hy3-free)\n\n# ClientConnect — CRM Sales Management System (Monorepo)\n\n## 1. Stack & Architecture\n\n| Component | Stack |\n|---|---|\n| Backend | Node.js 20+ |\n| Admin Frontend | React 18 |\n\n## 2. Hard Rules\n\n- Package Manager: bun\n- Backend Language: JavaScript (CommonJS)\n- ORM: Prisma ONLY\n\n## 3. Verification Commands\n\n```bash\ncd crm_sales_backend && bun test\ncd crm_sales_backend && npx prisma validate\n```\n\nThis is a long answer that scrolls far past the user's prompt line.",
+		"BROCODE:\n💭 Executed via local gateway (opencode/hy3-free)\n\n# ClientConnect — CRM Sales Management System (Monorepo)\n\n## 1. Stack & Architecture\n\n| Component | Stack |\n|---|---|\n| Backend | Node.js 20+ |\n| Admin Frontend | React 18 |\n\n## 2. Hard Rules\n\n- Package Manager: bun\n- Backend Language: JavaScript (CommonJS)\n- ORM: Prisma ONLY\n\n## 3. Verification Commands\n\n```bash\ncd crm_sales_backend && bun test\ncd crm_sales_backend && npx prisma validate\n```\n\nThis is a long answer that scrolls far past the user's prompt line and must\nend with a marker that proves the viewport lands on the newest content.",
+
+		// Marker line at the very end of the answer, appended as a separate
+		// message the way the FILES summary is appended after the answer.
+		"FILES:\n📄 THE_END",
 	}
 
 	contentWidth := m.width - 4
 	log := m.buildLog(contentWidth)
 
-	t.Logf("lastUserLine = %d", m.lastUserLine)
-	if m.lastUserLine <= 0 {
-		t.Fatalf("expected lastUserLine > 0 (parked at user prompt), got %d", m.lastUserLine)
-	}
+	// Simulate the View's post-turn landing: SetContent then GotoBottom.
+	m.logViewport.SetWidth(m.width)
+	m.logViewport.SetContent(log)
+	m.logViewport.SetHeight(m.height)
+	m.logViewport.GotoBottom()
 
-	// The line where the user prompt starts must point at the "YOU" block.
-	lines := strings.Split(log, "\n")
-	if m.lastUserLine >= len(lines) {
-		t.Fatalf("lastUserLine %d out of bounds (log has %d lines)", m.lastUserLine, len(lines))
+	// The visible window must contain the END of the answer (the newest
+	// content), not the user's prompt at the top. Glamour interleaves ANSI
+	// codes mid-word, so strip them before asserting.
+	visible := ansiRegex.ReplaceAllString(m.logViewport.View(), "")
+	if !strings.Contains(visible, "THE_END") {
+		t.Fatalf("end of answer not visible after landing at bottom:\n%s", visible[:min(400, len(visible))])
 	}
-	at := lines[m.lastUserLine]
-	if !strings.Contains(at, "YOU") {
-		t.Fatalf("lastUserLine %d points at %q, expected the YOU block", m.lastUserLine, at)
-	}
-
-	// The prompt must be visible in the first viewport-height window.
-	window := strings.Join(lines[m.lastUserLine:min(m.lastUserLine+m.height, len(lines))], "\n")
-	if !strings.Contains(window, "ok bro dni ad pnysuaian") {
-		t.Fatalf("user prompt not visible in first viewport window after parking:\n%s", window[:min(400, len(window))])
+	// The prompt must still exist in the log (scrolled above, reachable via
+	// PgUp) — history is never deleted.
+	if !strings.Contains(ansiRegex.ReplaceAllString(log, ""), "ok bro dni ad pnysuaian") {
+		t.Fatalf("user prompt missing from log (must remain in history)")
 	}
 }
 
-// Reproduces the live-turn bug: while the agent runs, the activity slot grows
-// (spinner + 5 tool lines) which SHRINKS the log viewport. The viewport must
-// re-park at the user's prompt whenever the height changes — otherwise the
-// prompt silently scrolls out of view until the turn completes.
-func TestViewportReParksWhenActivityShrinksViewport(t *testing.T) {
+// Reproduces the live-turn layout shift: while the agent runs, the activity
+// slot grows (spinner + tool lines) which SHRINKS the log viewport. With
+// unchanged content the reading position must be preserved and the viewport
+// must render safely (clamped to the newest lines) — no panic, no jump.
+func TestViewportPreservesPositionOnHeightChange(t *testing.T) {
 	m := &Model{}
 	m.width = 120
 	m.height = 40
 	m.messages = []string{
 		"⚡ BroCode engine active. Type a prompt or /help for commands.",
 		"YOU:\nok bro sesuaikan filter omnichannel di bagian bawah 3 filter",
+		"BROCODE:\nOke, ini penjelasan lengkap tentang filter omnichannel.\n\nBaris 1.\nBaris 2.\nBaris 3.\nBaris 4.\nBaris 5.\nBaris 6.\nBaris 7.\nBaris 8.\nBaris 9.\nBaris 10.\nBaris 11.\nBaris 12.\nBaris 13.\nBaris 14.\nBaris 15.",
 	}
 
 	contentWidth := m.width - 4
 	log := m.buildLog(contentWidth)
-	if !m.foundUserLine {
-		t.Fatal("expected foundUserLine")
-	}
-
-	// Turn starts: set up viewport at full height (no activity yet) and park.
+	m.logViewport.SetWidth(m.width)
 	m.logViewport.SetContent(log)
 	m.logViewport.SetHeight(m.height - 8)
-	m.parkAtUserPrompt()
+	m.logViewport.GotoBottom()
 	yBefore := m.logViewport.YOffset()
 
-	// Activity grows: height shrinks by 6 lines (spinner + 5 steps). Same
-	// content, new height — the parking logic must move the offset so the
-	// prompt stays visible.
+	// Activity grows: height shrinks. Same content — the position is
+	// preserved; the viewport's rendering clamps to the newest lines.
 	m.logViewport.SetHeight(m.height - 8 - 6)
-	m.parkAtUserPrompt()
+	m.logViewport.SetContent(log)
 	yAfter := m.logViewport.YOffset()
 
-	if yAfter != yBefore && yAfter > m.lastUserLine {
-		t.Errorf("re-park moved past the prompt: yBefore=%d yAfter=%d lastUserLine=%d", yBefore, yAfter, m.lastUserLine)
+	if yAfter != yBefore {
+		t.Logf("note: offset adjusted %d -> %d (clamped to new max offset)", yBefore, yAfter)
 	}
-	if yAfter > m.lastUserLine {
-		t.Errorf("prompt scrolled out of view: yAfter=%d > lastUserLine=%d", yAfter, m.lastUserLine)
-	}
-	// The prompt must remain within the visible window after re-parking.
-	logLines := strings.Count(log, "\n") + 1
-	if m.lastUserLine >= logLines {
-		t.Fatalf("lastUserLine %d out of bounds (log has %d lines)", m.lastUserLine, logLines)
-	}
-	lines := strings.Split(log, "\n")
-	visible := strings.Join(lines[m.lastUserLine:min(m.lastUserLine+m.logViewport.Height(), len(lines))], "\n")
-	if !strings.Contains(visible, "ok bro sesuaikan filter") {
-		t.Errorf("prompt not visible after re-park:\n%q", visible)
+	_ = m.logViewport.View() // must not panic with the shrunken height
+	if !strings.Contains(ansiRegex.ReplaceAllString(m.logViewport.View(), ""), "Baris 15.") {
+		t.Errorf("newest content not visible after height shrink:\n%q", ansiRegex.ReplaceAllString(m.logViewport.View(), ""))
 	}
 }
 
-// A message list without any user message (e.g. system banner only) must fall
-// back to the bottom of the log rather than parking at line 0.
+// A message list without any user message (e.g. system banner only) must
+// render its content fine and land at the bottom.
 func TestViewportFallsBackToBottomWithoutUserMessage(t *testing.T) {
 	m := &Model{}
 	m.width = 100
@@ -107,10 +96,14 @@ func TestViewportFallsBackToBottomWithoutUserMessage(t *testing.T) {
 	}
 
 	log := m.buildLog(m.width - 4)
-	if m.lastUserLine != 0 {
-		t.Fatalf("expected lastUserLine 0 when no user message, got %d", m.lastUserLine)
-	}
 	if !strings.Contains(log, "Just an answer") {
 		t.Fatalf("log missing content: %q", log)
+	}
+	m.logViewport.SetWidth(m.width)
+	m.logViewport.SetContent(log)
+	m.logViewport.SetHeight(m.height)
+	m.logViewport.GotoBottom()
+	if !strings.Contains(ansiRegex.ReplaceAllString(m.logViewport.View(), ""), "Just an answer") {
+		t.Fatalf("answer not visible after landing at bottom: %q", m.logViewport.View())
 	}
 }

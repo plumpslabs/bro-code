@@ -69,12 +69,6 @@ func TestTurnFlowKeepsHistoryAndSettlesStatus(t *testing.T) {
 
 	// The log must still contain the user prompt and NO progress rows.
 	log := m.buildLog(m.width - 4)
-	if !m.foundUserLine {
-		t.Fatalf("expected foundUserLine (user prompt missing from log)")
-	}
-	if m.lastUserLine < 0 {
-		t.Fatalf("lastUserLine %d invalid", m.lastUserLine)
-	}
 	if !contains(log, "ok bro sesuaikan filter omnichannel") {
 		t.Fatal("user prompt content missing from log")
 	}
@@ -82,13 +76,17 @@ func TestTurnFlowKeepsHistoryAndSettlesStatus(t *testing.T) {
 		t.Fatal("progress steps leaked into conversation history")
 	}
 
-	// Render through the REAL View() path — this is what the user sees.
-	// The prompt must be visible and the trailing "Completed" progress must
-	// NOT leak into the visible history.
+	// Render through the REAL View() path — this is what the user sees. After
+	// the turn completes the view must land at the END of the answer so long
+	// answers never look cut off below the fold (the prompt stays in the log,
+	// reachable by scrolling up — it is never deleted).
 	v := m.View()
-	visible := v.Content
-	if !contains(visible, "ok bro sesuaikan filter omnichannel") {
-		t.Fatalf("user prompt not visible in real View() output")
+	// Glamour interleaves ANSI codes mid-word, so strip them before asserting
+	// on the rendered text (same as the badge/FILES summary tests).
+	visible := ansiRegex.ReplaceAllString(v.Content, "")
+	lastAnswerLine := "line of the long answer with some detail and context"
+	if !contains(visible, lastAnswerLine) {
+		t.Fatalf("end of answer not visible in real View() output")
 	}
 	if contains(visible, "⚡ Completed") {
 		t.Fatalf("trailing 'Completed' progress leaked into visible history")

@@ -192,12 +192,10 @@ type Model struct {
 	logViewport viewport.Model
 	renderedLog string
 	renderedKey string
-	// lastUserLine is the rendered line where the last user message starts;
-	// after a turn completes the viewport parks here so the user's own prompt
-	// never disappears from the history (only scrolled past by long answers).
-	// foundUserLine distinguishes "park at line 0" from "no user message at all".
-	lastUserLine  int
-	foundUserLine bool
+	// trimNoticeShown records whether the "older messages pruned" notice has
+	// already been inserted into the chat log, so long sessions announce the
+	// display trim once instead of silently dropping history.
+	trimNoticeShown bool
 
 	// renderedH remembers the log viewport height from the last re-render so
 	// the parking logic can re-park the scroll when the viewport SHRINKS (the
@@ -302,7 +300,15 @@ const maxChatMessages = 200
 func (m *Model) appendMessages(msgs ...string) {
 	m.messages = append(m.messages, msgs...)
 	if len(m.messages) > maxChatMessages {
-		m.messages = append([]string(nil), m.messages[len(m.messages)-maxChatMessages:]...)
+		trimmed := len(m.messages) - maxChatMessages
+		m.messages = append([]string(nil), m.messages[trimmed:]...)
+		// Make the display trim visible instead of silent: the oldest entries
+		// dropped from this in-memory view are still in session history, and
+		// the user must never think a bug ate their conversation. Noted once.
+		if !m.trimNoticeShown {
+			m.trimNoticeShown = true
+			m.messages[0] = "… older messages pruned from this view (kept in session history) — /sessions to browse …"
+		}
 	}
 }
 
@@ -1951,17 +1957,17 @@ func (m *Model) View() tea.View {
 				}
 			} else if key := m.logKey(); key != m.renderedKey || h != m.renderedH {
 				m.logViewport.SetContent(log)
-				// Park the scroll at the user's own prompt so it never silently
-				// disappears from the history after a long answer scrolls past it
-				// — or when the viewport shrinks because the live activity slot
-				// grew while a turn is running.
-				// lastUserLine == 0 is a VALID position (prompt is the first
-				// rendered line), so use an explicit found-flag, not "> 0".
-				if m.foundUserLine {
-					m.parkAtUserPrompt()
-				} else {
+				// Land on the newest content: after a turn completes, the answer
+				// (and any FILES summary) was appended, so the reader must end up at
+				// the END of the answer. Parking at the user's prompt instead left
+				// long answers cut off below the fold and made earlier history look
+				// like it vanished (it was only scrolled above the parked view).
+				if key != m.renderedKey {
 					m.logViewport.GotoBottom()
 				}
+				// Height-only change (the live activity slot grew/shrunk): content
+				// is identical, so preserve the reading position — the viewport's
+				// rendering clamps safely when it shrinks.
 				m.renderedLog = log
 				m.renderedKey = key
 				m.renderedH = h
@@ -2058,24 +2064,12 @@ func (m *Model) View() tea.View {
 	return v
 }
 
-// buildLog renders the message history + live streaming block. It also
-// records the rendered line where the last user message starts, so the view
-// can park the scroll position there after a turn completes (the user's own
-// prompt must never silently disappear from the history).
+// buildLog renders the message history + live streaming block.
 func (m *Model) buildLog(contentWidth int) string {
 	var sb strings.Builder
-	line := 0
-	m.lastUserLine = 0
-	m.foundUserLine = false
 	for _, msg := range m.messages {
-		isUser := strings.HasPrefix(msg, "YOU:\n") || strings.HasPrefix(msg, "👤 ")
-		if isUser {
-			m.lastUserLine = line
-			m.foundUserLine = true
-		}
 		rendered := formatMessage(msg, contentWidth, m.filesExpanded)
 		sb.WriteString(rendered + "\n\n")
-		line += strings.Count(rendered, "\n") + 3 // rendered lines + blank separator
 	}
 	if m.streaming && m.pendingStream != "" {
 		label := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("BROCODE")
@@ -2131,18 +2125,6 @@ func (m *Model) updateLogHeight() int {
 		m.logViewport.SetHeight(h)
 	}
 	return h
-}
-
-// parkAtUserPrompt sets the log scroll so the user's last prompt stays
-// visible. SetYOffset clamps to the viewport's max offset, so when the content
-// is short the viewport lands at the bottom (prompt visible); when a long
-// answer scrolls past it the offset stays at the prompt line.
-func (m *Model) parkAtUserPrompt() {
-	if !m.foundUserLine {
-		m.logViewport.GotoBottom()
-		return
-	}
-	m.logViewport.SetYOffset(m.lastUserLine)
 }
 
 func (m *Model) renderSessionsModal() string {
