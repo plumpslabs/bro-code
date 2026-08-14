@@ -198,6 +198,33 @@ func TestActivityResetsOnNewTurn(t *testing.T) {
 
 // newTestApp builds a fully-initialized app model (real textarea/input
 // widgets) without starting the Bubble Tea program, so View() can be rendered.
+// TestConnectBuiltInAPIKeyTyping verifies keystrokes reach the API-key
+// textinput at step 1 for a built-in provider (regression: routing used to
+// send them to the unfocused custom-name input, so typing did nothing).
+func TestConnectBuiltInAPIKeyTyping(t *testing.T) {
+	m := newTestApp()
+
+	// Open /connect, pick the first built-in provider (step 0 → 1 = API key).
+	_, _ = m.handleSlashCommand("/connect")
+	if !m.showConnect || m.connectStep != 0 {
+		t.Fatalf("expected connect wizard at step 0, got step=%d show=%v", m.connectStep, m.showConnect)
+	}
+	// ENTER → step 1 (built-in provider, API key).
+	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); err != nil {
+		t.Fatalf("enter failed: %v", err)
+	}
+	if m.connectStep != 1 || m.connectCustom {
+		t.Fatalf("expected built-in step 1 (API key), got step=%d custom=%v", m.connectStep, m.connectCustom)
+	}
+
+	// Type characters — they must land in the API-key input.
+	_, _ = m.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if got := m.connectTextInput.Value(); got != "sk" {
+		t.Errorf("typing at built-in API key step = %q, want %q", got, "sk")
+	}
+}
+
 func newTestApp() Model {
 	cfg := provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}
 	p := provider.DetectedProvider{}

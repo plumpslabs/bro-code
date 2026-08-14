@@ -571,6 +571,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.promptInput.SetWidth(m.width - 4)
 			m.logViewport.SetWidth(m.width)
 			m.askViewport.SetWidth(m.width - 8)
+			// Connect wizard inputs need an explicit width too, otherwise the
+			// textinput renders nothing (Width 0) and typing looks broken.
+			cw := m.width - 8
+			m.connectNameInput.SetWidth(cw)
+			m.connectTextInput.SetWidth(cw)
+			m.connectBaseURLInput.SetWidth(cw)
+			m.connectModelsInput.SetWidth(cw)
 			m.updateLogHeight()
 		}
 
@@ -672,7 +679,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.showConnect {
 					switch m.connectStep {
 					case 1:
-						m.connectNameInput.SetValue(m.connectNameInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+						// Step 1 is the API key for built-in providers but the
+						// provider name for custom ones — mirror the render.
+						if m.connectCustom {
+							m.connectNameInput.SetValue(m.connectNameInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+						} else {
+							m.connectTextInput.SetValue(m.connectTextInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+						}
 					case 2:
 						m.connectTextInput.SetValue(m.connectTextInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
 					case 3:
@@ -949,8 +962,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	} else if m.showConnect {
 		switch m.connectStep {
 		case 1:
+			// Step 1 is the API key for built-in providers but the provider
+			// name for custom ones — route to whichever input is actually
+			// focused, otherwise keystrokes vanish (unfocused textinputs
+			// drop all input).
 			var cmd tea.Cmd
-			m.connectNameInput, cmd = m.connectNameInput.Update(msg)
+			if m.connectCustom {
+				m.connectNameInput, cmd = m.connectNameInput.Update(msg)
+			} else {
+				m.connectTextInput, cmd = m.connectTextInput.Update(msg)
+			}
 			cmds = append(cmds, cmd)
 		case 2:
 			var cmd tea.Cmd
