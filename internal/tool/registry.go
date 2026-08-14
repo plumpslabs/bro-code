@@ -400,7 +400,11 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 
 	if len(lines) > 200 {
 		head := strings.Join(lines[:100], "\n")
-		return fmt.Sprintf("%s\n\n[file has %d lines, showing first 100 lines. Request line range for more]", head, len(lines)), nil
+		// Actionable guidance instead of a vague "request more": a weak model
+		// that reads a big file and sees truncation tends to fight it with bash
+		// sed/head/tail loops instead of using the range parameters — which
+		// burns rounds and ends in a tool-budget abort.
+		return fmt.Sprintf("%s\n\n[file has %d lines, showing first 100. Read specific ranges with start_line/end_line, or use code_search to locate symbols first]", head, len(lines)), nil
 	}
 
 	return CapOutput(string(data)), nil

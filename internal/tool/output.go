@@ -12,7 +12,10 @@ import "fmt"
 const maxCommandOutputChars = 40_000
 
 // CapOutput truncates tool output to maxCommandOutputChars, keeping a visible
-// marker so the model knows more output exists beyond the cap.
+// marker so the model knows more output exists beyond the cap. The marker
+// names the way out (narrow the query / smaller range) because a model that
+// sees a bare "truncated" notice tends to retry the same read or fight it
+// with bash sed/head/tail loops instead of adapting — which burns rounds.
 //
 // The slice is rune-safe: cutting at a byte boundary could split a multi-byte
 // UTF-8 rune (CJK comments, emoji) and leave an invalid tail in the model's
@@ -22,5 +25,5 @@ func CapOutput(s string) string {
 	if len(r) <= maxCommandOutputChars {
 		return s
 	}
-	return string(r[:maxCommandOutputChars]) + fmt.Sprintf("\n… [output truncated, %d more chars]", len(r)-maxCommandOutputChars)
+	return string(r[:maxCommandOutputChars]) + fmt.Sprintf("\n… [output truncated, %d more chars — narrow the query or read a smaller line range]", len(r)-maxCommandOutputChars)
 }

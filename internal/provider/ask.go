@@ -57,7 +57,7 @@ const brocodeAnswerNote = `Answer length should match the question's depth: for 
 // more work, and explore like a senior consultant — a few high-signal reads,
 // then answer. Never demands brevity in the answer itself (that is
 // brocodeAnswerNote's job).
-const brocodeEfficiencyNote = `Work efficiently: batch independent tool calls into a single message instead of one per round — every round re-sends the entire conversation, so denser rounds are dramatically cheaper and faster. Explore like a senior consultant: form a hypothesis about where the answer lives, verify with one targeted batch of reads, then answer.`
+const brocodeEfficiencyNote = `Work efficiently: batch independent tool calls into a single message instead of one per round — every round re-sends the entire conversation, so denser rounds are dramatically cheaper and faster. Explore like a senior consultant: form a hypothesis about where the answer lives, verify with one targeted batch of reads, then answer. When a tool result is truncated, narrow the range once and move on — never loop with bash sed/head/tail on the same file hoping for different output.`
 
 // askMarkerInstructions is appended to the prompt when the OpenCode CLI model
 // runs with an interactive ask handler wired, so its clarification questions

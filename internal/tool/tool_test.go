@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -48,6 +49,46 @@ func TestReadFileBlockedForSensitiveAndHeavy(t *testing.T) {
 	}
 	if _, err := rt.Execute(context.Background(), `{"path":"`+okPath+`"}`); err != nil {
 		t.Errorf("read_file(main.go) must work, got %v", err)
+	}
+}
+
+// TestReadFileTruncationGuidance verifies a large file (>200 lines) returns
+// the first 100 lines with ACTIONABLE guidance (start_line/end_line ranges,
+// code_search) — not a vague "request more" that lets weak models fall into
+// bash sed/head/tail truncation-fighting loops.
+func TestReadFileTruncationGuidance(t *testing.T) {
+	tmpDir := t.TempDir()
+	big := filepath.Join(tmpDir, "big.js")
+	var sb strings.Builder
+	for i := 1; i <= 500; i++ {
+		sb.WriteString(fmt.Sprintf("// line %d\n", i))
+	}
+	if err := os.WriteFile(big, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &ReadFileTool{}
+	out, err := rt.Execute(context.Background(), `{"path":"`+big+`"}`)
+	if err != nil {
+		t.Fatalf("read_file failed: %v", err)
+	}
+	if !strings.Contains(out, "file has 50") || !strings.Contains(out, "showing first 100") {
+		t.Fatalf("truncation notice missing line count: %q", out)
+	}
+	if !strings.Contains(out, "start_line/end_line") || !strings.Contains(out, "code_search") {
+		t.Fatalf("truncation notice must give actionable guidance: %q", out)
+	}
+	if strings.Contains(out, "line 300") {
+		t.Fatalf("read_file returned content past the first 100 lines")
+	}
+
+	// A range read returns the requested section.
+	rangeOut, err := rt.Execute(context.Background(), `{"path":"`+big+`","start_line":200,"end_line":205}`)
+	if err != nil {
+		t.Fatalf("range read failed: %v", err)
+	}
+	if !strings.Contains(rangeOut, "line 200") || !strings.Contains(rangeOut, "line 205") {
+		t.Fatalf("range read missing expected lines: %q", rangeOut)
 	}
 }
 
