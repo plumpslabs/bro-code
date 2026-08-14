@@ -247,6 +247,7 @@ type Model struct {
 	// hits the safety ceiling announces it once instead of silently dropping
 	// history.
 	trimNoticeShown bool
+	initialized     bool
 
 	// renderedH remembers the log viewport height from the last re-render so
 	// the parking logic can re-park the scroll when the viewport SHRINKS (the
@@ -569,6 +570,7 @@ func NewApp(
 
 	m.modelOptions = provider.DiscoverModels(cfg)
 	m.rebuildEngine()
+	m.initialized = true
 	return m
 }
 
@@ -2228,9 +2230,11 @@ func (m *Model) buildLog(contentWidth int) string {
 	if m.streaming && m.pendingStream != "" {
 		label := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("BROCODE")
 		bar := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("205")).Padding(0, 1)
-		if contentWidth > 0 {
-			bar = bar.Width(contentWidth)
+		w := contentWidth
+		if w <= 0 {
+			w = getTerminalWidth() - 2
 		}
+		bar = bar.Width(w)
 		out.WriteString(bar.Render(label+"\n"+m.pendingStream) + "\n\n")
 	}
 	return out.String()
