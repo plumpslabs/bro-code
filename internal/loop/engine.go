@@ -428,27 +428,6 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 			continue
 		}
-		if e.toolOnlyRounds >= maxToolOnlyRounds && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute) {
-			e.state = StateBlocked
-			// Hand the user something actionable, not just a file dump: what
-			// the agent was last trying to figure out, plus what it examined.
-			// The user can then rephrase, guide, or let it continue.
-			msg := "Turn aborted: the model kept calling tools without producing an answer after two warnings. "
-			if e.lastReasoning != "" {
-				msg += "\n\nWhat the agent was last working on: " + e.lastReasoning
-			}
-			msg += e.exploredSummary()
-			if onUpdate != nil {
-				onUpdate(e.state, msg)
-			}
-			return msg, nil
-		}
-
-		// Scout results that completed during the previous loop iteration are
-		// delivered before the model reasons again, so it can incorporate
-		// background findings without re-invoking anything.
-		e.drainScouts(onUpdate)
-
 		// 1. Thinking State
 		e.state = StateThinking
 		if onUpdate != nil {
@@ -517,6 +496,51 @@ Engine Mode Rules (%s):
 17. BATCH YOUR TOOL CALLS (cost-critical): every round re-sends the ENTIRE conversation to the model, so the number of rounds is the single biggest cost driver. Issue MULTIPLE independent tool calls in ONE message — e.g. 3-4 read_file/grep/glob/list_dir calls together instead of one per round. They execute in sequence within the round. A senior consultant explores with a few high-signal batch reads, not dozens of narrow single-file greps.
 18. SENIOR CONSULTANT POSTURE: think before you act. For a question, first form a hypothesis about where the answer lives (likely files/symbols), then verify it with ONE batched round of targeted reads, then answer directly with what you verified. Do not dump raw exploration or file lists into your answer — synthesize. If a tool result is unhelpful, say so and adapt; never re-run the same narrow search hoping for a different outcome.
 19. LARGE FILES & TRUNCATION: read_file of a file over 250 lines returns the first 250 with a notice — cover the rest with start_line/end_line range reads (2-3 max for a typical large file), or use code_search to locate symbols first. If a tool result is truncated, narrow the range ONCE and move on; NEVER fight truncation with bash sed/head/tail/grep loops on the same file hoping for different output — that burns rounds and gets the turn aborted. Range reads of a large file ARE progress; answer from what you have after covering the key sections.`
+		}
+
+		if e.toolOnlyRounds >= maxToolOnlyRounds && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute) {
+			if onUpdate != nil {
+				onUpdate(e.state, "⚠️ Tool exploration limit reached — synthesizing graceful answer from explored context...")
+			}
+			// Graceful Recovery: Instead of a cold abort message, make ONE final
+			// completion request WITHOUT tools, forcing the model to synthesize a
+			// helpful answer for the user based on the context explored so far.
+			synthPrompt := "⚠️ TOOL EXPLORATION BUDGET REACHED: You have reached the tool call limit for this task. Tools are now DISABLED for this final response. You MUST now synthesize a helpful, comprehensive response for the user in the user's language based ONLY on the files and context you have explored so far. Answer as much of the user's prompt as possible, summarize your findings, and clearly note any missing context or next steps." + e.exploredSummary()
+			_ = e.context.AppendUserMessage(synthPrompt)
+
+			reqMessages := append([]provider.Message{
+				{Role: "system", Content: sysPrompt},
+			}, e.context.Messages()...)
+
+			synthReq := provider.CompletionRequest{
+				Model:       e.model,
+				Messages:    reqMessages,
+				Tools:       nil, // DISABLE TOOLS to force text response!
+				Temperature: 0.2,
+			}
+
+			synthResp, synthErr := e.complete(ctx, synthReq)
+			if synthErr == nil && synthResp != nil && synthResp.Content != "" {
+				res := synthResp.Content + "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (Batas Tool Limit Tercapai).* "
+				_ = e.context.AppendAssistantTurn("", res, nil)
+				e.state = StateDone
+				if onUpdate != nil {
+					onUpdate(e.state, "Completed with graceful context synthesis")
+				}
+				return res, nil
+			}
+
+			// Fallback if synthesis completion fails: return structured message
+			e.state = StateBlocked
+			msg := "Turn paused: tool budget limit reached after two warnings. "
+			if e.lastReasoning != "" {
+				msg += "\n\nWhat the agent was last working on: " + e.lastReasoning
+			}
+			msg += e.exploredSummary()
+			if onUpdate != nil {
+				onUpdate(e.state, msg)
+			}
+			return msg, nil
 		}
 
 		// Auto-compact context if token count exceeds threshold

@@ -139,8 +139,19 @@ func (s *Store) WarmStart() string {
 		return ""
 	}
 	s.load()
+	// Deterministic section order: WarmStart feeds the system prompt, which is
+	// part of the stable prefix that prompt caching keys off. Map iteration
+	// would randomize section order per call, silently invalidating the cache
+	// every round. Sections are sorted; items keep their stored order.
+	sections := make([]string, 0, len(s.facts))
+	for sec := range s.facts {
+		sections = append(sections, sec)
+	}
+	sort.Strings(sections)
+
 	var sb strings.Builder
-	for sec, items := range s.facts {
+	for _, sec := range sections {
+		items := s.facts[sec]
 		if len(items) == 0 {
 			continue
 		}

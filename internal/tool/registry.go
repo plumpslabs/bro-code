@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -289,8 +290,21 @@ func (r *Registry) Register(t Tool) {
 }
 
 func (r *Registry) Definitions() []provider.ToolDefinition {
-	var defs []provider.ToolDefinition
-	for _, t := range r.tools {
+	// Deterministic order (sorted by name): the tool list is part of the
+	// stable prompt prefix that prompt caching keys off. Iterating the map
+	// directly would randomize the order on every call (Go map iteration),
+	// silently invalidating the cache prefix every round and defeating both
+	// Anthropic cache_control breakpoints and OpenAI's automatic prefix
+	// caching — each round would pay full price again.
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	defs := make([]provider.ToolDefinition, 0, len(names))
+	for _, name := range names {
+		t := r.tools[name]
 		defs = append(defs, provider.ToolDefinition{
 			Name:        t.Name(),
 			Description: t.Description(),
@@ -673,6 +687,14 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	// Leading-slash paths (a common LLM habit) would resolve against the
 	// filesystem root and silently return "no matches", burning rounds.
 	args.Path = resolvePath(args.Path)
+
+	// Fail-fast path validation: if path does not exist on disk, return a clear
+	// diagnostic message so the LLM immediately knows the path is wrong
+	// instead of getting "No matches found." and looping.
+	if _, err := os.Stat(args.Path); os.IsNotExist(err) {
+		cwd, _ := os.Getwd()
+		return fmt.Sprintf("Error: search path %q does not exist (resolved relative to workspace %q). Check project structure or use list_dir.", args.Path, cwd), nil
+	}
 
 	// Native guard: never search inside heavy dirs (node_modules, vendor,
 	// target, ...) or dump sensitive files.
