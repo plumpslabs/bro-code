@@ -126,6 +126,27 @@ func TestActivityShownLiveDuringTurn(t *testing.T) {
 	}
 }
 
+// TestQuitCancelsRunningTurn verifies that quitting (ctrl+c) cancels the
+// in-flight turn and sets the quitting flag, so the turn goroutine stops
+// sending to the exiting program (no goroutine leak on quit mid-turn).
+func TestQuitCancelsRunningTurn(t *testing.T) {
+	m := newTestApp()
+	m.status = "Thinking..."
+	canceled := false
+	m.cancelTurn = func() { canceled = true }
+
+	// The second return is the tea.Cmd — tea.Quit on quit, which is expected.
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); cmd == nil {
+		t.Fatal("expected a quit cmd after ctrl+c")
+	}
+	if !m.quitting {
+		t.Fatal("expected quitting flag after ctrl+c")
+	}
+	if !canceled {
+		t.Fatal("expected in-flight turn to be canceled on quit")
+	}
+}
+
 // TestInterruptedTurnIsNotAnError verifies that a user interrupt (ESC) does
 // not surface the resulting "context canceled" error as an ERROR row.
 func TestInterruptedTurnIsNotAnError(t *testing.T) {

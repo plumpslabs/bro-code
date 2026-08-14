@@ -363,7 +363,12 @@ func (t *MCPTool) Execute(ctx context.Context, argsJSON string) (string, error) 
 		}
 	}
 
-	res, err := t.client.CallTool(ctx, mcp.CallToolRequest{
+	// Bound each call: a hung MCP server (no response, network stall) must not
+	// stall the agent loop past the timeout — the tool call fails cleanly and
+	// the model adapts.
+	callCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	res, err := t.client.CallTool(callCtx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name:      t.def.Name,
 			Arguments: args,

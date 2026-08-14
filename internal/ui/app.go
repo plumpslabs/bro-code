@@ -155,6 +155,11 @@ type Model struct {
 	// Cancelation function for active LLM turn / tool execution
 	cancelTurn context.CancelFunc
 
+	// quitting is set when the user quits (ctrl+c) so in-flight turn
+	// goroutines stop sending to the (already exiting) program — prevents a
+	// blocked Send from leaking the turn goroutine forever.
+	quitting bool
+
 	// Spinner animation state
 	spinnerIdx int
 
@@ -675,6 +680,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch keyStr {
 		case "ctrl+c":
+			// Cancel any running turn first: without this, the turn goroutine
+			// keeps running after the program exits and its prog.Send calls
+			// can block forever — a silent goroutine leak holding the engine,
+			// context and adapter.
+			m.quitting = true
+			if m.cancelTurn != nil {
+				m.cancelTurn()
+				m.cancelTurn = nil
+			}
 			return m, tea.Quit
 
 		case "tab", "shift+tab":
@@ -796,6 +810,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelTurn = cancel
 
 			m.engine.SetStreamHandler(func(delta string) {
+				if m.quitting {
+					return
+				}
 				if m.prog != nil {
 					m.prog.Send(streamChunkMsg(delta))
 				}
@@ -803,10 +820,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			runTurnCmd := func() tea.Msg {
 				res, err := m.engine.RunTurn(ctx, userQuery, func(state loop.LoopState, info string) {
+					if m.quitting {
+						return
+					}
 					if m.prog != nil {
 						m.prog.Send(stepProgressMsg(info))
 					}
 				})
+				// The program may already be exiting (ctrl+c): a Send to a
+				// closed program can block forever, so drop the result instead.
+				if m.quitting {
+					return nil
+				}
 				return turnResultMsg{content: res, err: err}
 			}
 
