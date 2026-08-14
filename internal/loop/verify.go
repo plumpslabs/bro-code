@@ -98,11 +98,16 @@ func planIn(dir string) []checkCmd {
 	case fileExistsIn(dir, "package.json"):
 		return planJSVerificationIn(dir)
 	case anyExistsIn(dir, "pyproject.toml", "setup.py", "requirements.txt", "Pipfile"):
-		return []checkCmd{{"python3", []string{"-m", "compileall", "-q", "."}, dir}}
+		var cmds []checkCmd
+		cmds = append(cmds, checkCmd{"python3", []string{"-m", "compileall", "-q", "."}, dir})
+		if anyExistsIn(dir, "pytest.ini", "conftest.py") || fileExistsIn(dir, "tests") {
+			cmds = append(cmds, checkCmd{"pytest", []string{"-q"}, dir})
+		}
+		return cmds
 	case fileExistsIn(dir, "pom.xml") && fileExistsIn(dir, "mvnw"):
-		return []checkCmd{{"./mvnw", []string{"-q", "compile"}, dir}}
+		return []checkCmd{{"./mvnw", []string{"-q", "test"}, dir}}
 	case (fileExistsIn(dir, "build.gradle") || fileExistsIn(dir, "build.gradle.kts")) && fileExistsIn(dir, "gradlew"):
-		return []checkCmd{{"./gradlew", []string{"-q", "compileJava"}, dir}}
+		return []checkCmd{{"./gradlew", []string{"-q", "test"}, dir}}
 	}
 	return nil
 }
@@ -158,6 +163,11 @@ func planJSVerificationIn(dir string) []checkCmd {
 
 	if scriptExistsIn(dir, "lint") {
 		cmds = append(cmds, checkCmd{pm, []string{"run", "lint"}, dir})
+	}
+	if scriptExistsIn(dir, "test:unit") {
+		cmds = append(cmds, checkCmd{pm, []string{"run", "test:unit"}, dir})
+	} else if scriptExistsIn(dir, "test") {
+		cmds = append(cmds, checkCmd{pm, []string{"run", "test"}, dir})
 	}
 	return cmds
 }

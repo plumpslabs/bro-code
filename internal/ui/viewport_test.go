@@ -309,14 +309,46 @@ func TestShortHistoryGrowsNaturallyNoBlankGap(t *testing.T) {
 			t.Fatalf("height %d: input prompt missing from view:\n%s", h, visible)
 		}
 		gap := strings.Count(visible[lastLogIdx:inputIdx], "\n")
-		if gap > 3 {
-			t.Errorf("height %d: %d blank lines between chat and input (should be ≤ 3, no padded blank gap)", h, gap)
+		// ≤ ~8 rows: message box border + the per-message "\n\n" separators + the
+		// chrome's own spacing. The padded-viewport bug put 20+ blank rows here.
+		if gap > 8 {
+			t.Errorf("height %d: %d blank lines between chat and input (should be ≤ 8, no padded blank gap)", h, gap)
 		}
 
 		// Total height must be LESS than the terminal — no padding to fill it.
 		n := strings.Count(visible, "\n") + 1
 		if n >= h {
 			t.Errorf("height %d: short content rendered %d lines — must not pad to terminal height", h, n)
+		}
+	}
+}
+
+// TestViewNeverCutsNewestAtBoundary pins the unified viewport design: as the
+// log grows PAST the fold (the point where the old natural↔viewport hybrid
+// switched modes and could cut/jump), the newest line must ALWAYS stay visible
+// at the bottom and the view must never be taller than the terminal. The
+// content-hugging height grows with the log until it hits the screen cap, so
+// there is no boundary to glitch at.
+func TestViewNeverCutsNewestAtBoundary(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 12 // small terminal so the fold is crossed after a few messages
+	m.promptInput.SetWidth(m.width - 4)
+	m.logViewport.SetWidth(m.width)
+	m.updateLogHeight()
+
+	for i := 1; i <= 12; i++ {
+		m.appendMessages(fmt.Sprintf("YOU:\nprompt %d", i))
+		m.appendMessages(fmt.Sprintf("BROCODE:\nanswer %d", i))
+
+		v := m.View()
+		n := strings.Count(v.Content, "\n") + 1
+		if n > m.height {
+			t.Fatalf("step %d: view taller than terminal (%d lines) — something was cut", i, n)
+		}
+		visible := ansiRegex.ReplaceAllString(v.Content, "")
+		if !strings.Contains(visible, fmt.Sprintf("answer %d", i)) {
+			t.Fatalf("step %d: newest answer not visible at bottom:\n%s", i, visible)
 		}
 	}
 }

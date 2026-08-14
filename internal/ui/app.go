@@ -2097,10 +2097,12 @@ func (m *Model) View() tea.View {
 		chrome, chromeLines := m.buildLogChrome()
 
 		// buildLog always ends with "\n\n" (per-message separator), so the log
-		// occupies count+1 rows. This decides between the two rendering paths:
-		// natural growth when the content fits, a scrollable window when it
-		// overflows the terminal.
-		logLines := strings.Count(log, "\n") + 1
+		// occupies count+1 rows. The viewport height hugs this: exactly as tall
+		// as the content while it fits, capped at the screen once it overflows.
+		logLines := 0
+		if log != "" {
+			logLines = strings.Count(log, "\n") + 1
+		}
 
 		if m.width > 0 {
 			// The viewport must be sized before it can be rendered (it returns
@@ -2109,12 +2111,27 @@ func (m *Model) View() tea.View {
 			if m.logViewport.Width() != m.width {
 				m.logViewport.SetWidth(m.width)
 			}
-			h := m.height - chromeLines
-			if h < 3 {
-				h = 3
+			// Available height below the measured chrome (activity slot + input +
+			// banner + help). The viewport NEVER exceeds it, so viewport+chrome
+			// can never be taller than the terminal — nothing is ever cropped by
+			// the renderer and nothing reflows (no flicker).
+			avail := m.height - chromeLines
+			if avail < 3 {
+				avail = 3
 			}
-			if h != m.logViewport.Height() {
-				m.logViewport.SetHeight(h)
+			// Content-hugging height: exactly as tall as the log while it fits,
+			// capped at the screen once it overflows. This is the whole design —
+			// one path, no natural↔viewport mode switch to jump or cut at the
+			// boundary: a short `-c` session grows from the top like a normal
+			// terminal (the viewport never pads short content, so there is no
+			// blank gap before the input), and a long session locks into a
+			// scrollable window with the newest content at the bottom.
+			vpHeight := avail
+			if logLines < vpHeight {
+				vpHeight = logLines
+			}
+			if vpHeight != m.logViewport.Height() {
+				m.logViewport.SetHeight(vpHeight)
 			}
 			if m.streaming {
 				if log != m.renderedLog {
@@ -2122,7 +2139,7 @@ func (m *Model) View() tea.View {
 					m.logViewport.GotoBottom()
 					m.renderedLog = log
 				}
-			} else if key := m.logKey(); key != m.renderedKey || h != m.renderedH {
+			} else if key := m.logKey(); key != m.renderedKey || vpHeight != m.renderedH {
 				m.logViewport.SetContent(log)
 				// Land on the newest content: after a turn completes, the answer
 				// (and any FILES summary) was appended, so the reader must end up at
@@ -2137,28 +2154,13 @@ func (m *Model) View() tea.View {
 				// rendering clamps safely when it shrinks.
 				m.renderedLog = log
 				m.renderedKey = key
-				m.renderedH = h
+				m.renderedH = vpHeight
 			}
-			// Hybrid log rendering:
-			//  - Content FITS in the available space → render it naturally (raw
-			//    string, trailing newlines trimmed) so the chat GROWS like a
-			//    normal terminal and a short session never shows a giant blank
-			//    gap. The viewport pads short content to its full height, which
-			//    after `-c` with a short restored history looked like one empty
-			//    screen between the chat and the input.
-			//  - Content OVERFLOWS → render through the viewport window: it
-			//    clips the log to the available height, honours the scroll
-			//    position, lands newest content at the bottom (GotoBottom above)
-			//    and keeps older history reachable by scrolling up instead of
-			//    being silently dropped by the renderer.
-			// In both paths the chrome is appended below, so the input/footer
-			// stay pinned to the bottom of the terminal and the total height
-			// never exceeds it (no flicker, nothing cropped).
-			if logLines <= h {
-				sb.WriteString(strings.TrimRight(log, "\n"))
-			} else {
-				sb.WriteString(m.logViewport.View())
-			}
+			// Render the log through the viewport window. Because the viewport is
+			// sized to its content (or capped at the screen), its output is
+			// exactly the chat: newest at the bottom, older history reachable by
+			// PgUp/PgDn/wheel, chrome below stays pinned.
+			sb.WriteString(m.logViewport.View())
 		} else {
 			sb.WriteString(log)
 		}
@@ -2375,10 +2377,11 @@ func (m *Model) buildLogChrome() (string, int) {
 	return s, strings.Count(s, "\n")
 }
 
-// updateLogHeight sizes the log viewport to exactly fill the terminal below
-// the chrome (activity slot + input + banner + help), so the whole view is one
-// terminal tall and the renderer never crops history. Returns the computed
-// height so View() can re-park when it changes.
+// updateLogHeight sizes the log viewport to the terminal height below the
+// chrome (activity slot + input + banner + help). This is the resize-time
+// default; View() then refines it each frame to the content-hugging height
+// (min(avail, logLines)) so short sessions have no blank gap and long ones
+// lock into a scrollable window. Returns the computed height.
 func (m *Model) updateLogHeight() int {
 	_, chromeLines := m.buildLogChrome()
 	h := m.height - chromeLines
