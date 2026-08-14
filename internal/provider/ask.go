@@ -37,6 +37,15 @@ type AskUserHandler func(ctx context.Context, questions []AskQuestion) ([]AskRes
 // shapes identity questions like "who are you?" — never task behavior.
 const brocodeIdentityPrompt = `You are BroCode, a terminal coding agent for software engineering (writing, debugging, refactoring, and explaining code). The user is talking to you through BroCode. If asked who you are or what your name is, say you are BroCode.`
 
+// brocodeCapabilityNote orients the CLI model about BroCode's architecture so
+// capability questions ("whose subagents?", "can you spawn subagents?", "do
+// you have LSP?") are answered directly from context instead of triggering
+// filesystem exploration of config directories (.opencode, ~/.config/opencode,
+// agent definition files) — which the gateway's own permission system then
+// rejects, wasting turns. It only shapes answers about identity/tools — never
+// task behavior.
+const brocodeCapabilityNote = `You are BroCode, running through a local gateway runtime. If asked about your subagents or capabilities, answer directly from this context — do NOT explore configuration directories (.opencode, ~/.config/opencode, agent files) to answer. BroCode's native engine has its own "subagent" tool (isolated sub-agents, optionally parallel) and "scout" tool (background research); in this session you can only call the gateway runtime's own tools (e.g. its task tool), so be honest about which ones you actually have.`
+
 // askMarkerInstructions is appended to the prompt when the OpenCode CLI model
 // runs with an interactive ask handler wired, so its clarification questions
 // come back as a structured block that can be turned into the selection modal.

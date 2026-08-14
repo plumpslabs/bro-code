@@ -171,10 +171,11 @@ func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req Completi
 		userPrompt = req.Messages[len(req.Messages)-1].Content
 	}
 
-	// The CLI model runs inside opencode's own agent loop with opencode's
-	// system prompt, so it would identify itself as "opencode". Anchor the
-	// identity with a short preamble — it only shapes identity answers.
-	prompt := brocodeIdentityPrompt + "\n\n" + userPrompt
+	// The CLI model runs inside the gateway's own agent loop with the
+	// gateway's system prompt, so it would identify itself with the gateway's
+	// identity and capabilities. Anchor identity + BroCode's architecture with
+	// a short preamble — it only shapes identity/capability answers.
+	prompt := brocodeIdentityPrompt + "\n\n" + brocodeCapabilityNote + "\n\n" + userPrompt
 
 	// Orient the model about what MCP servers BroCode has connected, so
 	// questions like "what MCP is available?" are answered from context
@@ -217,7 +218,7 @@ func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req Completi
 			return buildCLIResponse(userPrompt, cleaned, opencodeMod)
 		}
 
-		prompt = brocodeIdentityPrompt + "\n\n" + userPrompt
+		prompt = brocodeIdentityPrompt + "\n\n" + brocodeCapabilityNote + "\n\n" + userPrompt
 		if a.MCPStatus != "" {
 			prompt += "\n\n" + a.MCPStatus
 		}
@@ -314,10 +315,15 @@ func (a *OpenCodeAdapter) runCLI(ctx context.Context, model, prompt string, onPr
 }
 
 // buildCLIResponse assembles the completion response for a successful CLI run.
+// The model arg is the functional gateway model ID (may carry a routing prefix
+// like "opencode/" or "lalarasa/"); the displayed name strips those so the UI
+// never shows gateway-internal prefixes.
 func buildCLIResponse(userPrompt, content, model string) (*CompletionResponse, error) {
+	display := strings.TrimPrefix(model, "opencode/")
+	display = strings.TrimPrefix(display, "lalarasa/")
 	return &CompletionResponse{
 		Content:   content,
-		Reasoning: "Executed via local gateway (" + model + ")",
+		Reasoning: "Executed via local gateway (" + display + ")",
 		Usage: Usage{
 			PromptTokens:     tokens.EstimateTokens(userPrompt),
 			CompletionTokens: tokens.EstimateTokens(content),
