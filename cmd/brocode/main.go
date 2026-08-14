@@ -77,6 +77,11 @@ func main() {
 			activeModel = "deepseek-v4-flash-free"
 		}
 	}
+	// A saved model ID can be stale relative to the provider's current list
+	// (e.g. "laguna-s-2.1" saved before the poolside API required the
+	// "poolside/" vendor prefix). Resolve it by suffix so the primary
+	// provider works instead of 404-ing and silently falling back.
+	activeModel = provider.ResolveModelID(activeProvider.Info.DefaultModels, activeModel)
 
 	// 4. Instantiate Provider Adapter
 	var adapter provider.ProviderAdapter

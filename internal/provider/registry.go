@@ -60,8 +60,11 @@ var builtinContextLimits = map[string]map[string]int{
 		"deepseek-reasoner": 128_000,
 	},
 	"poolside": {
-		"laguna-s-2.1":   1_048_576,
-		"poolside-coder": 1_048_576,
+		// Live inference.poolside.ai /v1/models reports context_length 262144
+		// for both Laguna models and requires the poolside/ prefix in the wire
+		// model ID (a bare "laguna-s-2.1" returns 404 model-not-found).
+		"poolside/laguna-s-2.1":  262_144,
+		"poolside/laguna-xs-2.1": 262_144,
 	},
 	"anthropic": {
 		"claude-3-7-sonnet-20250219": 200_000,
@@ -146,8 +149,8 @@ var BuiltinProviders = []ProviderInfo{
 		APIKeyEnvVar:   "POOLSIDE_API_KEY",
 		DefaultBaseURL: "https://inference.poolside.ai/v1",
 		DefaultModels: []string{
-			"laguna-s-2.1",
-			"poolside-coder",
+			"poolside/laguna-s-2.1",
+			"poolside/laguna-xs-2.1",
 		},
 		ContextLimits: builtinContextLimits["poolside"],
 	},
@@ -432,6 +435,31 @@ func lastSegment(m string) string {
 		return m[i+1:]
 	}
 	return m
+}
+
+// ResolveModelID maps a possibly-stale saved model ID onto a real model in the
+// provider's list. Exact match wins; otherwise a listed model that shares the
+// last path segment ("laguna-s-2.1" → "poolside/laguna-s-2.1") is chosen so
+// configs saved before an API added its vendor prefix keep working; otherwise
+// the input is returned unchanged (unknown custom IDs still go through as-is).
+func ResolveModelID(models []string, model string) string {
+	if model == "" {
+		return model
+	}
+	for _, m := range models {
+		if m == model {
+			return model
+		}
+	}
+	seg := lastSegment(model)
+	if seg != "" {
+		for _, m := range models {
+			if lastSegment(m) == seg {
+				return m
+			}
+		}
+	}
+	return model
 }
 
 // FetchOpenAIModels lists the models a gateway exposes via its OpenAI-compatible

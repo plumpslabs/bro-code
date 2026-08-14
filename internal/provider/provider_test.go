@@ -72,11 +72,36 @@ func TestAutoDetectInheritsBuiltinModels(t *testing.T) {
 	if len(poolside.Info.DefaultModels) == 0 {
 		t.Fatal("poolside with no declared models must inherit built-in models")
 	}
-	if poolside.Info.DefaultModels[0] != "laguna-s-2.1" {
-		t.Errorf("expected built-in laguna-s-2.1 first, got %q", poolside.Info.DefaultModels[0])
+	if poolside.Info.DefaultModels[0] != "poolside/laguna-s-2.1" {
+		t.Errorf("expected built-in poolside/laguna-s-2.1 first, got %q", poolside.Info.DefaultModels[0])
 	}
-	if poolside.Info.ContextLimits["laguna-s-2.1"] != 1_048_576 {
-		t.Errorf("expected built-in context limit inherited, got %d", poolside.Info.ContextLimits["laguna-s-2.1"])
+	if poolside.Info.ContextLimits["poolside/laguna-s-2.1"] != 262_144 {
+		t.Errorf("expected built-in context limit inherited, got %d", poolside.Info.ContextLimits["poolside/laguna-s-2.1"])
+	}
+}
+
+// TestResolveModelID proves stale saved model IDs are mapped onto the real
+// provider model list (the poolside "laguna-s-2.1" → "poolside/laguna-s-2.1"
+// case: configs saved before the API added its vendor prefix must keep
+// working instead of 404-ing on the primary provider).
+func TestResolveModelID(t *testing.T) {
+	models := []string{"poolside/laguna-s-2.1", "poolside/laguna-xs-2.1"}
+
+	// Exact match stays.
+	if got := ResolveModelID(models, "poolside/laguna-s-2.1"); got != "poolside/laguna-s-2.1" {
+		t.Errorf("exact match broken: %q", got)
+	}
+	// Stale bare ID resolves by last segment.
+	if got := ResolveModelID(models, "laguna-s-2.1"); got != "poolside/laguna-s-2.1" {
+		t.Errorf("expected poolside/laguna-s-2.1, got %q", got)
+	}
+	// Unknown custom IDs pass through untouched.
+	if got := ResolveModelID(models, "my-custom-model"); got != "my-custom-model" {
+		t.Errorf("unknown model must pass through, got %q", got)
+	}
+	// Empty stays empty.
+	if got := ResolveModelID(models, ""); got != "" {
+		t.Errorf("empty model must stay empty, got %q", got)
 	}
 }
 
