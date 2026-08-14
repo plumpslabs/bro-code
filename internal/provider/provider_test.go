@@ -41,6 +41,108 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+// TestAutoDetectInheritsBuiltinModels proves a custom provider that omits its
+// model list but matches a built-in provider ID (e.g. "poolside" saved with
+// only a base URL + key) inherits the built-in's models and context limits —
+// instead of falling back to the placeholder "default" model that silently
+// fails on the primary provider and routes every turn through the fallback.
+func TestAutoDetectInheritsBuiltinModels(t *testing.T) {
+	cfg := AppConfig{
+		Providers: map[string]CustomProviderConfig{
+			"poolside": {
+				Protocol: "openai-compatible",
+				BaseURL:  "https://inference.poolside.ai/v1",
+				APIKey:   "sky_test-key",
+				// No Models declared — the regression case.
+			},
+		},
+	}
+
+	detected := AutoDetect(cfg)
+	var poolside *DetectedProvider
+	for i := range detected {
+		if detected[i].Info.ID == "poolside" {
+			poolside = &detected[i]
+			break
+		}
+	}
+	if poolside == nil {
+		t.Fatal("expected poolside provider to be detected")
+	}
+	if len(poolside.Info.DefaultModels) == 0 {
+		t.Fatal("poolside with no declared models must inherit built-in models")
+	}
+	if poolside.Info.DefaultModels[0] != "laguna-s-2.1" {
+		t.Errorf("expected built-in laguna-s-2.1 first, got %q", poolside.Info.DefaultModels[0])
+	}
+	if poolside.Info.ContextLimits["laguna-s-2.1"] != 1_048_576 {
+		t.Errorf("expected built-in context limit inherited, got %d", poolside.Info.ContextLimits["laguna-s-2.1"])
+	}
+}
+
+// TestAutoDetectKeepsDeclaredModels proves an explicitly declared model list is
+// never clobbered by the built-in inheritance.
+func TestAutoDetectKeepsDeclaredModels(t *testing.T) {
+	cfg := AppConfig{
+		Providers: map[string]CustomProviderConfig{
+			"poolside": {
+				Protocol: "openai-compatible",
+				BaseURL:  "https://inference.poolside.ai/v1",
+				APIKey:   "sky_test-key",
+				Models:   []string{"my-custom-model"},
+			},
+		},
+	}
+
+	detected := AutoDetect(cfg)
+	for _, d := range detected {
+		if d.Info.ID != "poolside" {
+			continue
+		}
+		if len(d.Info.DefaultModels) != 1 || d.Info.DefaultModels[0] != "my-custom-model" {
+			t.Errorf("declared models must win, got %v", d.Info.DefaultModels)
+		}
+		return
+	}
+	t.Fatal("poolside not detected")
+}
+
+// TestFetchOpenAIModels hits a fake gateway /models endpoint and proves the
+// live model list is parsed.
+func TestFetchOpenAIModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("expected /models path, got %q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+			t.Errorf("expected auth header, got %q", got)
+		}
+		w.Write([]byte(`{"data":[{"id":"model-b"},{"id":"model-a"},{"id":"model-a"}]}`))
+	}))
+	defer srv.Close()
+
+	models, err := FetchOpenAIModels(srv.URL, "sk-test")
+	if err != nil {
+		t.Fatalf("FetchOpenAIModels failed: %v", err)
+	}
+	if len(models) != 2 || models[0] != "model-a" || models[1] != "model-b" {
+		t.Errorf("expected sorted deduped [model-a model-b], got %v", models)
+	}
+}
+
+// TestFetchOpenAIModelsError proves a failing /models endpoint returns an error
+// (so callers can fall back to a warning instead of a placeholder model).
+func TestFetchOpenAIModelsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	if _, err := FetchOpenAIModels(srv.URL, "sk-test"); err == nil {
+		t.Error("expected error for 401 response")
+	}
+}
+
 // TestLoadConfigBroCodeOverridesOpenCode proves BroCode's own config is
 // authoritative: the same provider ID defined in opencode.jsonc is overridden
 // by ~/.config/brocode/config.json (opencode is only a fallback source).

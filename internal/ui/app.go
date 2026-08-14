@@ -1490,6 +1490,15 @@ func (m *Model) saveCustomProvider() {
 		return
 	}
 
+	// A provider without a declared model list is unusable (falls back to the
+	// placeholder "default") — try the gateway's live /models endpoint before
+	// saving so the provider actually works on the first turn.
+	if len(modelIDs) == 0 && keyVal != "" {
+		if fetched, ferr := provider.FetchOpenAIModels(baseURL, keyVal); ferr == nil && len(fetched) > 0 {
+			modelIDs = fetched
+		}
+	}
+
 	info := provider.ProviderInfo{
 		ID:             pID,
 		Name:           pID + " (Custom)",
@@ -1498,6 +1507,9 @@ func (m *Model) saveCustomProvider() {
 		DefaultModels:  modelIDs,
 	}
 	m.saveProviderConfig(pID, info, keyVal, baseURL, modelIDs, modelMap)
+	if len(modelIDs) == 0 {
+		m.appendMessages("⚠️ No models found — open /models to pick a model, or re-run /connect and paste the models JSON block.")
+	}
 }
 
 // saveProviderConfig writes a provider into the global config and switches to it.

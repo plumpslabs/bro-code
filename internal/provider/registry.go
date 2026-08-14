@@ -254,6 +254,20 @@ func AutoDetect(cfg AppConfig) []DetectedProvider {
 		if info.Protocol == "" {
 			info.Protocol = "openai-compatible"
 		}
+		// A custom provider that omits its model list but matches a built-in
+		// provider ID (e.g. "poolside" with only a base URL + key) inherits the
+		// built-in's models and context limits — otherwise it would fall back to
+		// the placeholder "default" model, every turn would fail on the primary
+		// provider and silently route through the fallback gateway instead.
+		if len(info.DefaultModels) == 0 {
+			for _, p := range BuiltinProviders {
+				if p.ID == id {
+					info.DefaultModels = p.DefaultModels
+					info.ContextLimits = p.ContextLimits
+					break
+				}
+			}
+		}
 		detected = append(detected, DetectedProvider{
 			Info:   info,
 			APIKey: key,
@@ -325,7 +339,7 @@ func DiscoverModels(cfg AppConfig) map[string][]string {
 		// configured models stay visible even when the gateway's live list
 		// omits them or reports them under a different ID.
 		if d.APIKey != "" && d.Info.Protocol == "openai-compatible" && d.Info.DefaultBaseURL != "" {
-			fetched, err := fetchOpenAIModels(d.Info.DefaultBaseURL, d.APIKey)
+			fetched, err := FetchOpenAIModels(d.Info.DefaultBaseURL, d.APIKey)
 			if err == nil && len(fetched) > 0 {
 				models = mergeModelLists(models, fetched)
 			}
@@ -372,7 +386,10 @@ func lastSegment(m string) string {
 	return m
 }
 
-func fetchOpenAIModels(baseURL, apiKey string) ([]string, error) {
+// FetchOpenAIModels lists the models a gateway exposes via its OpenAI-compatible
+// GET /models endpoint. Used to populate a custom provider's model list when
+// the user didn't declare one.
+func FetchOpenAIModels(baseURL, apiKey string) ([]string, error) {
 	url := strings.TrimRight(baseURL, "/") + "/models"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {

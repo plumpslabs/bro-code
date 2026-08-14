@@ -63,7 +63,11 @@ func main() {
 	}
 
 	activeModel := *flagModel
-	if activeModel == "" && cfg.DefaultModel != "" {
+	if activeModel == "" && cfg.DefaultModel != "" && cfg.DefaultModel != "default" {
+		// "default" is the placeholder saved when a provider had no model list
+		// at connect time — never a real model. Resolve it to the provider's
+		// first real model so turns don't fail on the primary provider and
+		// silently route through the fallback gateway instead.
 		activeModel = cfg.DefaultModel
 	}
 	if activeModel == "" {
