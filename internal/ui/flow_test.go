@@ -247,6 +247,35 @@ func TestInterruptedPartialAnswerKept(t *testing.T) {
 	}
 }
 
+// TestEmptyAnswerSurfaced verifies that a turn completing with an empty model
+// response never leaves the UI stuck on "Thinking...": a notice is appended
+// and status settles to Ready.
+func TestEmptyAnswerSurfaced(t *testing.T) {
+	m := newTestApp()
+	m.status = "Thinking..."
+	m.streaming = true
+	m.pendingStream = ""
+
+	if _, err := m.Update(turnResultMsg{content: ""}); err != nil {
+		t.Fatalf("empty turn result update failed: %v", err)
+	}
+	found := false
+	for _, msg := range m.messages {
+		if strings.Contains(msg, "empty response") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("empty response was not surfaced in history")
+	}
+	if m.status != "Ready" {
+		t.Fatalf("status = %q, want Ready", m.status)
+	}
+	if m.streaming {
+		t.Fatal("streaming must be cleared after an empty turn")
+	}
+}
+
 // TestTurnQueueOneAtATime verifies a prompt sent while a turn is in flight is
 // queued (never run concurrently — that clobbers engine state and caused the
 // nil-handler panic) and auto-sends when the current turn finishes.

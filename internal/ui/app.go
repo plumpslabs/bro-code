@@ -803,6 +803,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendMessages("ERROR: " + msg.err.Error())
 				m.status = "Failed"
 			}
+		} else if strings.TrimSpace(msg.content) == "" {
+			// The turn finished but the model returned nothing (a weak model
+			// stalling into an empty response). Surface it so the UI never
+			// looks stuck on "Thinking..." with no entry — and the queue can
+			// still drain below.
+			m.appendMessages("⚠️ The model returned an empty response — try rephrasing your request or switching models.")
+			m.status = "Ready"
 		} else if msg.content != "" {
 			// Surface the model's reasoning (thinking) above the answer, like
 			// opencode, so the agent's deliberation is visible — not just the

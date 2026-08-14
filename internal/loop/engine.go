@@ -847,9 +847,16 @@ func (e *Engine) recordExplored(tc provider.ToolCall) {
 				target, _ = m["pattern"].(string)
 			}
 		case "bash":
-			cmd, _ := m["command"].(string)
-			if strings.HasPrefix(strings.TrimSpace(cmd), "find ") {
-				target = cmd
+			// Every bash command counts as an explored target (prefixed so the
+			// space-filter in usageFn/MINER never mistakes a command for a file
+			// path). Same-path reads/dedup make REPEATED commands stall — but a
+			// model running DIFFERENT commands (git log, ls, grep -rn, find) is
+			// genuinely exploring, and the prompts even encourage bash for repo
+			// state. Previously only "find" was credited, so bash-based
+			// exploration was miscounted as spinning and aborted early — the
+			// same class of bug as the range-read fix.
+			if cmd, _ := m["command"].(string); strings.TrimSpace(cmd) != "" {
+				target = "bash: " + strings.TrimSpace(cmd)
 			}
 		}
 	}

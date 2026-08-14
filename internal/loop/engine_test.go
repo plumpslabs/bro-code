@@ -515,6 +515,47 @@ func TestEngineToolBudgetRangeReadsAreProgress(t *testing.T) {
 	}
 }
 
+// bashExplorerAdapter never answers but runs a DIFFERENT bash command every
+// round — the legitimate bash-based exploration pattern (git status, ls,
+// grep -rn) that the prompts encourage. Previously only "find" commands were
+// credited as progress, so bash explorers were miscounted as spinning and
+// aborted early.
+type bashExplorerAdapter struct {
+	calls int
+}
+
+func (m *bashExplorerAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	m.calls++
+	return &provider.CompletionResponse{
+		Reasoning: "exploring",
+		ToolCalls: []provider.ToolCall{
+			{ID: "tc", Name: "bash", Arguments: fmt.Sprintf(`{"command":"echo step-%d"}`, m.calls)},
+		},
+	}, nil
+}
+
+// TestEngineToolBudgetBashExplorationIsProgress proves that running DIFFERENT
+// bash commands counts as genuine progress (not spinning): the model must
+// survive past maxToolOnlyRounds, only the absolute cap stops it.
+func TestEngineToolBudgetBashExplorationIsProgress(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &bashExplorerAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	_, err := engine.RunTurn(context.Background(), "explore repo state", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if adapter.calls <= maxToolOnlyRounds {
+		t.Fatalf("bash explorer cut at %d calls (<= maxToolOnlyRounds %d): distinct bash commands must count as progress", adapter.calls, maxToolOnlyRounds)
+	}
+	if adapter.calls > maxToolOnlyAbsolute {
+		t.Fatalf("bash explorer exceeded absolute cap: %d > %d", adapter.calls, maxToolOnlyAbsolute)
+	}
+}
+
 // TestEngineToolBudgetProgressing proves the adaptive budget: a model that
 // keeps discovering NEW files (genuine deep exploration) is NOT cut at
 // maxToolOnlyRounds — it gets room until the absolute cap, so an agent that
