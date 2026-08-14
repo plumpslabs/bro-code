@@ -227,6 +227,11 @@ func TestOpenCodeCLIIdentityPreamble(t *testing.T) {
 	if !strings.Contains(string(args), "You are NOT opencode") {
 		t.Errorf("identity preamble must reject opencode identity: %q", string(args))
 	}
+	// The efficiency note must reach gateway-loop models so they batch tool
+	// calls (fewer rounds = far lower token cost).
+	if !strings.Contains(string(args), "batch independent tool calls") {
+		t.Errorf("efficiency note not sent to CLI: %q", string(args))
+	}
 	if !strings.Contains(res.Content, "I am BroCode") {
 		t.Errorf("expected fake CLI answer, got %q", res.Content)
 	}

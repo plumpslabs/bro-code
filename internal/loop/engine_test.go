@@ -502,6 +502,25 @@ func TestSkillsInjectedIntoSystemPrompt(t *testing.T) {
 	}
 }
 
+// TestEnginePromptBatchingRule proves the BUILDER system prompt carries the
+// cost-critical batching + consultant-posture rules to native-provider models
+// (every round re-sends the whole conversation, so denser rounds are cheaper).
+func TestEnginePromptBatchingRule(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	adapter := &captureAdapter{}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	if _, err := engine.RunTurn(context.Background(), "hello", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	for _, want := range []string{"BATCH YOUR TOOL CALLS", "SENIOR CONSULTANT POSTURE"} {
+		if !strings.Contains(adapter.sysPrompt, want) {
+			t.Errorf("expected %q in BUILDER system prompt", want)
+		}
+	}
+}
+
 func TestMemoryWarmStartInjected(t *testing.T) {
 	tools := tool.NewRegistry()
 	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)

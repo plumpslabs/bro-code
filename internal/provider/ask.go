@@ -52,6 +52,13 @@ const brocodeCapabilityNote = `You are BroCode, running through a local gateway 
 // shaping instruction BroCode sends — there is no max length, no truncation.
 const brocodeAnswerNote = `Answer length should match the question's depth: for exploration or architecture questions give a thorough, detailed answer (structure, evidence from the code, examples) — do not compress a full explanation into a terse summary. Keep answers short only for genuinely simple questions.`
 
+// brocodeEfficiencyNote shapes HOW the model works inside the gateway loop:
+// batch tool calls so each round (which re-sends the whole conversation) does
+// more work, and explore like a senior consultant — a few high-signal reads,
+// then answer. Never demands brevity in the answer itself (that is
+// brocodeAnswerNote's job).
+const brocodeEfficiencyNote = `Work efficiently: batch independent tool calls into a single message instead of one per round — every round re-sends the entire conversation, so denser rounds are dramatically cheaper and faster. Explore like a senior consultant: form a hypothesis about where the answer lives, verify with one targeted batch of reads, then answer.`
+
 // askMarkerInstructions is appended to the prompt when the OpenCode CLI model
 // runs with an interactive ask handler wired, so its clarification questions
 // come back as a structured block that can be turned into the selection modal.
