@@ -1465,9 +1465,8 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 
 	case "/sessions", "/history":
 		if st := m.context.Store(); st != nil {
-			// Show ALL sessions (any project) so /history never hides older
-			// conversations; each row already shows its project name.
-			if list, err := st.ListSessions(); err == nil {
+			cwd, _ := os.Getwd()
+			if list, err := st.ListSessionsByProjectPath(cwd); err == nil {
 				m.sessionList = list
 				m.sessionsSel = 0
 				m.sessionsViewport.GotoTop()
@@ -1698,7 +1697,7 @@ func (m *Model) confirmDeleteSessions() {
 	}
 
 	// Refresh the list; clamp the cursor into the new bounds.
-	if list, lerr := st.ListSessions(); lerr == nil {
+	if list, lerr := st.ListSessionsByProjectPath(cwd); lerr == nil {
 		m.sessionList = list
 		if m.sessionsSel >= len(list) {
 			m.sessionsSel = len(list) - 1

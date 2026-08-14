@@ -259,9 +259,6 @@ func (s *Store) ListSessionsByProjectPath(projectPath string) ([]Session, error)
 		}
 		list = append(list, sess)
 	}
-	if len(list) == 0 {
-		return s.ListSessions()
-	}
 	return list, nil
 }
 

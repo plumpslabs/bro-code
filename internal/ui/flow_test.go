@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -526,8 +527,9 @@ func TestSessionsDeleteWithConfirm(t *testing.T) {
 	}
 	defer st.Close()
 
+	cwd, _ := os.Getwd()
 	for _, id := range []string{"sess_a", "sess_b"} {
-		if err := st.CreateSession(id, "/tmp/proj"); err != nil {
+		if err := st.CreateSession(id, cwd); err != nil {
 			t.Fatalf("failed to create %s: %v", id, err)
 		}
 	}
