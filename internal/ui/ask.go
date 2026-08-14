@@ -82,7 +82,8 @@ func (m *Model) openAsk(msg askUserMsg) {
 	m.askCursor = 0
 	m.askOptionIdx = 0
 	m.askChecked = map[int]map[int]bool{}
-	m.askSel = map[int]int{}
+	m.askSel = map[int]int{}       // real selections only (set on Space)
+	m.askCursorPos = map[int]int{} // per-question cursor memory (navigation)
 	m.askCustom = map[int]string{}
 	m.askCustomQ = -1
 	m.askCustomInput.SetValue("")
@@ -106,6 +107,13 @@ func (m *Model) refreshAskModal() {
 		w = 10
 	}
 	m.askViewport.SetWidth(w)
+	// The custom answer input must be wide enough to actually show what the
+	// user types (a zero-width textinput renders nothing visible).
+	cw := w - 30
+	if cw < 10 {
+		cw = 10
+	}
+	m.askCustomInput.SetWidth(cw)
 	// When the custom answer input is open it lives at the bottom of the
 	// body, so anchor there; otherwise show the questions from the top.
 	if m.askCustomQ >= 0 {
@@ -116,12 +124,14 @@ func (m *Model) refreshAskModal() {
 }
 
 // askMove moves the option cursor within the current question (wraps around).
+// Navigation only moves the cursor — the selection dot (●) stays put until the
+// user actually selects with Space.
 func (m *Model) askMove(delta int) {
 	if m.askCursor < 0 || m.askCursor >= len(m.askQuestions) {
 		return
 	}
 	q := m.askQuestions[m.askCursor]
-	m.askSel[m.askCursor] = m.askOptionIdx
+	m.askCursorPos[m.askCursor] = m.askOptionIdx
 	n := askRowCount(q)
 	m.askOptionIdx = (m.askOptionIdx + delta + n) % n
 	m.refreshAskModal()
@@ -132,16 +142,17 @@ func (m *Model) askNextQuestion(delta int) {
 	if len(m.askQuestions) == 0 {
 		return
 	}
-	m.askSel[m.askCursor] = m.askOptionIdx
+	m.askCursorPos[m.askCursor] = m.askOptionIdx
 	n := len(m.askQuestions)
 	m.askCursor = (m.askCursor + delta + n) % n
-	m.askOptionIdx = m.askSel[m.askCursor]
+	m.askOptionIdx = m.askCursorPos[m.askCursor]
 	m.refreshAskModal()
 }
 
 // askToggle toggles the option under the cursor (checkbox for multi questions,
 // radio selection for single questions). Selecting the custom row opens the
-// custom answer input.
+// custom answer input. Only here (and askSaveCustom) does the selection state
+// change — navigation never touches it.
 func (m *Model) askToggle() {
 	if m.askCursor < 0 || m.askCursor >= len(m.askQuestions) {
 		return
@@ -151,6 +162,8 @@ func (m *Model) askToggle() {
 	if m.askOptionIdx == customIdx {
 		m.askCustomQ = m.askCursor
 		m.askCustomInput.SetValue("")
+		m.askCustomInput.Focus()
+		m.askCursorPos[m.askCursor] = m.askOptionIdx
 		m.refreshAskModal()
 		return
 	}
@@ -184,6 +197,7 @@ func (m *Model) askSaveCustom() {
 		m.askSel[qi] = len(q.Options)
 	}
 	m.askCustomQ = -1
+	m.askCustomInput.Blur()
 	m.askCustomInput.SetValue("")
 	m.refreshAskModal()
 }
@@ -232,7 +246,9 @@ func (m *Model) submitAsk() {
 	}
 }
 
-// appendAskToHistory renders the submitted answers as a chat entry.
+// appendAskToHistory renders the submitted answers as a chat entry, showing
+// the question text alongside each answer so the conversation reads clearly
+// (Q1 · <question> → <answer>), not just cryptic Q1:/Q2: labels.
 func (m *Model) appendAskToHistory(results []tool.AskResult) {
 	if len(results) == 0 {
 		return
@@ -240,20 +256,24 @@ func (m *Model) appendAskToHistory(results []tool.AskResult) {
 	var sb strings.Builder
 	sb.WriteString("YOU:\n")
 	for i, r := range results {
+		qText := r.Question
+		if qText == "" && i < len(m.askQuestions) {
+			qText = m.askQuestions[i].Question
+		}
 		label := ""
 		if len(m.askQuestions) > 1 {
-			label = fmt.Sprintf("Q%d: ", i+1)
+			label = fmt.Sprintf("Q%d · ", i+1)
 		}
 		ans := strings.Join(r.Answers, ", ")
 		if ans == "" {
 			ans = "(no selection)"
 		}
-		sb.WriteString(label + ans)
+		sb.WriteString(label + qText + " → " + ans)
 		if i < len(results)-1 {
 			sb.WriteString("\n")
 		}
 	}
-	m.messages = append(m.messages, sb.String())
+	m.appendMessages(sb.String())
 }
 
 // skipAsk cancels the interaction without answers (the model proceeds with

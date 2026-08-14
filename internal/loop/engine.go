@@ -121,6 +121,14 @@ type Engine struct {
 	// editedFiles tracks the paths the model wrote or edited this turn so the
 	// convention checker can review them before the turn is declared done.
 	editedFiles []string
+	// reviewPasses counts how many times the edit-review ran this turn (Layer 1
+	// deterministic + Layer 2 LLM). Capped so a model that keeps editing never
+	// loops forever on review feedback.
+	reviewPasses int
+	// reviewLLMEnabled toggles the senior-level LLM code review (Layer 2) that
+	// runs after deterministic checks pass. On by default; disabled in tests
+	// and headless contexts where an extra completion would be wasteful.
+	reviewLLMEnabled bool
 	// diagFn optionally runs LSP diagnostics on a file (wired by the UI with
 	// the LSP manager). When set, edited files get a native type-error check
 	// after the convention review — no LLM needed.
@@ -183,6 +191,13 @@ func (e *Engine) SetDiagnosticsChecker(fn func(path string) string) {
 	e.diagFn = fn
 }
 
+// SetReviewLLM toggles the senior-level LLM code review (Layer 2) that runs
+// after the deterministic checks pass. On by default; turn off where an extra
+// completion per edit is not worth it (tests, cheap/headless contexts).
+func (e *Engine) SetReviewLLM(on bool) {
+	e.reviewLLMEnabled = on
+}
+
 // CostSummary returns the session's estimated cost report (per model + total).
 func (e *Engine) CostSummary() string {
 	if e.usage == nil {
@@ -213,14 +228,15 @@ func (e *Engine) SetStreamHandler(fn func(delta string)) {
 // NewEngine creates an agent loop engine instance.
 func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *bcontext.Manager, model string) *Engine {
 	return &Engine{
-		adapter:       adapter,
-		tools:         tools,
-		context:       ctxMgr,
-		model:         model,
-		mode:          "BUILDER",
-		maxIterations: 25,
-		state:         StateThinking,
-		usage:         NewUsageTracker(),
+		adapter:          adapter,
+		tools:            tools,
+		context:          ctxMgr,
+		model:            model,
+		mode:             "BUILDER",
+		maxIterations:    25,
+		state:            StateThinking,
+		usage:            NewUsageTracker(),
+		reviewLLMEnabled: true,
 	}
 }
 
@@ -384,8 +400,12 @@ Engine Mode Rules (%s):
 7. Use the git tool to inspect repo state (status/diff/log/branch), fetch_url to read a specific page, web_search to find docs/errors on the web, review_changes to let the user approve or roll back your edits, and undo to revert a bad file edit made this turn.
 8. Answer in the same language the user writes in.
 9. REUSE FIRST: before writing new code, use code_locate and search_code to check whether the functionality or symbol already exists in the codebase — reimplementing existing code wastes tokens and creates duplicates. Report what you reused.
-10. TYPE SAFETY: treat type errors as blockers. After editing, run lsp_diagnostics on edited files (or rely on the auto verification) and fix any type errors before declaring done.
-11. PERFORMANCE AWARENESS: avoid N+1 query patterns (loops that query the database per iteration — prefer batch loading), quadratic loops over large collections, and unbounded fetches. When implementing data access, check for the obvious scaling trap and mention the Big-O of hot paths.`
+10. TYPE SAFETY: treat type errors as blockers. After editing, rely on the auto verification (project build/typecheck CLI + native review) and fix any type errors before declaring done; use lsp_diagnostics only on specific edited files when the auto checks are not conclusive.
+11. PERFORMANCE & SQL AWARENESS: avoid N+1 query patterns (DB query inside a loop — batch load instead), SELECT * without need, missing WHERE on updates/deletes, string-built SQL (injection risk), quadratic loops, and unbounded fetches. Mention the Big-O of hot paths.
+12. SENIOR REVIEW: after editing, a senior-level code review runs automatically (deterministic checks + LLM review of your changed files for N+1, SQL, error handling, concurrency, reuse, security). When the review flags an issue, FIX IT — do not ignore or argue; a clean review is part of "done".
+13. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony. Named constants, validation helpers, error envelopes, and heavy abstractions apply to real product logic (auth, DB, cross-cutting), NOT to guard clauses or 10-line bug fixes. Over-engineering is a review finding.
+14. DECISION MATRIX: reuse over rewrite — if the codebase already has a function/utility for it, use it. Extract a helper only at 3+ uses (DRY threshold). Keep a file under ~300 LOC; split only when it handles >3 concerns. Inline one-off logic instead of abstracting it. When two approaches are viable, prefer the simpler one unless there is measured evidence the other matters.
+15. TOOL ECONOMY (LSP is selective, not default): lsp_* tools (lsp_definition, lsp_references, lsp_hover, lsp_diagnostics, lsp_scan) are token- and resource-heavy — language servers index the whole project and their responses are verbose. Use them only where structural accuracy matters: cross-file refactors, real type errors, deprecated API detection. For cheap lookups ("where is X used", "what does Y do") prefer grep, glob, search_code, read_file first. Run lsp_scan at most once per task. Prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, bun test, cargo check) as the source of truth — LSP complements it, never replaces it.`
 		}
 
 		// Auto-compact context if token count exceeds threshold
@@ -612,6 +632,7 @@ Engine Mode Rules (%s):
 		e.toolReminderSent = false
 		e.toolReminder2Sent = false
 		e.explored = nil
+		e.reviewPasses = 0
 		e.state = StateDone
 		if onUpdate != nil {
 			onUpdate(e.state, "Completed")

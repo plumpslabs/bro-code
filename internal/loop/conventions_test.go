@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,80 @@ func TestConventionGoPrintln(t *testing.T) {
 		}
 	}
 	t.Errorf("expected fmt.Println flagged in Go, got %+v", issues)
+}
+
+func TestConventionHardcodedSecret(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "config.ts", "export const apiKey = \"sk-9ec47ba83de47eed-oowisf-98d00783\";\n")
+	issues := checkFileConventions(p)
+	found := false
+	for _, i := range issues {
+		if i.Kind == "hardcoded-secret" && i.Sev == sevCritical {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected hardcoded secret flagged critical, got %+v", issues)
+	}
+
+	// env-var reads must NOT be flagged.
+	p2 := writeFile(t, dir, "env.ts", "const apiKey = process.env.API_KEY;\n")
+	if issues := checkFileConventions(p2); len(issues) != 0 {
+		t.Errorf("env var read must not be flagged, got %+v", issues)
+	}
+}
+
+func TestConventionEmptyCatch(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "svc.ts", "try {\n  doThing();\n} catch {}\n")
+	issues := checkFileConventions(p)
+	found := false
+	for _, i := range issues {
+		if i.Kind == "empty-catch" && i.Sev == sevError {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected empty catch flagged as error, got %+v", issues)
+	}
+}
+
+func TestConventionSQLInjection(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "db.ts", "const q = \"SELECT * FROM users WHERE id = \" + userId;\n")
+	issues := checkFileConventions(p)
+	found := false
+	for _, i := range issues {
+		if i.Kind == "sql-injection" && i.Sev == sevCritical {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected SQL injection flagged critical, got %+v", issues)
+	}
+}
+
+func TestConventionGoSwallowedError(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "main.go", "package main\n\nfunc f() {\n\tif err != nil {}\n}\n")
+	issues := checkFileConventions(p)
+	for _, i := range issues {
+		if i.Kind == "swallowed-error" {
+			return
+		}
+	}
+	t.Errorf("expected swallowed error flagged in Go, got %+v", issues)
+}
+
+func TestConventionSeverityInFormat(t *testing.T) {
+	issues := []conventionIssue{
+		{Path: "a.ts", Line: 3, Kind: "hardcoded-secret", Sev: sevCritical, Message: "hardcoded-secret: sk-xxx"},
+		{Path: "b.ts", Line: 9, Kind: "marker", Sev: sevInfo, Message: "marker: TODO"},
+	}
+	out := formatConventionIssues(issues)
+	if !strings.Contains(out, "[critical]") || !strings.Contains(out, "[info]") {
+		t.Errorf("format should show severity, got %q", out)
+	}
 }
 
 func TestConventionCleanFile(t *testing.T) {
@@ -132,6 +207,7 @@ func TestReviewEditedFilesEndToEnd(t *testing.T) {
 	tools := tool.NewRegistry()
 	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
 	engine := NewEngine(&captureAdapter{}, tools, ctxMgr, "test-model")
+	engine.SetReviewLLM(false)
 	engine.editedFiles = []string{p}
 	out := engine.reviewEditedFiles()
 	if !strings.Contains(out, "console.log") {
@@ -139,5 +215,80 @@ func TestReviewEditedFilesEndToEnd(t *testing.T) {
 	}
 	if engine.editedFiles != nil {
 		t.Error("editedFiles should reset after review")
+	}
+}
+
+// seniorReviewAdapter returns a fixed senior-review finding instead of an
+// answer, so Layer 2 (LLM review) can be tested without a real provider.
+type seniorReviewAdapter struct {
+	captureAdapter
+}
+
+func (s *seniorReviewAdapter) Complete(_ context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	if strings.Contains(req.Messages[0].Content, "senior code reviewer") {
+		return &provider.CompletionResponse{Content: "svc.js:12 — N+1 query in loop → batch load\n"}, nil
+	}
+	return &provider.CompletionResponse{Content: "Done"}, nil
+}
+
+func TestReviewLayer2LLMRunsOnceOnCleanLayer1(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "svc.js", "export function list() {\n  return users.map(u => db.query(u.id));\n}\n")
+
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	adapter := &seniorReviewAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	engine.editedFiles = []string{p}
+	out := engine.reviewEditedFiles()
+	// Layer 1 is clean (no console.log/any/TODO), so Layer 2 must run and
+	// surface the N+1 finding.
+	if !strings.Contains(out, "N+1") {
+		t.Errorf("Layer 2 should flag N+1, got %q", out)
+	}
+}
+
+func TestReviewLayer2SkippedWhenLayer1FindsIssues(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "svc.js", "export function x() {\n  console.log('debug');\n  return 1;\n}\n")
+
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	adapter := &seniorReviewAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	engine.editedFiles = []string{p}
+	out := engine.reviewEditedFiles()
+	// Layer 1 already flagged console.log — Layer 2 must NOT spend tokens.
+	if strings.Contains(out, "N+1") {
+		t.Errorf("Layer 2 must be skipped when Layer 1 found issues, got %q", out)
+	}
+	if !strings.Contains(out, "console.log") {
+		t.Errorf("Layer 1 should still flag console.log, got %q", out)
+	}
+}
+
+func TestReviewLayer2CappedPerTurn(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "svc.js", "export function list() {\n  return users.map(u => db.query(u.id));\n}\n")
+
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	adapter := &seniorReviewAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	// Round 1: clean Layer 1 → Layer 2 runs once.
+	engine.editedFiles = []string{p}
+	out1 := engine.reviewEditedFiles()
+	if !strings.Contains(out1, "N+1") {
+		t.Errorf("round 1 should run Layer 2, got %q", out1)
+	}
+	// Round 2 (model edited again after feedback): Layer 2 must NOT run again
+	// — the per-turn budget is spent.
+	engine.editedFiles = []string{p}
+	out2 := engine.reviewEditedFiles()
+	if strings.Contains(out2, "N+1") {
+		t.Errorf("round 2 must skip Layer 2 (budget), got %q", out2)
 	}
 }

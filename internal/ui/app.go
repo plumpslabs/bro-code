@@ -232,7 +232,8 @@ type Model struct {
 	askCursor      int // current question index
 	askOptionIdx   int // cursor within current question's rows
 	askChecked     map[int]map[int]bool
-	askSel         map[int]int
+	askSel         map[int]int // real selections (set on Space/select)
+	askCursorPos   map[int]int // per-question cursor memory (navigation)
 	askCustom      map[int]string
 	askCustomQ     int // question index with custom input open, -1 = none
 	askCustomInput textinput.Model
@@ -249,9 +250,27 @@ type turnResultMsg struct {
 	err     error
 }
 
+// maxChatMessages bounds the in-memory message list rendered by the TUI. The
+// authoritative history lives in the engine context (compaction-bounded) and
+// the SQLite store, so the UI only needs a window — this keeps long sessions
+// from growing memory and per-frame render cost without bound.
+const maxChatMessages = 200
+
+// appendMessages adds messages to the chat log, trimming the oldest entries
+// past maxChatMessages.
+func (m *Model) appendMessages(msgs ...string) {
+	m.messages = append(m.messages, msgs...)
+	if len(m.messages) > maxChatMessages {
+		m.messages = append([]string(nil), m.messages[len(m.messages)-maxChatMessages:]...)
+	}
+}
+
 type statusUpdateMsg string
 type stepProgressMsg string
 type streamChunkMsg string
+
+// diagnoseResultMsg carries the output of an async /diagnose project scan.
+type diagnoseResultMsg string
 
 // NewApp initializes the Bubble Tea v2 TUI model.
 func NewApp(
@@ -585,7 +604,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "Ready"
 				return m, nil
 			}
-			m.messages = append(m.messages, "ERROR: "+msg.err.Error())
+			m.appendMessages("ERROR: " + msg.err.Error())
 			m.status = "Failed"
 		} else if msg.content != "" {
 			// Surface the model's reasoning (thinking) above the answer, like
@@ -595,7 +614,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if r := m.lastAssistantReasoning(); r != "" {
 				display = "💭 " + r + "\n\n" + msg.content
 			}
-			m.messages = append(m.messages, "BROCODE:\n"+display)
+			m.appendMessages("BROCODE:\n" + display)
 			m.status = "Ready"
 		}
 
@@ -607,6 +626,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingStream += string(msg)
 		return m, nil
+
+	case diagnoseResultMsg:
+		m.appendMessages(string(msg))
+		m.status = "Ready"
 
 	case statusUpdateMsg:
 		m.status = string(msg)
@@ -677,6 +700,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showAsk {
 				if m.askCustomQ >= 0 {
 					m.askCustomQ = -1
+					m.askCustomInput.Blur()
 					m.askCustomInput.SetValue("")
 				} else {
 					m.skipAsk()
@@ -709,7 +733,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.interrupted = true
 				m.activity = nil
 				m.status = "Ready"
-				m.messages = append(m.messages, "⚡ Interrupted turn execution.")
+				m.appendMessages("⚡ Interrupted turn execution.")
 				return m, nil
 			}
 
@@ -749,6 +773,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Save to Prompt History
 			m.promptHistory = append(m.promptHistory, userQuery)
+			// Bound in-memory prompt history so a long session cannot grow it
+			// without limit (arrows navigate the last 200 prompts — plenty).
+			if len(m.promptHistory) > 200 {
+				m.promptHistory = m.promptHistory[len(m.promptHistory)-200:]
+			}
 			m.historyIdx = len(m.promptHistory)
 
 			// Handle Slash Commands
@@ -756,7 +785,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleSlashCommand(userQuery)
 			}
 
-			m.messages = append(m.messages, "YOU:\n"+userQuery)
+			m.appendMessages("YOU:\n" + userQuery)
 			m.status = "Thinking..."
 			// Clear any stale streaming state from a previous interrupted turn.
 			m.streaming = false
@@ -909,7 +938,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.messages = append(m.messages, "📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/memory - Show cross-session project memory\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen")
+		m.appendMessages("📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen")
 
 	case "/memory":
 		if m.memStore != nil {
@@ -917,19 +946,35 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			if m.memStore.Path() != "" {
 				s += "\n\n📍 " + m.memStore.Path()
 			}
-			m.messages = append(m.messages, s)
+			m.appendMessages(s)
 		} else {
-			m.messages = append(m.messages, "⚠️ Project memory not initialized.")
+			m.appendMessages("⚠️ Project memory not initialized.")
 		}
 
 	case "/cost":
-		m.messages = append(m.messages, m.engine.CostSummary())
+		m.appendMessages(m.engine.CostSummary())
 
 	case "/lsp":
-		m.messages = append(m.messages, m.lspStatus())
+		m.appendMessages(m.lspStatus())
+
+	case "/diagnose":
+		if m.lspMgr == nil {
+			m.appendMessages("⚠️ LSP not initialized.")
+			return m, nil
+		}
+		cwd, _ := os.Getwd()
+		m.status = "Scanning project diagnostics..."
+		lsp := m.lspMgr
+		return m, func() tea.Msg {
+			out, err := lsp.ScanDiagnostics(context.Background(), cwd)
+			if err != nil {
+				return diagnoseResultMsg("❌ Diagnose failed: " + err.Error())
+			}
+			return diagnoseResultMsg(out)
+		}
 
 	case "/mcp":
-		m.messages = append(m.messages, m.mcpStatus())
+		m.appendMessages(m.mcpStatus())
 
 	case "/mcp-reload":
 		if m.mcpMgr != nil {
@@ -940,9 +985,9 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				m.tools.Register(mt)
 			}
 			m.rebuildEngine()
-			m.messages = append(m.messages, m.mcpStatus())
+			m.appendMessages(m.mcpStatus())
 		} else {
-			m.messages = append(m.messages, "⚠️ MCP manager not initialized.")
+			m.appendMessages("⚠️ MCP manager not initialized.")
 		}
 
 	case "/sessions", "/history":
@@ -955,10 +1000,10 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				m.sessionsViewport.GotoTop()
 				m.showSessions = true
 			} else {
-				m.messages = append(m.messages, "❌ Failed to list sessions: "+err.Error())
+				m.appendMessages("❌ Failed to list sessions: " + err.Error())
 			}
 		} else {
-			m.messages = append(m.messages, "⚠️ Session store not initialized.")
+			m.appendMessages("⚠️ Session store not initialized.")
 		}
 
 	case "/new":
@@ -1006,11 +1051,11 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				m.switchProviderAndModel(pID, m.activeModel)
 			} else {
 				m.activeModel = target
-				m.messages = append(m.messages, fmt.Sprintf("✅ Model switched to %s", m.activeModel))
+				m.appendMessages(fmt.Sprintf("✅ Model switched to %s", m.activeModel))
 				m.rebuildEngine()
 			}
 		} else {
-			m.messages = append(m.messages, "Usage: /model <provider>/<model> or /model <model_name>")
+			m.appendMessages("Usage: /model <provider>/<model> or /model <model_name>")
 		}
 	}
 	return m, nil
@@ -1102,14 +1147,14 @@ func (m *Model) applySelectedSession() {
 		if st != nil {
 			// Purge history duplicated by old resume logic before restoring.
 			if removed, err := st.CleanupReplayDuplicates(targetSess.ID); err == nil && removed > 0 {
-				m.messages = append(m.messages, fmt.Sprintf("⚡ Purged %d duplicated history events", removed))
+				m.appendMessages(fmt.Sprintf("⚡ Purged %d duplicated history events", removed))
 			}
 			if events, err := st.GetSessionEvents(targetSess.ID); err == nil && len(events) > 0 {
 				// Same restore path as `brocode -c`: replay only the newest
 				// events that fit the context window, keep assistant tool calls
 				// paired with their results, and render tool-call-only turns as
 				// compact summaries instead of raw JSON.
-				m.messages = append(m.messages, bcontext.RestoreSession(m.context, events)...)
+				m.appendMessages(bcontext.RestoreSession(m.context, events)...)
 			}
 		}
 		// Invalidate the rendered-log cache so the viewport re-renders with the
@@ -1171,11 +1216,11 @@ func (m *Model) saveProviderKey(pID, apiKey string) {
 	}
 
 	if err := provider.SaveGlobalConfig(m.cfg); err != nil {
-		m.messages = append(m.messages, fmt.Sprintf("❌ Failed to save config: %v", err))
+		m.appendMessages(fmt.Sprintf("❌ Failed to save config: %v", err))
 		return
 	}
 
-	m.messages = append(m.messages, fmt.Sprintf("✅ API Key for %s saved to ~/.config/brocode/config.json!", targetProvider.Name))
+	m.appendMessages(fmt.Sprintf("✅ API Key for %s saved to ~/.config/brocode/config.json!", targetProvider.Name))
 
 	// Re-detect providers and switch if appropriate
 	m.modelOptions = provider.DiscoverModels(m.cfg)
@@ -1267,7 +1312,7 @@ func (m *Model) applyConnectConfig() {
 	keyVal := strings.TrimSpace(m.connectTextInput.Value())
 	baseURL := strings.TrimSpace(m.connectBaseURLInput.Value())
 	if keyVal == "" && (baseURL == "" || baseURL == p.DefaultBaseURL) {
-		m.messages = append(m.messages, "⚠️ Nothing to save — API key is empty.")
+		m.appendMessages("⚠️ Nothing to save — API key is empty.")
 		return
 	}
 	m.saveProviderConfig(p.ID, p, keyVal, baseURL, nil, nil)
@@ -1277,7 +1322,7 @@ func (m *Model) applyConnectConfig() {
 func (m *Model) saveCustomProvider() {
 	pID := strings.TrimSpace(m.connectNameInput.Value())
 	if pID == "" {
-		m.messages = append(m.messages, "❌ Provider name is required.")
+		m.appendMessages("❌ Provider name is required.")
 		return
 	}
 	pID = strings.ToLower(strings.ReplaceAll(pID, " ", "-"))
@@ -1285,13 +1330,13 @@ func (m *Model) saveCustomProvider() {
 	keyVal := strings.TrimSpace(m.connectTextInput.Value())
 	baseURL := strings.TrimSpace(m.connectBaseURLInput.Value())
 	if baseURL == "" {
-		m.messages = append(m.messages, "❌ Base URL is required for a custom provider.")
+		m.appendMessages("❌ Base URL is required for a custom provider.")
 		return
 	}
 
 	modelIDs, modelMap, err := provider.ParseModelJSON(m.connectModelsInput.Value())
 	if err != nil {
-		m.messages = append(m.messages, "❌ Models JSON invalid: "+err.Error())
+		m.appendMessages("❌ Models JSON invalid: " + err.Error())
 		return
 	}
 
@@ -1320,7 +1365,7 @@ func (m *Model) saveProviderConfig(pID string, info provider.ProviderInfo, keyVa
 	}
 
 	if err := provider.SaveGlobalConfig(m.cfg); err != nil {
-		m.messages = append(m.messages, fmt.Sprintf("❌ Failed to save config: %v", err))
+		m.appendMessages(fmt.Sprintf("❌ Failed to save config: %v", err))
 		return
 	}
 
@@ -1330,7 +1375,7 @@ func (m *Model) saveProviderConfig(pID string, info provider.ProviderInfo, keyVa
 		model = info.DefaultModels[0]
 	}
 	m.switchProviderAndModel(pID, model)
-	m.messages = append(m.messages, fmt.Sprintf("✅ Provider %s saved to ~/.config/brocode/config.json!", pID))
+	m.appendMessages(fmt.Sprintf("✅ Provider %s saved to ~/.config/brocode/config.json!", pID))
 }
 
 type modelOptionItem struct {
@@ -1385,14 +1430,14 @@ func (m *Model) switchProviderAndModel(pID, modelName string) {
 			// The session's context window follows the newly selected model's
 			// declared limit (e.g. 1M models get a 1M window).
 			m.context.SetMaxWindow(m.contextWindow())
-			m.messages = append(m.messages, fmt.Sprintf("✅ Active model set & saved: %s/%s", pID, modelName))
+			m.appendMessages(fmt.Sprintf("✅ Active model set & saved: %s/%s", pID, modelName))
 			return
 		}
 	}
 	m.activeModel = modelName
 	m.cfg.DefaultModel = modelName
 	_ = provider.SaveGlobalConfig(m.cfg)
-	m.messages = append(m.messages, fmt.Sprintf("⚠️ Model set & saved to %s", modelName))
+	m.appendMessages(fmt.Sprintf("⚠️ Model set & saved to %s", modelName))
 }
 
 func (m *Model) applySelectedModel() {

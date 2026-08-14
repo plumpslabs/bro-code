@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+// Shared HTTP clients for provider discovery (health pings, /models fetch):
+// one Transport per purpose instead of a fresh pool per call.
+var (
+	httpClientHealth = &http.Client{Timeout: 1 * time.Second}
+	httpClientModels = &http.Client{Timeout: 5 * time.Second}
+)
+
 // ProviderInfo describes a provider capability & configuration metadata.
 type ProviderInfo struct {
 	ID             string   `json:"id"`
@@ -277,8 +284,7 @@ func AutoDetect(cfg AppConfig) []DetectedProvider {
 }
 
 func isEndpointAlive(url string) bool {
-	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := httpClientHealth.Get(url)
 	if err != nil {
 		return false
 	}
@@ -406,7 +412,6 @@ func lastSegment(m string) string {
 }
 
 func fetchOpenAIModels(baseURL, apiKey string) ([]string, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
 	url := strings.TrimRight(baseURL, "/") + "/models"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -416,7 +421,7 @@ func fetchOpenAIModels(baseURL, apiKey string) ([]string, error) {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := client.Do(req)
+	resp, err := httpClientModels.Do(req)
 	if err != nil {
 		return nil, err
 	}

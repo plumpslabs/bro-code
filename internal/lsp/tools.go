@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
-// RegisterTools registers the four LSP intelligence tools into the registry.
+// RegisterTools registers the five LSP intelligence tools into the registry.
 // The tools share one Manager (one language server process per language) and
 // fail with a clear message when no server is available so the model falls
 // back to grep/glob/read_file.
@@ -17,6 +18,7 @@ func RegisterTools(r *tool.Registry, m *Manager) {
 	r.Register(&ReferencesTool{m: m})
 	r.Register(&HoverTool{m: m})
 	r.Register(&DiagnosticsTool{m: m})
+	r.Register(&ScanTool{m: m})
 }
 
 // posArgs is the shared argument shape for position-based tools.
@@ -76,7 +78,7 @@ type ReferencesTool struct{ m *Manager }
 
 func (t *ReferencesTool) Name() string { return "lsp_references" }
 func (t *ReferencesTool) Description() string {
-	return "Find all references to a symbol across the project using the language server. Returns file:line:col locations. Use when grep cannot tell real references from string matches."
+	return "Find all references to a symbol across the project using the language server. Returns up to 40 file:line:col locations. Use only when grep cannot tell real references from string matches — grep is cheaper for broad searches."
 }
 func (t *ReferencesTool) Parameters() map[string]any { return paramsWithPos() }
 func (t *ReferencesTool) Execute(ctx context.Context, argsJSON string) (string, error) {
@@ -92,7 +94,7 @@ type HoverTool struct{ m *Manager }
 
 func (t *HoverTool) Name() string { return "lsp_hover" }
 func (t *HoverTool) Description() string {
-	return "Get hover documentation, signature and type information for a symbol using the language server. Use to understand what a function expects and returns."
+	return "Get hover documentation, signature and type information for a symbol using the language server (output truncated to 1500 chars). Use to understand what a function expects and returns — prefer reading the definition for full context."
 }
 func (t *HoverTool) Parameters() map[string]any { return paramsWithPos() }
 func (t *HoverTool) Execute(ctx context.Context, argsJSON string) (string, error) {
@@ -108,7 +110,7 @@ type DiagnosticsTool struct{ m *Manager }
 
 func (t *DiagnosticsTool) Name() string { return "lsp_diagnostics" }
 func (t *DiagnosticsTool) Description() string {
-	return "Get compiler and linter diagnostics (errors, warnings) for a file using the language server. Returns severity, position and message per diagnostic. Use to check a file for problems without running a full build."
+	return "Get compiler and linter diagnostics (errors, warnings, deprecated usages) for a specific file using the language server (up to 30 per file). Use on edited files when the project's own typecheck CLI is not conclusive."
 }
 func (t *DiagnosticsTool) Parameters() map[string]any {
 	return map[string]any{
@@ -130,4 +132,37 @@ func (t *DiagnosticsTool) Execute(ctx context.Context, argsJSON string) (string,
 		return "", fmt.Errorf("path is required")
 	}
 	return t.m.Diagnostics(ctx, args.Path)
+}
+
+// ScanTool — project-wide health check: errors, warnings, deprecated APIs.
+type ScanTool struct{ m *Manager }
+
+func (t *ScanTool) Name() string { return "lsp_scan" }
+func (t *ScanTool) Description() string {
+	return "Scan the whole project for type errors, warnings and deprecated API usages using language servers (no build needed; scans at most 60 files). Returns a per-file report plus error/warning/deprecated counts. EXPENSIVE (starts language servers, ~3s, verbose output) — call at most ONCE per task: at the start to see what is already broken before editing, or after large edits to verify nothing regressed. Prefer the project's own typecheck/lint CLI (go build, tsc --noEmit, bun test) when available."
+}
+func (t *ScanTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string", "description": "Optional directory to scan (default: current working directory)"},
+		},
+	}
+}
+func (t *ScanTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	root := args.Path
+	if root == "" {
+		root = "."
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	return t.m.ScanDiagnostics(ctx, abs)
 }

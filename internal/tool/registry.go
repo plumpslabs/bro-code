@@ -22,6 +22,13 @@ import (
 	"github.com/plumpslabs/bro-code/internal/provider"
 )
 
+// Shared HTTP clients: reusing one Transport per purpose avoids allocating a
+// fresh connection pool + TLS state on every fetch_url/web_search call.
+var (
+	httpClientFetch  = &http.Client{Timeout: 15 * time.Second}
+	httpClientSearch = &http.Client{Timeout: 20 * time.Second}
+)
+
 // Tool represents an executable native tool.
 type Tool interface {
 	Name() string
@@ -797,8 +804,7 @@ func (t *FetchURLTool) Execute(ctx context.Context, argsJSON string) (string, er
 		return "", err
 	}
 	req.Header.Set("User-Agent", "BroCode/1.0")
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClientFetch.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -957,8 +963,7 @@ func (t *WebSearchTool) Execute(ctx context.Context, argsJSON string) (string, e
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", apiKey)
 
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpClientSearch.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("search request failed: %w", err)
 	}

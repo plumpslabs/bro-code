@@ -182,9 +182,10 @@ func runFakeServer() {
 		case "textDocument/didOpen", "textDocument/didChange":
 			doc, _ := params["textDocument"].(map[string]any)
 			uri, _ := doc["uri"].(string)
-			// Push a diagnostic so the Diagnostics tool has something to show.
+			// Push diagnostics so the Diagnostics tool and ScanDiagnostics have
+			// something to show: one error and one deprecated-warning (tag 2).
 			go func() {
-				time.Sleep(200 * time.Millisecond)
+				time.Sleep(30 * time.Millisecond)
 				notify(writer, "textDocument/publishDiagnostics", map[string]any{
 					"uri": uri,
 					"diagnostics": []map[string]any{
@@ -195,6 +196,15 @@ func runFakeServer() {
 							},
 							"severity": 1,
 							"message":  "test diagnostic",
+						},
+						{
+							"range": map[string]any{
+								"start": map[string]any{"line": 1, "character": 0},
+								"end":   map[string]any{"line": 1, "character": 1},
+							},
+							"severity": 2,
+							"message":  "legacyFunc is deprecated, use newFunc",
+							"tags":     []int{2},
 						},
 					},
 				})
@@ -339,6 +349,207 @@ func TestLSPDiagnostics(t *testing.T) {
 	}
 	if !strings.Contains(diags, "error") || !strings.Contains(diags, "test diagnostic") {
 		t.Errorf("Diagnostics = %q, want error diagnostic with message", diags)
+	}
+	// Deprecated tag (2) must be surfaced as [deprecated] with severity.
+	if !strings.Contains(diags, "[deprecated]") || !strings.Contains(diags, "legacyFunc is deprecated") {
+		t.Errorf("Diagnostics = %q, want deprecated tag surfaced", diags)
+	}
+}
+
+func TestFormatDiagnosticTags(t *testing.T) {
+	r := protocol.Range{Start: protocol.Position{Line: 2, Character: 3}, End: protocol.Position{Line: 2, Character: 4}}
+
+	plain := protocol.Diagnostic{Severity: protocol.DiagnosticSeverityError, Range: r, Message: protocol.String("boom")}
+	if got := formatDiagnostic(plain); got != "error 3:4  boom" {
+		t.Errorf("formatDiagnostic(plain) = %q", got)
+	}
+
+	dep := protocol.Diagnostic{Severity: protocol.DiagnosticSeverityWarning, Range: r, Message: protocol.String("old API"), Tags: protocol.NewDiagnosticTags(protocol.DiagnosticTagDeprecated)}
+	if got := formatDiagnostic(dep); got != "warning [deprecated] 3:4  old API" {
+		t.Errorf("formatDiagnostic(deprecated) = %q", got)
+	}
+
+	un := protocol.Diagnostic{Severity: protocol.DiagnosticSeverityWarning, Range: r, Message: protocol.String("dead"), Tags: protocol.NewDiagnosticTags(protocol.DiagnosticTagUnnecessary)}
+	if got := formatDiagnostic(un); got != "warning [unnecessary] 3:4  dead" {
+		t.Errorf("formatDiagnostic(unnecessary) = %q", got)
+	}
+}
+
+func TestScanDiagnostics(t *testing.T) {
+	fakeSpec(t, "go")
+	m := NewManager()
+	defer m.Close()
+
+	dir := t.TempDir()
+	for _, name := range []string{"main.go", "util.go"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("package main\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// node_modules must be skipped: no diagnostics, no delay.
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules", "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "node_modules", "pkg", "dep.go"), []byte("package pkg\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := scanSettle
+	scanSettle = 1 * time.Second
+	defer func() { scanSettle = old }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	out, err := m.ScanDiagnostics(ctx, dir)
+	if err != nil {
+		t.Fatalf("ScanDiagnostics: %v", err)
+	}
+	if !strings.Contains(out, "2 errors") {
+		t.Errorf("ScanDiagnostics summary = %q, want '2 errors'", out)
+	}
+	if !strings.Contains(out, "2 deprecated") {
+		t.Errorf("ScanDiagnostics summary = %q, want '2 deprecated'", out)
+	}
+	if !strings.Contains(out, "main.go") || !strings.Contains(out, "util.go") {
+		t.Errorf("ScanDiagnostics = %q, want both scanned files listed", out)
+	}
+	if strings.Contains(out, "node_modules") {
+		t.Errorf("ScanDiagnostics = %q, node_modules must be skipped", out)
+	}
+}
+
+func TestScanDiagnosticsNoFiles(t *testing.T) {
+	m := NewManager()
+	defer m.Close()
+
+	out, err := m.ScanDiagnostics(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("ScanDiagnostics: %v", err)
+	}
+	if !strings.Contains(out, "No supported source files") {
+		t.Errorf("ScanDiagnostics = %q, want 'no supported files' message", out)
+	}
+}
+
+func TestFormatLocationsCapped(t *testing.T) {
+	r := protocol.Range{Start: protocol.Position{Line: 0, Character: 0}, End: protocol.Position{Line: 0, Character: 1}}
+	locs := make([]protocol.Location, 0, 100)
+	for i := 0; i < 100; i++ {
+		locs = append(locs, protocol.Location{URI: mustFileURI(t, fmt.Sprintf("/tmp/f%d.go", i)), Range: r})
+	}
+	out := formatLocations(locs)
+	if strings.Count(out, ".go:") != maxLocations {
+		t.Errorf("formatLocations cap: got %d locations, want %d", strings.Count(out, ".go:"), maxLocations)
+	}
+	if !strings.Contains(out, "more") {
+		t.Errorf("formatLocations = %q, want truncation note", out)
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	if got := truncate("hello", 10, "tail"); got != "hello" {
+		t.Errorf("truncate short = %q", got)
+	}
+	got := truncate("hello world", 5, "cut")
+	if !strings.Contains(got, "hello") || !strings.Contains(got, "cut") {
+		t.Errorf("truncate long = %q, want prefix + tail note", got)
+	}
+}
+
+func TestIdleReaperShutsDownIdleServer(t *testing.T) {
+	fakeSpec(t, "go")
+	m := NewManager()
+	defer m.Close()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Spawn the server, then pretend it has been idle far past the timeout.
+	if _, err := m.Definition(ctx, src, 1, 1); err != nil {
+		t.Fatalf("Definition: %v", err)
+	}
+	m.mu.Lock()
+	c := m.clients["go"]
+	m.mu.Unlock()
+	if c == nil {
+		t.Fatal("expected a spawned client")
+	}
+
+	m.idleTimeout = time.Millisecond
+	m.reapIdleOnce(time.Now().Add(10 * time.Minute))
+
+	// Give the shutdown goroutine a moment, then verify the client is gone
+	// and marked closed.
+	time.Sleep(200 * time.Millisecond)
+	m.mu.Lock()
+	_, stillThere := m.clients["go"]
+	m.mu.Unlock()
+	if stillThere {
+		t.Error("idle server was not reaped")
+	}
+
+	// A recent client must NOT be reaped.
+	m2 := NewManager()
+	defer m2.Close()
+	if _, err := m2.Definition(ctx, src, 1, 1); err != nil {
+		t.Fatalf("Definition (m2): %v", err)
+	}
+	m2.reapIdleOnce(time.Now())
+	m2.mu.Lock()
+	_, stillThere = m2.clients["go"]
+	m2.mu.Unlock()
+	if !stillThere {
+		t.Error("recently used server was reaped too early")
+	}
+}
+
+func TestServerCrashRespawnsOnNextCall(t *testing.T) {
+	fakeSpec(t, "go")
+	m := NewManager()
+	defer m.Close()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if _, err := m.Definition(ctx, src, 1, 1); err != nil {
+		t.Fatalf("Definition #1: %v", err)
+	}
+
+	// Kill the server process out from under the manager (simulating a crash).
+	m.mu.Lock()
+	c := m.clients["go"]
+	m.mu.Unlock()
+	if c == nil || c.server == nil || c.server.Process == nil {
+		t.Fatal("expected a running server process")
+	}
+	if err := c.server.Process.Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	// Give the Wait() goroutine time to mark the client dead.
+	time.Sleep(300 * time.Millisecond)
+
+	// The next call must transparently spawn a fresh server and succeed.
+	if _, err := m.Definition(ctx, src, 1, 1); err != nil {
+		t.Fatalf("Definition after crash: %v", err)
+	}
+	m.mu.Lock()
+	c2 := m.clients["go"]
+	m.mu.Unlock()
+	if c2 == nil || c2.closed {
+		t.Error("expected a fresh, live client after crash")
 	}
 }
 

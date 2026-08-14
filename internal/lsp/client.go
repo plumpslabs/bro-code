@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,19 +52,74 @@ type Client struct {
 	lang     string
 	mu       sync.Mutex
 	closed   bool
+	lastUsed time.Time                        // set on every clientFor — drives idle reaping
 	versions map[string]int                   // path → document version
 	pushed   map[string][]protocol.Diagnostic // URI → last published diagnostics
 }
 
 // Manager owns zero or more language server connections (one per language).
+// Servers are spawned lazily on first use and reaped when idle, so a long
+// session does not accumulate live language-server processes (the
+// "unbounded memory growth" problem other agents have).
 type Manager struct {
-	mu      sync.Mutex
-	clients map[string]*Client
+	mu          sync.Mutex
+	clients     map[string]*Client
+	stop        chan struct{}
+	idleTimeout time.Duration
+	// ctx/cancel are manager-owned and live for the whole session, so spawned
+	// language servers survive per-turn context cancellation (the per-turn
+	// ctx only bounds individual queries). Canceled on Close.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-// NewManager creates an empty LSP manager.
+// DefaultIdleTimeout is how long a language server stays alive after its last
+// use before it is shut down to free memory. 10 minutes covers a normal task
+// burst while keeping idle processes bounded.
+const DefaultIdleTimeout = 10 * time.Minute
+
+// NewManager creates an empty LSP manager with an idle reaper.
 func NewManager() *Manager {
-	return &Manager{clients: make(map[string]*Client)}
+	m := &Manager{
+		clients:     make(map[string]*Client),
+		stop:        make(chan struct{}),
+		idleTimeout: DefaultIdleTimeout,
+	}
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	go m.reapIdle()
+	return m
+}
+
+// reapIdle periodically shuts down language servers that have been idle past
+// the timeout, so memory does not grow unboundedly across a long session.
+func (m *Manager) reapIdle() {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-m.stop:
+			return
+		case <-t.C:
+			m.reapIdleOnce(time.Now())
+		}
+	}
+}
+
+// reapIdleOnce shuts down clients idle past the timeout as of now. Extracted
+// so tests can drive the reaper deterministically instead of waiting on the
+// 30s tick.
+func (m *Manager) reapIdleOnce(now time.Time) {
+	m.mu.Lock()
+	for lang, c := range m.clients {
+		c.mu.Lock()
+		idle := c.lastUsed.IsZero() || now.Sub(c.lastUsed) > m.idleTimeout
+		c.mu.Unlock()
+		if idle {
+			delete(m.clients, lang)
+			go c.shutdown()
+		}
+	}
+	m.mu.Unlock()
 }
 
 // AvailableServers returns the language names whose server binary is on
@@ -85,7 +141,10 @@ func (m *Manager) ActiveServers() []string {
 	defer m.mu.Unlock()
 	var out []string
 	for lang, c := range m.clients {
-		if !c.closed {
+		c.mu.Lock()
+		closed := c.closed
+		c.mu.Unlock()
+		if !closed {
 			out = append(out, lang)
 		}
 	}
@@ -101,12 +160,18 @@ func containsStr(list []string, s string) bool {
 	return false
 }
 
-// Close shuts down all running language servers.
+// Close shuts down all running language servers and stops the idle reaper.
 func (m *Manager) Close() {
 	m.mu.Lock()
 	clients := m.clients
 	m.clients = make(map[string]*Client)
+	select {
+	case <-m.stop:
+	default:
+		close(m.stop)
+	}
 	m.mu.Unlock()
+	m.cancel()
 	for _, c := range clients {
 		_ = c.shutdown()
 	}
@@ -164,9 +229,19 @@ func (m *Manager) clientFor(ctx context.Context, path string) (*Client, error) {
 	}
 
 	m.mu.Lock()
-	if c, ok := m.clients[spec.Language]; ok && !c.closed {
-		m.mu.Unlock()
-		return c, nil
+	if c, ok := m.clients[spec.Language]; ok {
+		// closed is written by shutdown and the crash watcher under c.mu;
+		// read it under the same lock (order m.mu → c.mu, matching reaper).
+		c.mu.Lock()
+		closed := c.closed
+		if !closed {
+			c.lastUsed = time.Now()
+		}
+		c.mu.Unlock()
+		if !closed {
+			m.mu.Unlock()
+			return c, nil
+		}
 	}
 	m.mu.Unlock()
 
@@ -182,7 +257,10 @@ func (m *Manager) clientFor(ctx context.Context, path string) (*Client, error) {
 		pushed:   make(map[string][]protocol.Diagnostic),
 	}
 
-	cmd := exec.CommandContext(ctx, spec.Command, spec.Args...)
+	// Server processes are bound to the manager's long-lived ctx (not the
+	// per-call ctx) so they survive between turns — re-spawning + re-indexing
+	// per turn would be slow and memory-hungry.
+	cmd := exec.CommandContext(m.ctx, spec.Command, spec.Args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -200,7 +278,7 @@ func (m *Manager) clientFor(ctx context.Context, path string) (*Client, error) {
 
 	rwc := &pipeRWC{in: stdin, out: stdout}
 	conn := jsonrpc2.NewConn(jsonrpc2.NewStream(rwc))
-	conn.Go(ctx, func(ctx context.Context, req *jsonrpc2.Request) (any, error) {
+	conn.Go(m.ctx, func(ctx context.Context, req *jsonrpc2.Request) (any, error) {
 		// Capture diagnostics the server pushes so the Diagnostics tool can
 		// return them without implementing the complex pull model.
 		if req.Method() == "textDocument/publishDiagnostics" {
@@ -240,6 +318,18 @@ func (m *Manager) clientFor(ctx context.Context, path string) (*Client, error) {
 		_ = cmd.Process.Kill()
 		return nil, fmt.Errorf("initialized notification failed: %w", err)
 	}
+
+	c.lastUsed = time.Now()
+
+	// Crash detection: if the server process exits for any reason (crash,
+	// OOM, user killed it), mark the client dead so the next lsp_* call
+	// spawns a fresh server instead of hanging on a stale connection.
+	go func() {
+		_ = cmd.Wait()
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+	}()
 
 	m.mu.Lock()
 	m.clients[spec.Language] = c
@@ -443,7 +533,7 @@ func (m *Manager) Hover(ctx context.Context, path string, line, col int) (string
 	if hover.Contents == nil {
 		return "No hover information.", nil
 	}
-	return formatHover(hover.Contents), nil
+	return truncate(formatHover(hover.Contents), maxHoverChars, "(hover truncated)"), nil
 }
 
 // Diagnostics returns the current diagnostics (errors/warnings) for a file.
@@ -475,17 +565,205 @@ func (m *Manager) Diagnostics(ctx context.Context, path string) (string, error) 
 		return "No diagnostics reported for " + path + ".", nil
 	}
 	var sb strings.Builder
-	for _, d := range diags {
-		sev := "warning"
-		if d.Severity == protocol.DiagnosticSeverityError {
-			sev = "error"
+	for i, d := range diags {
+		if i >= maxDiagsPerFile {
+			sb.WriteString(fmt.Sprintf("... and %d more diagnostics\n", len(diags)-i))
+			break
 		}
-		sb.WriteString(fmt.Sprintf("%s %d:%d  %s\n", sev, d.Range.Start.Line+1, d.Range.Start.Character+1, d.Message))
+		sb.WriteString(formatDiagnostic(d) + "\n")
 	}
 	return strings.TrimSpace(sb.String()), nil
 }
 
-// formatLocations renders LSP locations as readable file:line:col entries.
+// formatDiagnostic renders one LSP diagnostic as a readable line, surfacing
+// the diagnostic tags servers emit for stale code: [deprecated] marks an API
+// that has a newer replacement (the classic "there is a new way" signal) and
+// [unnecessary] marks dead/redundant code.
+func formatDiagnostic(d protocol.Diagnostic) string {
+	sev := "warning"
+	if d.Severity == protocol.DiagnosticSeverityError {
+		sev = "error"
+	}
+	tag := ""
+	for _, t := range d.Tags.Slice() {
+		switch t {
+		case protocol.DiagnosticTagDeprecated:
+			tag = " [deprecated]"
+		case protocol.DiagnosticTagUnnecessary:
+			tag = " [unnecessary]"
+		}
+	}
+	return fmt.Sprintf("%s%s %d:%d  %s", sev, tag, d.Range.Start.Line+1, d.Range.Start.Character+1, d.Message)
+}
+
+func hasTag(d protocol.Diagnostic, tag protocol.DiagnosticTag) bool {
+	for _, t := range d.Tags.Slice() {
+		if t == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// scanSkipDirs are dependency/build/cache directories never worth opening in
+// a diagnostics scan — they would drown the signal in third-party noise.
+var scanSkipDirs = map[string]bool{
+	".git": true, ".hg": true, ".svn": true,
+	"node_modules": true, "vendor": true, "bower_components": true,
+	"dist": true, "build": true, "out": true, "coverage": true,
+	".next": true, ".nuxt": true, ".turbo": true, ".cache": true,
+	"__pycache__": true, ".venv": true, "venv": true, "env": true,
+	".idea": true, ".vscode": true, "target": true,
+	".pytest_cache": true, ".mypy_cache": true, "public": true, "assets": true,
+}
+
+// scanMaxFiles bounds how many source files are opened in one scan so it
+// stays cheap on big repositories.
+const scanMaxFiles = 60
+
+// scanMaxLines bounds the rendered output of one scan.
+const scanMaxLines = 80
+
+// scanSettle is how long ScanDiagnostics waits for servers to publish
+// diagnostics after opening files. A var so tests can shorten it.
+var scanSettle = 3 * time.Second
+
+// ScanDiagnostics proactively scans a project for compiler/linter diagnostics:
+// errors, warnings and deprecated usages across source files — a full health
+// check without running a build. It opens at most scanMaxFiles supported files
+// (dependency/build dirs skipped), gives the servers one short settle window,
+// then aggregates everything they publish. Files whose language server is not
+// installed are skipped silently. Returns a compact report, or a clean line
+// when no issues were found.
+func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, error) {
+	var files []string
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if p != root && scanSkipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if len(files) >= scanMaxFiles {
+			return fs.SkipAll
+		}
+		spec := specForPath(p)
+		if spec == nil || !binaryExists(spec.Command) {
+			return nil
+		}
+		files = append(files, p)
+		return nil
+	})
+	if len(files) == 0 {
+		return "No supported source files found (no language server available for this project).", nil
+	}
+
+	opened := make(map[string]string, len(files)) // uri → path
+	clients := make(map[string]*Client, len(files))
+	for _, f := range files {
+		c, err := m.clientFor(ctx, f)
+		if err != nil {
+			continue
+		}
+		text, err := textAt(f)
+		if err != nil {
+			continue
+		}
+		if err := c.ensureOpen(ctx, f, text); err != nil {
+			continue
+		}
+		u := uri.File(filepath.Clean(f)).String()
+		opened[u] = f
+		clients[u] = c
+	}
+
+	// One settle window for all servers to publish diagnostics.
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(scanSettle):
+	}
+
+	order := make([]string, 0, len(opened))
+	for u := range opened {
+		order = append(order, u)
+	}
+	sort.Strings(order)
+
+	var totalErrs, totalWarns, totalDeps, totalDiags int
+	var out []string
+	for _, u := range order {
+		c := clients[u]
+		c.mu.Lock()
+		diags := append([]protocol.Diagnostic(nil), c.pushed[u]...)
+		c.mu.Unlock()
+		if len(diags) == 0 {
+			continue
+		}
+		rel, err := filepath.Rel(root, opened[u])
+		if err != nil {
+			rel = opened[u]
+		}
+		fileLines := []string{rel}
+		for _, d := range diags {
+			if totalDiags >= scanMaxLines {
+				break
+			}
+			fileLines = append(fileLines, "  "+formatDiagnostic(d))
+			totalDiags++
+			switch {
+			case d.Severity == protocol.DiagnosticSeverityError:
+				totalErrs++
+			case hasTag(d, protocol.DiagnosticTagDeprecated):
+				totalDeps++
+			default:
+				totalWarns++
+			}
+		}
+		out = append(out, strings.Join(fileLines, "\n"))
+	}
+	if len(out) == 0 {
+		return "✅ No diagnostics found in the scanned files.", nil
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "🧹 Project diagnostics scan (%d files, %d issues):\n", len(opened), totalDiags)
+	fmt.Fprintf(&sb, "  ✗ %d errors · ⚠ %d warnings · ♻ %d deprecated\n", totalErrs, totalWarns, totalDeps)
+	if totalDiags > scanMaxLines {
+		sb.WriteString(fmt.Sprintf("  (showing first %d issues)\n", scanMaxLines))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(strings.Join(out, "\n"))
+	return sb.String(), nil
+}
+
+// maxLocations caps how many reference locations are returned so a hot
+// symbol's references (which can be hundreds) never floods the context.
+const maxLocations = 40
+
+// maxHoverChars caps hover output — servers often return long doc blocks the
+// model only needs a summary of.
+const maxHoverChars = 1500
+
+// maxDiagsPerFile caps how many diagnostics are returned per file, so a
+// cascade of errors (e.g. a missing import breaking 80 lines) is summarized
+// instead of flooding the context.
+const maxDiagsPerFile = 30
+
+// truncate cuts s to n runes, appending a tail note when something was cut.
+func truncate(s string, n int, tail string) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "\n… " + tail
+}
+
+// formatLocations renders LSP locations as readable file:line:col entries,
+// capped to keep token cost bounded — a hot symbol can have hundreds of
+// references and the model rarely needs more than the first handful.
 func formatLocations(locs []protocol.Location) string {
 	var out []string
 	for _, l := range locs {
@@ -493,6 +771,9 @@ func formatLocations(locs []protocol.Location) string {
 			l.URI.FsPath(), l.Range.Start.Line+1, l.Range.Start.Character+1))
 	}
 	sort.Strings(out)
+	if len(out) > maxLocations {
+		out = append(out[:maxLocations], fmt.Sprintf("... and %d more (use grep for a broader view)", len(out)-maxLocations))
+	}
 	return strings.Join(out, "\n")
 }
 
