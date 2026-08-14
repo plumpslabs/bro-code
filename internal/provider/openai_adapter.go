@@ -246,6 +246,7 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 	defer resp.Body.Close()
 
 	res := &CompletionResponse{}
+	sawDone := false // [DONE] frame seen → provider declared the stream finished
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -256,6 +257,7 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
+			sawDone = true
 			break
 		}
 
@@ -303,6 +305,16 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("stream read failed: %w", err)
+	}
+
+	// A stream that ended without either a [DONE] frame or a finish_reason was
+	// cut mid-generation — provider timeout, session expiry, or a free-tier
+	// duration/queue limit hit while the answer was still streaming (exactly
+	// what free gateways like FreeBuff do). Returning the partial text as a
+	// complete answer would silently serve a half response, so surface an
+	// error instead and let the engine fall back to another provider.
+	if !sawDone && res.FinishReason == "" {
+		return nil, fmt.Errorf("stream ended unexpectedly (no [DONE] or finish_reason — provider session/duration limit likely reached)")
 	}
 	return res, nil
 }

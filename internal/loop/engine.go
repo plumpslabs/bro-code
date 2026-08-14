@@ -86,8 +86,13 @@ type Engine struct {
 	// lastFallback records the fallback model actually used in the most recent
 	// turn ("" when the primary provider served the turn). The UI surfaces it
 	// persistently in the history so a turn answered by a fallback provider is
-	// never mistaken for the primary one.
-	lastFallback string
+	// never mistaken for the primary one. lastFallbackReason carries the
+	// primary provider's error when a fallback had to serve the turn (e.g.
+	// "API error HTTP 429: …queue…") so the UI can tell the user WHY — a
+	// free-tier duration/queue limit, an invalid model, an auth failure —
+	// instead of silently swapping providers.
+	lastFallback       string
+	lastFallbackReason string
 	// lastToolCall tracks the previous tool invocation within a turn so the
 	// loop guard can detect the model repeating the exact same call and stop
 	// it from spinning (grep the same file 3x in a row, etc.).
@@ -297,6 +302,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	// Reset the fallback marker for this turn (set when a fallback provider
 	// serves the turn; "" when the primary does).
 	e.lastFallback = ""
+	e.lastFallbackReason = ""
 	defer func() { e.progressHandler = nil }()
 	// Lifecycle hook on every exit path: fire on-turn-end when the turn
 	// produced an answer (or a hard abort message), on-turn-error otherwise.
@@ -484,12 +490,15 @@ Engine Mode Rules (%s):
 		resp, err := e.complete(ctx, req)
 		if err != nil {
 			// Automatic model routing: try each fallback provider in order.
+			// Remember WHY the primary failed so the UI can surface it.
+			primaryErr := err
 			for _, fb := range e.fallbacks {
 				fbReq := req
 				fbReq.Model = fb.Model
 				resp, err = e.completeWith(ctx, fb.Adapter, fbReq)
 				if err == nil {
 					e.lastFallback = fb.Model
+					e.lastFallbackReason = primaryErr.Error()
 					if onUpdate != nil {
 						onUpdate(e.state, fmt.Sprintf("⚠️ Primary provider failed — using fallback model %s", fb.Model))
 					}
@@ -716,6 +725,14 @@ Engine Mode Rules (%s):
 // ("" when the primary provider served it).
 func (e *Engine) LastFallbackModel() string {
 	return e.lastFallback
+}
+
+// LastFallbackReason returns the primary provider's error that triggered the
+// fallback in the most recent turn ("" when the primary served it). This is
+// how the UI tells the user WHY — e.g. a FreeBuff duration/queue limit or an
+// invalid model — rather than silently swapping providers.
+func (e *Engine) LastFallbackReason() string {
+	return e.lastFallbackReason
 }
 
 // recordExplored keeps a capped, de-duplicated list of files/directories the

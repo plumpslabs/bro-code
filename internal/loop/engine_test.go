@@ -270,6 +270,11 @@ func TestLastFallbackModelReported(t *testing.T) {
 	if engine.LastFallbackModel() != "fallback-model" {
 		t.Errorf("expected lastFallback=fallback-model, got %q", engine.LastFallbackModel())
 	}
+	// The primary failure reason must be recorded so the UI can tell the user
+	// WHY the fallback happened (duration/queue limit, invalid model, ...).
+	if !strings.Contains(engine.LastFallbackReason(), "provider down") {
+		t.Errorf("expected fallback reason to mention primary error, got %q", engine.LastFallbackReason())
+	}
 
 	// A turn served by the primary provider resets the marker.
 	engine2 := NewEngine(&mockAdapter{}, tools, bcontext.NewManager("s2", nil, 128000), "primary-model")
@@ -278,6 +283,9 @@ func TestLastFallbackModelReported(t *testing.T) {
 	}
 	if engine2.LastFallbackModel() != "" {
 		t.Errorf("expected no fallback marker for primary-served turn, got %q", engine2.LastFallbackModel())
+	}
+	if engine2.LastFallbackReason() != "" {
+		t.Errorf("expected no fallback reason for primary-served turn, got %q", engine2.LastFallbackReason())
 	}
 }
 

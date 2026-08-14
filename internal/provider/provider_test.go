@@ -815,6 +815,58 @@ func TestOpenAIStreamCompleteContent(t *testing.T) {
 	}
 }
 
+// TestOpenAIStreamCompleteMidStreamCut simulates a free-tier gateway (e.g.
+// FreeBuff) whose session/duration limit expires WHILE the answer is still
+// streaming: content arrives, then the connection just closes with no
+// finish_reason and no [DONE]. The adapter must return an error — not a
+// silently truncated answer — so the engine can fall back to another
+// provider instead of presenting half a response as complete.
+func TestOpenAIStreamCompleteMidStreamCut(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"This is only"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":" half an answer"}}]}`+"\n\n")
+		// No finish_reason, no [DONE] — connection dropped mid-generation.
+	}))
+	defer srv.Close()
+
+	a := NewOpenAIAdapter(srv.URL, "test-key")
+	_, err := a.StreamComplete(context.Background(), CompletionRequest{
+		Model:    "test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected error for a stream cut before completion signal")
+	}
+	if !strings.Contains(err.Error(), "ended unexpectedly") {
+		t.Errorf("expected 'ended unexpectedly' error, got %q", err)
+	}
+}
+
+// TestOpenAIStreamCompleteFinishReasonNoDone proves a stream that ends with
+// finish_reason but without a [DONE] frame (some providers omit it) is still
+// accepted as complete — only the absence of BOTH signals counts as a cut.
+func TestOpenAIStreamCompleteFinishReasonNoDone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Done"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	a := NewOpenAIAdapter(srv.URL, "test-key")
+	res, err := a.StreamComplete(context.Background(), CompletionRequest{
+		Model:    "test-model",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("StreamComplete failed: %v", err)
+	}
+	if res.Content != "Done" || res.FinishReason != "stop" {
+		t.Errorf("unexpected result: content=%q finish=%q", res.Content, res.FinishReason)
+	}
+}
+
 func TestOpenAIStreamCompleteToolCalls(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

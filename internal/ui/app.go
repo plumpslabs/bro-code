@@ -707,7 +707,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// active provider's (which is exactly the confusion the user saw:
 			// groq active, deepseek-v4-flash-free answered).
 			if fb := m.engine.LastFallbackModel(); fb != "" {
-				m.appendMessages(fmt.Sprintf("⚠️ Primary provider failed — this answer came from fallback model %s.", fb))
+				// Include WHY the primary failed (duration/queue limit, invalid
+				// model, auth error) so the user can act on it — e.g. switch
+				// model or restart the FreeBuff session — instead of wondering.
+				reason := m.engine.LastFallbackReason()
+				msg := fmt.Sprintf("⚠️ Primary provider failed — this answer came from fallback model %s.", fb)
+				if reason != "" && len(reason) < 300 {
+					msg += "\nReason: " + reason
+				}
+				m.appendMessages(msg)
 			}
 			m.status = "Ready"
 		}
