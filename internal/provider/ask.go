@@ -46,6 +46,12 @@ const brocodeIdentityPrompt = `You are BroCode, a terminal coding agent for soft
 // task behavior.
 const brocodeCapabilityNote = `You are BroCode, running through a local gateway runtime. If asked about your subagents or capabilities, answer directly from this context — do NOT explore configuration directories (.opencode, ~/.config/opencode, agent files) to answer. BroCode's native engine has its own "subagent" tool (isolated sub-agents, optionally parallel) and "scout" tool (background research); in this session you can only call the gateway runtime's own tools (e.g. its task tool), so be honest about which ones you actually have.`
 
+// brocodeAnswerNote keeps final answers proportional to the question without
+// imposing any hard length cap. Deep exploration/architecture questions get
+// full detail; simple questions get short answers. This is the only answer-
+// shaping instruction BroCode sends — there is no max length, no truncation.
+const brocodeAnswerNote = `Answer length should match the question's depth: for exploration or architecture questions give a thorough, detailed answer (structure, evidence from the code, examples) — do not compress a full explanation into a terse summary. Keep answers short only for genuinely simple questions.`
+
 // askMarkerInstructions is appended to the prompt when the OpenCode CLI model
 // runs with an interactive ask handler wired, so its clarification questions
 // come back as a structured block that can be turned into the selection modal.

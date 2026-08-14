@@ -182,7 +182,7 @@ func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req Completi
 	// gateway's system prompt, so it would identify itself with the gateway's
 	// identity and capabilities. Anchor identity + BroCode's architecture with
 	// a short preamble — it only shapes identity/capability answers.
-	prompt := brocodeIdentityPrompt + "\n\n" + brocodeCapabilityNote + "\n\n" + userPrompt
+	prompt := brocodeIdentityPrompt + "\n\n" + brocodeCapabilityNote + "\n\n" + brocodeAnswerNote + "\n\n" + userPrompt
 
 	// Orient the model about what MCP servers BroCode has connected, so
 	// questions like "what MCP is available?" are answered from context
@@ -232,7 +232,7 @@ func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req Completi
 			return buildCLIResponse(userPrompt, cleaned, opencodeMod)
 		}
 
-		prompt = brocodeIdentityPrompt + "\n\n" + brocodeCapabilityNote + "\n\n" + userPrompt
+		prompt = brocodeIdentityPrompt + "\n\n" + brocodeCapabilityNote + "\n\n" + brocodeAnswerNote + "\n\n" + userPrompt
 		if a.MCPStatus != "" {
 			prompt += "\n\n" + a.MCPStatus
 		}
