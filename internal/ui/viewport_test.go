@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/plumpslabs/bro-code/internal/context"
 )
 
@@ -191,6 +192,100 @@ func TestTerminalWidthBoundariesNoOverflow(t *testing.T) {
 		if strings.Contains(lastLine, "MINE ❯") {
 			t.Errorf("Width %d: Prompt entry overlapped into sticky footer line", w)
 		}
+	}
+}
+
+// TestViewLogRendersThroughViewport pins the core chat-area fix: the log must
+// be rendered THROUGH the viewport window (m.logViewport.View()), not as a raw
+// unbounded string. A long history is clipped to the terminal's available
+// height with the newest content at the bottom, and scrolling up (PgUp)
+// reveals the older history — which is exactly what was broken: the raw log
+// was written each frame, the renderer dropped lines from the top, and the
+// viewport scroll offset was never applied, so a prompt sent after a long
+// response was pushed off-screen and unreachable.
+func TestViewLogRendersThroughViewport(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 30
+	// Size the viewport like WindowSizeMsg does.
+	m.promptInput.SetWidth(m.width - 4)
+	m.logViewport.SetWidth(m.width)
+	m.updateLogHeight()
+
+	// A long history: the first message must scroll out of the window while the
+	// newest stays visible at the bottom.
+	m.messages = []string{"⚡ BroCode engine active. Type a prompt or /help for commands."}
+	for i := 1; i <= 40; i++ {
+		m.appendMessages(fmt.Sprintf("YOU:\nprompt %d with some filler text to wrap lines", i))
+		m.appendMessages(fmt.Sprintf("BROCODE:\nanswer %d with filler text", i))
+	}
+
+	v := m.View()
+	visible := ansiRegex.ReplaceAllString(v.Content, "")
+	if !strings.Contains(visible, "answer 40") {
+		t.Fatalf("newest answer must be visible at the bottom:\n%s", visible)
+	}
+	if strings.Contains(visible, "prompt 1") {
+		t.Fatalf("oldest history must be scrolled out of the window (reachable via PgUp), not rendered raw")
+	}
+
+	// Scrolling up must reveal the older history — before this fix PgUp updated
+	// the viewport offset but View() wrote the raw log, so scrolling did
+	// nothing and old messages were unreachable.
+	m.logViewport.GotoTop()
+	v = m.View()
+	visible = ansiRegex.ReplaceAllString(v.Content, "")
+	if !strings.Contains(visible, "prompt 1") {
+		t.Fatalf("scrolling up must reveal the oldest history:\n%s", visible)
+	}
+}
+
+// TestViewHeightExactlyFillsTerminal pins the layout math that prevents both
+// history cropping and flicker: the log viewport plus the chrome below it
+// (activity slot, input, banner, help) must total EXACTLY the terminal height.
+// A one-line overflow made the renderer crop the first history line, and the
+// raw-log rendering re-flowed the whole screen every frame.
+func TestViewHeightExactlyFillsTerminal(t *testing.T) {
+	for _, h := range []int{20, 30, 40} {
+		m := newTestApp()
+		m.width = 120
+		m.height = h
+		m.promptInput.SetWidth(m.width - 4)
+		m.logViewport.SetWidth(m.width)
+		m.updateLogHeight()
+		m.appendMessages("YOU:\nhalo bro")
+		m.appendMessages("BROCODE:\nhalo juga")
+
+		v := m.View()
+		n := strings.Count(v.Content, "\n") + 1
+		if n != h {
+			t.Errorf("height %d: View() produced %d lines (must equal terminal height so nothing is cropped)", h, n)
+		}
+	}
+}
+
+// TestMouseScrollModeEnablesWheelEvents pins that the Ctrl+M SCROLL toggle
+// actually enables mouse events in the view. Previously View() always forced
+// MouseModeNone, so the SCROLL mode did nothing and the mouse wheel could
+// never scroll the log.
+func TestMouseScrollModeEnablesWheelEvents(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 30
+
+	// Default: SELECT — native terminal selection, no mouse capture.
+	v := m.View()
+	if v.MouseMode != tea.MouseModeNone {
+		t.Errorf("SELECT mode must use MouseModeNone, got %v", v.MouseMode)
+	}
+
+	// Toggle to SCROLL (ctrl+m).
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'm', Mod: tea.ModCtrl}); err != nil {
+		t.Fatalf("ctrl+m update failed: %v", err)
+	}
+	v = m.View()
+	if v.MouseMode != tea.MouseModeCellMotion {
+		t.Errorf("SCROLL mode must enable MouseModeCellMotion (wheel events), got %v", v.MouseMode)
 	}
 }
 

@@ -2088,6 +2088,14 @@ func (m *Model) View() tea.View {
 			contentWidth = 0
 		}
 		log := m.buildLog(contentWidth)
+
+		// Chrome below the log (activity slot + input + banner + help) is built
+		// FIRST and measured, so the log viewport can be sized to exactly fill
+		// the remaining terminal height. Hardcoding the chrome line count is
+		// what made the view crop history and flicker — measuring the rendered
+		// chrome can never drift.
+		chrome, chromeLines := m.buildLogChrome()
+
 		if m.width > 0 {
 			// The viewport must be sized before it can be rendered (it returns
 			// "" when width/height are 0). Ensure it tracks the terminal even
@@ -2095,7 +2103,13 @@ func (m *Model) View() tea.View {
 			if m.logViewport.Width() != m.width {
 				m.logViewport.SetWidth(m.width)
 			}
-			h := m.updateLogHeight()
+			h := m.height - chromeLines
+			if h < 3 {
+				h = 3
+			}
+			if h != m.logViewport.Height() {
+				m.logViewport.SetHeight(h)
+			}
 			if m.streaming {
 				if log != m.renderedLog {
 					m.logViewport.SetContent(log)
@@ -2131,99 +2145,7 @@ func (m *Model) View() tea.View {
 			sb.WriteString(log)
 		}
 
-		// Live agent activity slot: spinner + current step + the last few tool
-		// calls, rendered ABOVE the input. Activity is transient — it never
-		// enters the conversation history (that's what made process rows pile
-		// up above the answer and hide the user's prompt).
-		if m.status != "Ready" && m.status != "Failed" {
-			spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-			frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
-			sb.WriteString(spinnerStyle.Render(frame+" "+m.status) + "\n")
-			actStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
-			for _, act := range m.activity {
-				sb.WriteString(actStyle.Render("  · "+act) + "\n")
-			}
-			sb.WriteString("\n")
-		} else {
-			sb.WriteString("\n\n")
-		}
-
-		// Input area: while a critical file action (create/delete) awaits
-		// approval, the chat input is temporarily replaced by the confirm bar.
-		if m.showFileConfirm {
-			sb.WriteString(m.renderFileConfirmBar() + "\n\n")
-		} else {
-			// Input Box (Borderless & Minimalist, multi-line textarea that grows)
-			promptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-			promptStr := "❯ "
-			switch m.mode {
-			case "PLANNER":
-				promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
-				promptStr = "PLAN ❯ "
-				m.promptInput.Placeholder = "Planner Mode: Ask for architecture plans, code analysis, or roadmaps..."
-			case "MINER":
-				promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
-				promptStr = "MINE ❯ "
-				m.promptInput.Placeholder = "Miner Mode: Explore the codebase and persist verified knowledge to project memory..."
-			default:
-				m.promptInput.Placeholder = "Type a prompt or command (/help, /sessions, /new)..."
-			}
-			sb.WriteString(promptStyle.Render(promptStr) + m.promptInput.View() + "\n\n")
-		}
-
-		// STICKY BOTTOM FOOTER BANNER (Never disappears when history grows long)
-		bannerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Padding(0, 1)
-		if m.width > 0 {
-			bannerStyle = bannerStyle.MaxWidth(m.width)
-		}
-		tokenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-		modeBadgeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-		switch m.mode {
-		case "PLANNER":
-			modeBadgeStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))
-		case "MINER":
-			modeBadgeStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("178"))
-		}
-
-		sessID := m.context.SessionID()
-		if len(sessID) > 16 {
-			sessID = sessID[:16] + "..."
-		}
-		tokensStr := fmt.Sprintf("Tokens: %s/%s", provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()))
-		// Live cost estimate in the footer (per-session, from adapter usage).
-		if m.engine != nil {
-			if cost := m.engine.SessionCostUSD(); cost > 0 {
-				tokensStr += fmt.Sprintf(" · Cost: $%.4f", cost)
-			}
-		}
-
-		// Live LSP indicator: count of available language servers (binary on
-		// PATH) with a colored badge — teal when at least one is usable.
-		lspBadge := ""
-		if m.lspMgr != nil {
-			n := len(m.lspMgr.AvailableServers())
-			if n > 0 {
-				lspStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86"))
-				lspBadge = " | " + lspStyle.Render(fmt.Sprintf("🧠 LSP:%d", n))
-			}
-		}
-
-		footerBanner := fmt.Sprintf(" BROCODE🔥 | Mode: %s | Provider: %s | Model: %s | Session: %s | %s%s ",
-			modeBadgeStyle.Render(m.mode+" (Shift+Tab)"), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
-
-		helpStr := " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+M mouse · /help "
-		if m.width >= 120 {
-			helpStr = " ENTER send · Alt+Enter newline · Tab/Shift+Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+M mouse mode · /sessions · /models · /lsp · /help "
-		} else if m.width >= 90 {
-			helpStr = " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · Ctrl+Y copy · Ctrl+M mouse · /sessions · /models · /help "
-		}
-		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-		if m.width > 0 {
-			helpStyle = helpStyle.MaxWidth(m.width)
-		}
-
-		sb.WriteString(bannerStyle.Render(footerBanner) + "\n")
-		sb.WriteString(helpStyle.Render(helpStr))
+		sb.WriteString(chrome)
 		content = sb.String()
 	}
 
@@ -2321,28 +2243,127 @@ func (m *Model) logKey() string {
 	return fmt.Sprintf("%d|%s", len(m.messages), m.messages[len(m.messages)-1])
 }
 
-// updateLogHeight fits the log viewport between the status slot, the (dynamic
-// height) input, and the footer so the terminal never scrolls the history and
-// the viewport window exactly fills the remaining space.
-//
-// Chrome below the log, top to bottom: the activity slot (2 lines when idle,
-// actH+2 when a turn runs: spinner + steps + blank), the multi-line input
-// (taH + trailing blank), the footer banner (1) and the help hint (1). The
-// viewport must be height - (taH + actH + 6) so the whole view is exactly one
-// terminal tall — anything larger makes the renderer crop a line of history.
-// Returns the computed height so View() can re-park when it changes.
+// buildLogChrome renders everything below the log viewport — the live
+// activity slot (spinner + steps, or a blank gap when idle), the multi-line
+// input (or the file-action confirm bar), the sticky footer banner and the
+// help hint — and returns the rendered string plus how many terminal lines it
+// occupies. The log viewport is then sized to terminal height minus these
+// lines, so the full view is EXACTLY one terminal tall: nothing is cropped by
+// the renderer and nothing reflows, which is what eliminated the flicker and
+// the history cutting. Measuring the rendered chrome instead of hardcoding a
+// count keeps this correct as the input grows/shrinks and as the activity
+// slot appears/disappears.
+func (m *Model) buildLogChrome() (string, int) {
+	var sb strings.Builder
+
+	// Live agent activity slot: spinner + current step + the last few tool
+	// calls, rendered ABOVE the input. Activity is transient — it never
+	// enters the conversation history (that's what made process rows pile
+	// up above the answer and hide the user's prompt).
+	if m.status != "Ready" && m.status != "Failed" {
+		spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+		frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
+		sb.WriteString(spinnerStyle.Render(frame+" "+m.status) + "\n")
+		actStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
+		for _, act := range m.activity {
+			sb.WriteString(actStyle.Render("  · "+act) + "\n")
+		}
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString("\n\n")
+	}
+
+	// Input area: while a critical file action (create/delete) awaits
+	// approval, the chat input is temporarily replaced by the confirm bar.
+	if m.showFileConfirm {
+		sb.WriteString(m.renderFileConfirmBar() + "\n\n")
+	} else {
+		// Input Box (Borderless & Minimalist, multi-line textarea that grows)
+		promptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+		promptStr := "❯ "
+		switch m.mode {
+		case "PLANNER":
+			promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
+			promptStr = "PLAN ❯ "
+			m.promptInput.Placeholder = "Planner Mode: Ask for architecture plans, code analysis, or roadmaps..."
+		case "MINER":
+			promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
+			promptStr = "MINE ❯ "
+			m.promptInput.Placeholder = "Miner Mode: Explore the codebase and persist verified knowledge to project memory..."
+		default:
+			m.promptInput.Placeholder = "Type a prompt or command (/help, /sessions, /new)..."
+		}
+		sb.WriteString(promptStyle.Render(promptStr) + m.promptInput.View() + "\n\n")
+	}
+
+	// STICKY BOTTOM FOOTER BANNER (Never disappears when history grows long)
+	bannerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Padding(0, 1)
+	if m.width > 0 {
+		bannerStyle = bannerStyle.MaxWidth(m.width)
+	}
+	tokenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+	modeBadgeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	switch m.mode {
+	case "PLANNER":
+		modeBadgeStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))
+	case "MINER":
+		modeBadgeStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("178"))
+	}
+
+	sessID := m.context.SessionID()
+	if len(sessID) > 16 {
+		sessID = sessID[:16] + "..."
+	}
+	tokensStr := fmt.Sprintf("Tokens: %s/%s", provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()))
+	// Live cost estimate in the footer (per-session, from adapter usage).
+	if m.engine != nil {
+		if cost := m.engine.SessionCostUSD(); cost > 0 {
+			tokensStr += fmt.Sprintf(" · Cost: $%.4f", cost)
+		}
+	}
+
+	// Live LSP indicator: count of available language servers (binary on
+	// PATH) with a colored badge — teal when at least one is usable.
+	lspBadge := ""
+	if m.lspMgr != nil {
+		n := len(m.lspMgr.AvailableServers())
+		if n > 0 {
+			lspStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86"))
+			lspBadge = " | " + lspStyle.Render(fmt.Sprintf("🧠 LSP:%d", n))
+		}
+	}
+
+	footerBanner := fmt.Sprintf(" BROCODE🔥 | Mode: %s | Provider: %s | Model: %s | Session: %s | %s%s ",
+		modeBadgeStyle.Render(m.mode+" (Shift+Tab)"), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
+
+	helpStr := " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+M mouse · /help "
+	if m.width >= 120 {
+		helpStr = " ENTER send · Alt+Enter newline · Tab/Shift+Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+M mouse mode · /sessions · /models · /lsp · /help "
+	} else if m.width >= 90 {
+		helpStr = " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · Ctrl+Y copy · Ctrl+M mouse · /sessions · /models · /help "
+	}
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	if m.width > 0 {
+		helpStyle = helpStyle.MaxWidth(m.width)
+	}
+
+	sb.WriteString(bannerStyle.Render(footerBanner) + "\n")
+	sb.WriteString(helpStyle.Render(helpStr))
+
+	// The chrome is appended AFTER the viewport output (which renders exactly
+	// its height and ends WITHOUT a trailing newline), so the extra terminal
+	// rows it occupies equal its newline count — not count+1.
+	s := sb.String()
+	return s, strings.Count(s, "\n")
+}
+
+// updateLogHeight sizes the log viewport to exactly fill the terminal below
+// the chrome (activity slot + input + banner + help), so the whole view is one
+// terminal tall and the renderer never crops history. Returns the computed
+// height so View() can re-park when it changes.
 func (m *Model) updateLogHeight() int {
-	taH := m.promptInput.Height()
-	if taH < 1 {
-		taH = 1
-	}
-	// Reserve room for the live activity slot (spinner + up to 5 steps) while
-	// a turn is running, plus the input, banner and hint.
-	actH := 0
-	if m.status != "Ready" && m.status != "Failed" && len(m.activity) > 0 {
-		actH = len(m.activity)
-	}
-	h := m.height - taH - 6 - actH
+	_, chromeLines := m.buildLogChrome()
+	h := m.height - chromeLines
 	if h < 3 {
 		h = 3
 	}

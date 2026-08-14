@@ -454,7 +454,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				}
 
 				if e.askHandler != nil {
-					q := fmt.Sprintf("⚠️ Reached iteration limit (%d turns). Agent has explored %d files and still requires tool calls to complete the task.", e.maxIterations, len(e.explored))
+					q := fmt.Sprintf("🤖 BroCode Agent evaluated task as incomplete (Turn %d/%d, %d files explored) and requires further tool calls. Grant extension?", e.maxIterations, hardCap, len(e.explored))
 					opts := []string{
 						"Allow Once (+15 turns)",
 						"Always Allow for this session",
