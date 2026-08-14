@@ -572,8 +572,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logViewport.SetWidth(m.width)
 			m.askViewport.SetWidth(m.width - 8)
 			// Connect wizard inputs need an explicit width too, otherwise the
-			// textinput renders nothing (Width 0) and typing looks broken.
-			cw := m.width - 8
+			// textinput renders nothing (Width 0) and typing looks broken. The
+			// focused input renders Width+1 (cursor column) and sits behind a
+			// two-space prefix inside a Width(m.width-4) box (2 border + 4
+			// padding = 6), so cw = m.width-13 keeps the border from being
+			// pushed past the terminal edge.
+			cw := m.width - 13
+			if cw < 10 {
+				cw = 10
+			}
 			m.connectNameInput.SetWidth(cw)
 			m.connectTextInput.SetWidth(cw)
 			m.connectBaseURLInput.SetWidth(cw)
@@ -1891,7 +1898,11 @@ func (m Model) renderModelsModal() string {
 	}
 
 	sb.WriteString("\n[↑/↓ navigate · ENTER apply · ESC close]")
-	return lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2).Render(sb.String())
+	style := lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2)
+	if m.width > 0 {
+		style = style.Width(m.width - 4)
+	}
+	return style.Render(sb.String())
 }
 
 func (m Model) renderConnectModal() string {
@@ -1968,7 +1979,11 @@ func (m Model) renderConnectModal() string {
 			" · ENTER save · ESC back]"))
 	}
 
-	return lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2).Render(sb.String())
+	style := lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2)
+	if m.width > 0 {
+		style = style.Width(m.width - 4)
+	}
+	return style.Render(sb.String())
 }
 
 func (m Model) renderDebugModal() string {
