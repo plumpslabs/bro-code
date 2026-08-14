@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -13,6 +12,7 @@ import (
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/lsp"
 	"github.com/plumpslabs/bro-code/internal/mcp"
+	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/subagent"
@@ -112,7 +112,14 @@ func main() {
 		}
 	}
 
-	ctxMgr := bcontext.NewManager(sessionID, st, 128000)
+	// Context window follows the active model's declared limit (from the
+	// provider config's per-model limit block, e.g. 1M for the free models),
+	// falling back to 128k when the model doesn't declare one.
+	maxWindow := 128000
+	if w := provider.ContextWindowFor(cfg, activeProvider.Info.ID, activeModel); w > 0 {
+		maxWindow = w
+	}
+	ctxMgr := bcontext.NewManager(sessionID, st, maxWindow)
 	var initialMessages []string
 
 	if shouldContinue && st != nil {
@@ -125,61 +132,11 @@ func main() {
 		events, err := st.GetSessionEvents(sessionID)
 		if err == nil && len(events) > 0 {
 			initialMessages = append(initialMessages, fmt.Sprintf("✅ Resumed session %s (%d events total)", sessionID, len(events)))
-			// A session can accumulate thousands of events (every tool result is
-			// persisted). Restoring ALL of them would overflow the context
-			// window and make startup slow — restore only the newest events that
-			// fit ~80% of the window, and say so.
-			skipped := 0
-			restored := 0
-			for _, ev := range events {
-				if ctxMgr.TotalTokens() > int(float64(ctxMgr.MaxWindow())*0.8) && restored > 0 {
-					skipped = len(events) - restored
-					break
-				}
-
-				// Parse the payload so assistant turns keep their real
-				// structure (reasoning/content/tool_calls) instead of being
-				// rendered as raw JSON — a tool-call-only turn has empty
-				// Content, and the old ExtractEventContent fallback dumped the
-				// whole payload into the history and the LLM context.
-				var msg provider.Message
-				_ = json.Unmarshal([]byte(ev.PayloadJSON), &msg)
-				text := msg.Content
-				if text == "" {
-					text = bcontext.ExtractEventContent(ev.PayloadJSON)
-				}
-
-				switch ev.Type {
-				case "user_msg":
-					// Import into memory without re-persisting, so a resume never
-					// duplicates history in the store.
-					ctxMgr.ImportUserMessage(text)
-					// Engine-injected reminders (loop guard, verification failures)
-					// are persisted as user_msg — restore them for the model but
-					// don't present them as if the user had typed them.
-					if isEngineReminder(text) {
-						initialMessages = append(initialMessages, "⚙️ "+text)
-					} else {
-						initialMessages = append(initialMessages, "YOU:\n"+text)
-					}
-				case "assistant_msg":
-					ctxMgr.ImportAssistantTurn(msg.Reasoning, text, msg.ToolCalls)
-					if strings.TrimSpace(text) != "" {
-						initialMessages = append(initialMessages, "BROCODE:\n"+text)
-					} else if len(msg.ToolCalls) > 0 {
-						// Tool-call-only turn: show a compact summary, not raw JSON.
-						initialMessages = append(initialMessages, "BROCODE: 🔧 "+toolCallSummary(msg.ToolCalls))
-					}
-				case "tool_result":
-					// Restore the tool result paired with its assistant tool call
-					// so providers that require the pairing don't break.
-					ctxMgr.ImportToolResult(msg.ToolCallID, text)
-				}
-				restored++
-			}
-			if skipped > 0 {
-				initialMessages = append(initialMessages, fmt.Sprintf("💾 Restored the %d most recent events; %d older events omitted to stay within the context window.", restored, skipped))
-			}
+			// RestoreSession replays only the newest events that fit ~80% of the
+			// context window (a session can accumulate thousands of tool-result
+			// events), re-pairs tool results with their calls, and renders
+			// tool-call-only turns as compact summaries instead of raw JSON.
+			initialMessages = append(initialMessages, bcontext.RestoreSession(ctxMgr, events)...)
 		} else {
 			initialMessages = append(initialMessages, fmt.Sprintf("⚡ Continued session %s.", sessionID))
 		}
@@ -241,31 +198,15 @@ func main() {
 		fmt.Printf("Error running BroCode TUI: %v\n", err)
 		os.Exit(1)
 	}
-}
 
-// isEngineReminder reports whether a persisted user_msg was injected by the
-// engine (loop guard, tool budget, verification failure) rather than typed by
-// the user. Such messages must be restored for the model's context but should
-// not be displayed as if the user had said them.
-func isEngineReminder(text string) bool {
-	for _, prefix := range []string{
-		"⚠️ You have been calling tools",
-		"⚠️ [LOOP GUARD]",
-		"Level 1 verification check failed:",
-	} {
-		if strings.HasPrefix(text, prefix) {
-			return true
+	// Session-end memory capture: short sessions that never hit the
+	// compaction threshold still leave their goal + touched files in project
+	// memory. Deterministic and non-blocking (no LLM call) — it runs after
+	// the TUI exits and can never hold the user's quit hostage.
+	if st != nil {
+		if events, err := st.GetSessionEvents(sessionID); err == nil && len(events) > 0 {
+			mem := memory.NewStore(cwd)
+			_ = mem.CaptureSession(sessionID, events)
 		}
 	}
-	return false
-}
-
-// toolCallSummary renders a compact, human-readable list of tool calls for
-// resumed history instead of dumping the raw arguments JSON.
-func toolCallSummary(calls []provider.ToolCall) string {
-	names := make([]string, 0, len(calls))
-	for _, tc := range calls {
-		names = append(names, tc.Name)
-	}
-	return strings.Join(names, " → ")
 }

@@ -52,6 +52,12 @@ func (l *Loader) scanDir(dirPath string) {
 	}
 }
 
+// All returns every loaded skill (used to inject the full skill list into
+// the system prompt so the model knows what it can load).
+func (l *Loader) All() []Skill {
+	return l.skills
+}
+
 // Match performs fuzzy matching against skill name and description.
 func (l *Loader) Match(query string) []Skill {
 	var matches []Skill

@@ -147,6 +147,13 @@ func TestBuildProjectContext(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "crm-widget"), 0755)
 	os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0644)
 	os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("# Rules\n- never use yarn\n"), 0644)
+	// Provider-specific instruction files must NOT be injected.
+	os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("Claude-only rules"), 0644)
+	os.WriteFile(filepath.Join(dir, "GEMINI.md"), []byte("Gemini-only rules"), 0644)
+	os.WriteFile(filepath.Join(dir, ".cursorrules"), []byte("Cursor rules"), 0644)
+	os.WriteFile(filepath.Join(dir, "brocode.md"), []byte("Legacy brocode.md"), 0644)
+	os.MkdirAll(filepath.Join(dir, ".brocode"), 0755)
+	os.WriteFile(filepath.Join(dir, ".brocode", "CLAUDE.md"), []byte("BroCode CLAUDE.md"), 0644)
 
 	pc := BuildProjectContext(dir)
 	if !strings.Contains(pc.Tree, "crm_sales_backend") {
@@ -157,6 +164,11 @@ func TestBuildProjectContext(t *testing.T) {
 	}
 	if !strings.Contains(pc.Docs, "AGENTS.md") || !strings.Contains(pc.Docs, "never use yarn") {
 		t.Errorf("docs missing AGENTS.md content: %q", pc.Docs)
+	}
+	for _, banned := range []string{"CLAUDE.md", "GEMINI.md", ".cursorrules", "Claude-only", "Gemini-only", "Cursor rules", "Legacy brocode.md", "BroCode CLAUDE.md"} {
+		if strings.Contains(pc.Docs, banned) {
+			t.Errorf("docs must NOT contain %q (provider-specific config leaked):\n%s", banned, pc.Docs)
+		}
 	}
 	if !strings.Contains(pc.String(), "KEY FILES: package.json") {
 		t.Errorf("String missing KEY FILES: %q", pc.String())

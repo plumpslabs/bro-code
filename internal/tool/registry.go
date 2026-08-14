@@ -18,6 +18,7 @@ import (
 	"github.com/hexops/gotextdiff"
 	"github.com/hexops/gotextdiff/myers"
 	"github.com/hexops/gotextdiff/span"
+	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
 )
 
@@ -56,6 +57,7 @@ func NewRegistry() *Registry {
 	r.Register(&ReviewChangesTool{})
 	r.Register(&CodeSymbolsTool{})
 	r.Register(&SearchCodeTool{})
+	r.Register(&MemoryTool{})
 	return r
 }
 
@@ -70,6 +72,14 @@ func (r *Registry) SetUserAskHandler(fn func(context.Context, []AskQuestion) ([]
 	r.askFunc = fn
 	if rc, ok := r.tools["review_changes"].(*ReviewChangesTool); ok {
 		rc.Ask = fn
+	}
+}
+
+// SetMemoryStore wires the cross-session project memory into the memory tool.
+// Nil leaves the tool reporting that memory is unavailable.
+func (r *Registry) SetMemoryStore(st *memory.Store) {
+	if mt, ok := r.tools["memory"].(*MemoryTool); ok {
+		mt.Store = st
 	}
 }
 
@@ -617,19 +627,12 @@ func isHeavyDir(name string) bool {
 
 // ---------------- Interactive User Questions ----------------
 
-// AskQuestion is a single interactive multiple-choice question presented to the user.
-type AskQuestion struct {
-	Question string   `json:"question"`
-	Options  []string `json:"options"`
-	Multi    bool     `json:"multi"`
-}
-
-// AskResult is the user's answer to one question.
-type AskResult struct {
-	Question string   `json:"question"`
-	Answers  []string `json:"answers"`
-	Custom   string   `json:"custom,omitempty"`
-}
+// AskQuestion and AskResult alias the provider types so the OpenCode CLI
+// adapter (which lives in provider) can present clarification questions
+// through the same interactive modal as the ask_user tool, without the
+// provider package importing tool (which would be an import cycle).
+type AskQuestion = provider.AskQuestion
+type AskResult = provider.AskResult
 
 // AskUserTool asks the user interactive multiple-choice questions. The Ask
 // handler is wired by the UI layer; without it (headless) the tool fails

@@ -3,12 +3,14 @@
 // MCP servers are spawned as stdio subprocesses (the standard convention used
 // by opencode, Claude, Cursor, etc.). Every tool a server exposes becomes a
 // native BroCode tool named `mcp__<server>__<tool>`, so the model can call it
-// exactly like any built-in tool. Config is read from the standard locations:
+// exactly like any built-in tool. Config is read from the standard locations,
+// highest priority first:
 //
-//	.mcp.json                  (project, standard MCP convention)
 //	.brocode/mcp.json          (project, BroCode-specific)
+//	.mcp.json                  (project, standard MCP convention)
 //	~/.config/brocode/mcp.json (global, BroCode-specific)
-//	~/.config/opencode/opencode.jsonc (the opencode "mcp" block)
+//	~/.config/opencode/opencode.jsonc (the opencode "mcp" block, fallback only;
+//	                                skipped when BROCODE_NO_OPENCODE=1)
 package mcp
 
 import (
@@ -204,18 +206,24 @@ type opencodeConfig struct {
 	} `json:"mcp"`
 }
 
-// LoadDefaults reads MCP servers from all standard locations, project config
-// overriding global config. It never errors — missing files simply contribute
-// nothing.
+// LoadDefaults reads MCP servers from all standard locations. Precedence
+// (highest wins): project BroCode → project .mcp.json → global BroCode →
+// opencode.jsonc. BroCode's own configs are authoritative; the opencode block
+// only contributes servers BroCode knows nothing about (and is skipped when
+// BROCODE_NO_OPENCODE=1 for fully standalone operation). It never errors —
+// missing files simply contribute nothing.
 func (m *Manager) LoadDefaults() {
-	// 1. Global BroCode config.
+	// 1. opencode.jsonc "mcp" block FIRST so BroCode's own configs below
+	// override it — BroCode is authoritative.
+	if provider.OpenCodeImportEnabled() {
+		m.loadOpenCodeConfig()
+	}
+	// 2. Global BroCode config.
 	m.loadFile(mcpGlobalPath())
-	// 2. Project .mcp.json (standard MCP convention).
+	// 3. Project .mcp.json (standard MCP convention).
 	m.loadFile(".mcp.json")
-	// 3. Project BroCode config.
+	// 4. Project BroCode config — highest priority.
 	m.loadFile(filepath.Join(".brocode", "mcp.json"))
-	// 4. opencode.jsonc "mcp" block.
-	m.loadOpenCodeConfig()
 }
 
 func mcpGlobalPath() string {

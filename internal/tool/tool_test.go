@@ -9,7 +9,49 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/plumpslabs/bro-code/internal/memory"
 )
+
+func TestMemoryToolRecallRetainList(t *testing.T) {
+	tmpDir := t.TempDir()
+	st := memory.NewStore(tmpDir)
+	mt := &MemoryTool{Store: st}
+
+	// retain a fact.
+	out, err := mt.Execute(context.Background(), `{"action":"retain","section":"Architecture","fact":"Auth flow: JWT via authMiddleware"}`)
+	if err != nil {
+		t.Fatalf("retain: %v", err)
+	}
+	if !strings.Contains(out, "Stored") {
+		t.Errorf("retain = %q, want confirmation", out)
+	}
+
+	// recall it.
+	out, err = mt.Execute(context.Background(), `{"action":"recall","query":"auth jwt"}`)
+	if err != nil {
+		t.Fatalf("recall: %v", err)
+	}
+	if !strings.Contains(out, "authMiddleware") {
+		t.Errorf("recall = %q, want fact in results", out)
+	}
+
+	// list shows it.
+	out, err = mt.Execute(context.Background(), `{"action":"list"}`)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(out, "authMiddleware") {
+		t.Errorf("list = %q, want fact listed", out)
+	}
+
+	// nil store reports unavailable.
+	mtNil := &MemoryTool{}
+	out, _ = mtNil.Execute(context.Background(), `{"action":"list"}`)
+	if !strings.Contains(out, "not available") {
+		t.Errorf("nil store = %q, want unavailable note", out)
+	}
+}
 
 func TestGrepNoMatchRunsOnce(t *testing.T) {
 	// A pattern with no matches must NOT re-run grep with -F (the old bug:

@@ -90,6 +90,17 @@ func (m *Manager) MaxWindow() int {
 	return m.maxWindow
 }
 
+// SetMaxWindow updates the context window capacity. Used when the active
+// model switches to one with a different declared context limit (from the
+// provider config's per-model limit block). Non-positive values are ignored.
+func (m *Manager) SetMaxWindow(max int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if max > 0 {
+		m.maxWindow = max
+	}
+}
+
 // Store returns connected SQLite store.
 func (m *Manager) Store() *store.Store {
 	return m.store
@@ -331,4 +342,93 @@ func ExtractEventContent(payloadJSON string) string {
 		return rawStr
 	}
 	return payloadJSON
+}
+
+// RestoreSession replays a session's stored events into memory WITHOUT
+// re-persisting them (so resume / /sessions switch never duplicates history).
+// It restores only the newest events that fit ~80% of the context window and
+// returns human-readable display lines for the UI log.
+//
+// Assistant turns keep their real structure (reasoning/content/tool_calls):
+// tool-call-only turns render as a compact summary instead of raw JSON, and
+// tool results are re-paired with their calls so providers that require the
+// tool_calls → result pairing don't break. Engine-injected reminders (loop
+// guard, tool budget, verification failures) are restored for the model but
+// displayed as ⚙️ system notes, not as if the user had typed them.
+func RestoreSession(m *Manager, events []store.Event) []string {
+	var display []string
+	skipped := 0
+	restored := 0
+	for _, ev := range events {
+		if m.TotalTokens() > int(float64(m.MaxWindow())*0.8) && restored > 0 {
+			skipped = len(events) - restored
+			break
+		}
+
+		// Parse the payload so assistant turns keep their real structure
+		// instead of being rendered as raw JSON — a tool-call-only turn has
+		// empty Content, and the ExtractEventContent fallback would dump the
+		// whole payload into the history and the LLM context.
+		var msg provider.Message
+		_ = json.Unmarshal([]byte(ev.PayloadJSON), &msg)
+
+		switch ev.Type {
+		case "user_msg":
+			text := msg.Content
+			if text == "" {
+				text = ExtractEventContent(ev.PayloadJSON)
+			}
+			m.ImportUserMessage(text)
+			if isEngineReminder(text) {
+				display = append(display, "⚙️ "+text)
+			} else {
+				display = append(display, "YOU:\n"+text)
+			}
+		case "assistant_msg":
+			m.ImportAssistantTurn(msg.Reasoning, msg.Content, msg.ToolCalls)
+			if strings.TrimSpace(msg.Content) != "" {
+				display = append(display, "BROCODE:\n"+msg.Content)
+			} else if len(msg.ToolCalls) > 0 {
+				display = append(display, "BROCODE: 🔧 "+toolCallSummary(msg.ToolCalls))
+			}
+		case "tool_result":
+			text := msg.Content
+			if text == "" {
+				text = ExtractEventContent(ev.PayloadJSON)
+			}
+			m.ImportToolResult(msg.ToolCallID, text)
+		}
+		restored++
+	}
+	if skipped > 0 {
+		display = append(display, fmt.Sprintf("💾 Restored the %d most recent events; %d older events omitted to stay within the context window.", restored, skipped))
+	}
+	return display
+}
+
+// isEngineReminder reports whether a persisted user_msg was injected by the
+// engine (loop guard, tool budget, verification failure) rather than typed by
+// the user. Such messages must be restored for the model's context but should
+// not be displayed as if the user had said them.
+func isEngineReminder(text string) bool {
+	for _, prefix := range []string{
+		"⚠️ You have been calling tools",
+		"⚠️ [LOOP GUARD]",
+		"Level 1 verification check failed:",
+	} {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// toolCallSummary renders a compact, human-readable list of tool calls for
+// resumed history instead of dumping the raw arguments JSON.
+func toolCallSummary(calls []provider.ToolCall) string {
+	names := make([]string, 0, len(calls))
+	for _, tc := range calls {
+		names = append(names, tc.Name)
+	}
+	return strings.Join(names, " → ")
 }

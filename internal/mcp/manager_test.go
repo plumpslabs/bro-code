@@ -90,6 +90,67 @@ func TestLoadOpenCodeConfigShape(t *testing.T) {
 	}
 }
 
+// TestLoadDefaultsBroCodeOverridesOpenCode proves BroCode's own MCP config is
+// authoritative: a server with the same name defined in opencode.jsonc is
+// overridden by ~/.config/brocode/mcp.json.
+func TestLoadDefaultsBroCodeOverridesOpenCode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	ocDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(ocDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	ocJSON := `{"mcp": {"git": {"type": "stdio", "command": ["opencode-cmd"]}}}`
+	if err := os.WriteFile(filepath.Join(ocDir, "opencode.jsonc"), []byte(ocJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	bcDir := filepath.Join(home, ".config", "brocode")
+	if err := os.MkdirAll(bcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	bcJSON := `{"mcpServers": {"git": {"command": "brocode-cmd"}}}`
+	if err := os.WriteFile(filepath.Join(bcDir, "mcp.json"), []byte(bcJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager()
+	m.LoadDefaults()
+	cfg, ok := m.configs["git"]
+	if !ok {
+		t.Fatalf("expected git server loaded, got %v", m.ServerNames())
+	}
+	if cfg.Command != "brocode-cmd" {
+		t.Errorf("BroCode MCP config must override opencode.jsonc, got command %q", cfg.Command)
+	}
+}
+
+// TestLoadDefaultsNoOpenCode proves BROCODE_NO_OPENCODE=1 skips the
+// opencode.jsonc MCP block entirely.
+func TestLoadDefaultsNoOpenCode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BROCODE_NO_OPENCODE", "1")
+
+	ocDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(ocDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	ocJSON := `{"mcp": {"git": {"type": "stdio", "command": ["npx", "-y", "pkg"]}}}`
+	if err := os.WriteFile(filepath.Join(ocDir, "opencode.jsonc"), []byte(ocJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager()
+	m.LoadDefaults()
+	for _, n := range m.ServerNames() {
+		if n == "git" {
+			t.Errorf("opencode MCP block must be skipped when BROCODE_NO_OPENCODE=1")
+		}
+	}
+}
+
 func TestStartDiscoversAndCallsTools(t *testing.T) {
 	m := NewManager()
 	m.SetClientFactory(newInProcessFactory(t, "echo_tool", "Echo a message back"))

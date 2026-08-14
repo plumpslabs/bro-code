@@ -1,8 +1,12 @@
 package context
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/store"
 )
 
 func TestTruncateToolOutput(t *testing.T) {
@@ -52,6 +56,108 @@ func TestContextManagerImportDoesNotDoubleCount(t *testing.T) {
 	// that total tokens grew (so the context window is respected on resume).
 	if mgr.TotalTokens() <= before {
 		t.Errorf("expected token count to grow after import, before=%d after=%d", before, mgr.TotalTokens())
+	}
+}
+
+// eventPayload marshals a provider.Message the same way AppendUserMessage /
+// AppendAssistantTurn persist events, so the test exercises the real format
+// that resume sees in the database.
+func eventPayload(msg provider.Message) string {
+	b, _ := json.Marshal(msg)
+	return string(b)
+}
+
+func TestRestoreSessionRendersToolCallsNotRawJSON(t *testing.T) {
+	mgr := NewManager("s", nil, 128000)
+	events := []store.Event{
+		{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: "halo"})},
+		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "grep", Arguments: `{"pattern": "inbox"}`},
+			{ID: "c2", Name: "read_file", Arguments: `{"path": "a.js"}`},
+		}})},
+		{Type: "tool_result", PayloadJSON: eventPayload(provider.Message{Role: "user", ToolCallID: "c1", Content: "line 1: inbox\n"})},
+		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", Content: "ini jawabannya"})},
+	}
+
+	display := RestoreSession(mgr, events)
+
+	// The tool-call-only turn must NOT leak raw JSON into the history.
+	var sawRawJSON bool
+	for _, line := range display {
+		if strings.Contains(line, `{"role":"assistant"`) || strings.Contains(line, `"tool_calls"`) {
+			sawRawJSON = true
+		}
+	}
+	if sawRawJSON {
+		t.Fatalf("raw JSON leaked into restored history: %v", display)
+	}
+
+	// The compact tool summary and the real answer are both present.
+	joined := strings.Join(display, "\n")
+	if !strings.Contains(joined, "grep → read_file") {
+		t.Errorf("expected compact tool summary, got: %v", display)
+	}
+	if !strings.Contains(joined, "ini jawabannya") {
+		t.Errorf("expected final answer in history, got: %v", display)
+	}
+
+	// Tool result must be re-paired with its call in the message list.
+	msgs := mgr.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 restored messages, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[1].Role != "assistant" || len(msgs[1].ToolCalls) != 2 {
+		t.Errorf("assistant tool-call turn not restored with calls: %+v", msgs[1])
+	}
+	if msgs[2].Role != "user" || msgs[2].ToolCallID != "c1" || !strings.Contains(msgs[2].Content, "inbox") {
+		t.Errorf("tool result not re-paired with call c1: %+v", msgs[2])
+	}
+}
+
+func TestRestoreSessionEngineReminderAndCap(t *testing.T) {
+	// Tiny window: only the newest events that fit ~80% survive.
+	mgr := NewManager("s", nil, 100)
+	var events []store.Event
+	for i := 0; i < 30; i++ {
+		events = append(events, store.Event{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: strings.Repeat("a", 200)})})
+	}
+
+	display := RestoreSession(mgr, events)
+	joined := strings.Join(display, "\n")
+	if !strings.Contains(joined, "older events omitted") {
+		t.Errorf("expected omitted-events note when context window is full, got: %v", joined)
+	}
+	if len(mgr.Messages()) >= 30 {
+		t.Errorf("expected some events dropped to fit window, restored %d", len(mgr.Messages()))
+	}
+
+	// Engine-injected reminders restore for the model but display as ⚙️ notes.
+	mgr2 := NewManager("s2", nil, 128000)
+	events2 := []store.Event{
+		{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: "⚠️ You have been calling tools for many rounds without answering. STOP calling tools"})},
+	}
+	display2 := RestoreSession(mgr2, events2)
+	if !strings.HasPrefix(strings.Join(display2, "\n"), "⚙️ ") {
+		t.Errorf("engine reminder should display as system note, got: %v", display2)
+	}
+	if len(mgr2.Messages()) != 1 || mgr2.Messages()[0].Content == "" {
+		t.Errorf("reminder must still be restored to model context: %+v", mgr2.Messages())
+	}
+}
+
+func TestSetMaxWindow(t *testing.T) {
+	mgr := NewManager("s", nil, 128000)
+	if mgr.MaxWindow() != 128000 {
+		t.Fatalf("expected default window 128000, got %d", mgr.MaxWindow())
+	}
+	mgr.SetMaxWindow(1048576)
+	if mgr.MaxWindow() != 1048576 {
+		t.Errorf("expected updated window 1048576, got %d", mgr.MaxWindow())
+	}
+	// Non-positive values are ignored.
+	mgr.SetMaxWindow(0)
+	if mgr.MaxWindow() != 1048576 {
+		t.Errorf("expected window unchanged after SetMaxWindow(0), got %d", mgr.MaxWindow())
 	}
 }
 

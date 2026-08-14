@@ -41,6 +41,259 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+// TestLoadConfigBroCodeOverridesOpenCode proves BroCode's own config is
+// authoritative: the same provider ID defined in opencode.jsonc is overridden
+// by ~/.config/brocode/config.json (opencode is only a fallback source).
+func TestLoadConfigBroCodeOverridesOpenCode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	ocDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(ocDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	ocJSON := `{
+		"provider": {
+			"9router": {
+				"options": {"baseURL": "https://from-opencode.example/v1"},
+				"models": {"m1": {"name": "M1"}}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(ocDir, "opencode.jsonc"), []byte(ocJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	bcDir := filepath.Join(home, ".config", "brocode")
+	if err := os.MkdirAll(bcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	bcJSON := `{
+		"providers": {
+			"9router": {"protocol": "openai-compatible", "base_url": "https://from-brocode.example/v1"}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(bcDir, "config.json"), []byte(bcJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := LoadConfig()
+	p, ok := cfg.Providers["9router"]
+	if !ok {
+		t.Fatalf("expected 9router provider loaded, got %+v", cfg.Providers)
+	}
+	if p.BaseURL != "https://from-brocode.example/v1" {
+		t.Errorf("BroCode config must override opencode.jsonc, got baseURL %q", p.BaseURL)
+	}
+}
+
+// TestOpenCodeImportDisabled proves BROCODE_NO_OPENCODE=1 makes BroCode fully
+// standalone: no opencode.jsonc provider import and no opencode provider
+// auto-detection.
+// TestLoadConfigJSONCHandEdited proves BroCode's own hand-editable config.jsonc
+// (comments allowed, BroCode schema — NOT opencode's format) is read and
+// overrides the wizard-written config.json.
+func TestLoadConfigJSONCHandEdited(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bcDir := filepath.Join(home, ".config", "brocode")
+	if err := os.MkdirAll(bcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Machine-written config.json (wizard format).
+	jsonCfg := `{
+		"providers": {
+			"rs": {"protocol": "openai-compatible", "base_url": "https://from-json.example/v1"}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(bcDir, "config.json"), []byte(jsonCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hand-edited config.jsonc (comments allowed, BroCode schema) overrides it.
+	jsoncCfg := `// hand-edited provider
+{
+	"default_provider": "rs",
+	"providers": {
+		"rs": {
+			"protocol": "openai-compatible",
+			"base_url": "https://from-jsonc.example/v1"
+		}
+	}
+}`
+	if err := os.WriteFile(filepath.Join(bcDir, "config.jsonc"), []byte(jsoncCfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := LoadConfig()
+	if cfg.DefaultProvider != "rs" {
+		t.Errorf("expected default_provider from jsonc, got %q", cfg.DefaultProvider)
+	}
+	p, ok := cfg.Providers["rs"]
+	if !ok {
+		t.Fatalf("expected rs provider loaded, got %+v", cfg.Providers)
+	}
+	if p.BaseURL != "https://from-jsonc.example/v1" {
+		t.Errorf("config.jsonc must override config.json, got baseURL %q", p.BaseURL)
+	}
+}
+
+// TestOpenCodeImportSkipsDuplicateBaseURL proves an opencode.jsonc provider is
+// NOT imported when BroCode already configures a provider pointing at the same
+// base URL (e.g. lalarasa from opencode vs kahuna in BroCode config — both
+// target the same gateway, so only the BroCode one stays).
+func TestOpenCodeImportSkipsDuplicateBaseURL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// BroCode global config: provider "kahuna" → 9router URL.
+	bcDir := filepath.Join(home, ".config", "brocode")
+	if err := os.MkdirAll(bcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	bcJSON := `{
+		"providers": {
+			"kahuna": {
+				"protocol": "openai-compatible",
+				"base_url": "https://9router.example/v1",
+				"api_key": "sk-test",
+				"models": ["oc/deepseek-v4-flash-free"]
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(bcDir, "config.json"), []byte(bcJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// opencode.jsonc: provider "lalarasa" → SAME base URL (duplicate).
+	ocDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(ocDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	ocJSON := `{
+		"provider": {
+			"lalarasa": {
+				"options": {"baseURL": "https://9router.example/v1"},
+				"models": {"oc/deepseek-v4-flash-free": {"name": "M"}}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(ocDir, "opencode.jsonc"), []byte(ocJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := LoadConfig()
+	if _, ok := cfg.Providers["lalarasa"]; ok {
+		t.Errorf("duplicate opencode provider must NOT be imported when BroCode already has the same base URL")
+	}
+	if _, ok := cfg.Providers["kahuna"]; !ok {
+		t.Errorf("expected BroCode-configured kahuna provider to remain")
+	}
+
+	// A DIFFERENT opencode provider (different base URL) is still imported.
+	ocJSON2 := `{
+		"provider": {
+			"other-gw": {
+				"options": {"baseURL": "https://other.example/v1"},
+				"models": {"m1": {"name": "M1"}}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(ocDir, "opencode.jsonc"), []byte(ocJSON2), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg2 := LoadConfig()
+	if _, ok := cfg2.Providers["other-gw"]; !ok {
+		t.Errorf("expected non-duplicate opencode provider to be imported")
+	}
+}
+
+// TestPersistedDuplicatePruned proves a duplicate provider that was persisted
+// into config.json by an older build (keyless lalarasa next to keyed kahuna,
+// same base URL) is pruned on load AND on save — no manual edit needed.
+func TestPersistedDuplicatePruned(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bcDir := filepath.Join(home, ".config", "brocode")
+	if err := os.MkdirAll(bcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The exact shape the user reported: keyed kahuna + keyless lalarasa,
+	// both pointing at the same base URL.
+	cfgJSON := `{
+		"default_provider": "kahuna",
+		"default_model": "oc/deepseek-v4-flash-free",
+		"providers": {
+			"kahuna": {
+				"protocol": "openai-compatible",
+				"base_url": "https://9router.example/v1",
+				"api_key": "sk-test",
+				"models": ["oc/deepseek-v4-flash-free"]
+			},
+			"lalarasa": {
+				"protocol": "openai-compatible",
+				"base_url": "https://9router.example/v1",
+				"models": ["oc/deepseek-v4-flash-free"]
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(bcDir, "config.json"), []byte(cfgJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// On load: the keyless duplicate is gone, the keyed provider stays.
+	cfg := LoadConfig()
+	if _, ok := cfg.Providers["lalarasa"]; ok {
+		t.Errorf("persisted duplicate lalarasa must be pruned on load")
+	}
+	if _, ok := cfg.Providers["kahuna"]; !ok {
+		t.Errorf("keyed kahuna must survive dedupe")
+	}
+
+	// On save: the written file no longer contains the duplicate either.
+	if err := SaveGlobalConfig(cfg); err != nil {
+		t.Fatalf("SaveGlobalConfig: %v", err)
+	}
+	saved, err := os.ReadFile(filepath.Join(bcDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(saved), "lalarasa") {
+		t.Errorf("duplicate must not be re-persisted on save: %s", string(saved))
+	}
+	if !strings.Contains(string(saved), "kahuna") {
+		t.Errorf("kahuna must be preserved on save: %s", string(saved))
+	}
+}
+
+func TestOpenCodeImportDisabled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ocDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(ocDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	ocJSON := `{"provider": {"9router": {"options": {"baseURL": "https://x.example/v1"}}}}`
+	if err := os.WriteFile(filepath.Join(ocDir, "opencode.jsonc"), []byte(ocJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BROCODE_NO_OPENCODE", "1")
+
+	cfg := LoadConfig()
+	if _, ok := cfg.Providers["9router"]; ok {
+		t.Errorf("opencode.jsonc providers must NOT be imported when BROCODE_NO_OPENCODE=1")
+	}
+
+	for _, d := range AutoDetect(cfg) {
+		if d.Info.ID == "opencode" {
+			t.Errorf("opencode provider must not be auto-detected when BROCODE_NO_OPENCODE=1")
+		}
+	}
+}
+
 func TestOpenCodeCompleteWithProgress(t *testing.T) {
 	tmp := t.TempDir()
 	fakeCLI := filepath.Join(tmp, "opencode")
@@ -154,6 +407,32 @@ func TestStripOpenCodeHeader(t *testing.T) {
 	}
 }
 
+func TestStripJSONCommentsPreservesURLs(t *testing.T) {
+	in := `// header comment
+{
+  "providers": {
+    "rs": {
+      "base_url": "https://9router.example/v1", /* keep */
+      "api_key": "sk-test"
+    }
+  }
+}`
+	out := stripJSONComments(in)
+	if !strings.Contains(out, "https://9router.example/v1") {
+		t.Errorf("URL truncated by comment stripper: %q", out)
+	}
+	if strings.Contains(out, "header comment") || strings.Contains(out, "/*") || strings.Contains(out, "*/") {
+		t.Errorf("comments not fully stripped: %q", out)
+	}
+	var cfg AppConfig
+	if err := json.Unmarshal([]byte(out), &cfg); err != nil {
+		t.Errorf("stripped jsonc should parse as JSON: %v (%q)", err, out)
+	}
+	if cfg.Providers["rs"].BaseURL != "https://9router.example/v1" {
+		t.Errorf("expected base URL preserved, got %q", cfg.Providers["rs"].BaseURL)
+	}
+}
+
 func TestParseModelJSONObject(t *testing.T) {
 	input := `{
 		"oc/deepseek-v4-flash-free": {"name": "DeepSeek v4 Flash Free (OC) 1M", "limit": {"context": 1048576, "output": 32768}},
@@ -179,6 +458,38 @@ func TestParseModelJSONObject(t *testing.T) {
 	}
 }
 
+func TestParseModelJSONBareBodyNoBraces(t *testing.T) {
+	// User pasted the models block from opencode.jsonc WITHOUT the wrapping
+	// braces — the parser must tolerate it.
+	input := `"oc/deepseek-v4-flash-free": {
+		"name": "DeepSeek v4 Flash Free (OC) 1M",
+		"limit": {"context": 1048576, "output": 32768}
+	},
+	"ps/poolside/laguna-s-2.1": {
+		"name": "Laguna S 2.1 (PS) 1M",
+		"limit": {"context": 1048576, "output": 32768}
+	}`
+
+	ids, detail, err := ParseModelJSON(input)
+	if err != nil {
+		t.Fatalf("bare body without braces should parse, got error: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Errorf("expected 2 model IDs, got %v", ids)
+	}
+	if detail["oc/deepseek-v4-flash-free"].Limits.Context != 1048576 {
+		t.Errorf("expected context limit parsed, got %+v", detail["oc/deepseek-v4-flash-free"])
+	}
+	if detail["ps/poolside/laguna-s-2.1"].Name != "Laguna S 2.1 (PS) 1M" {
+		t.Errorf("expected name parsed, got %q", detail["ps/poolside/laguna-s-2.1"].Name)
+	}
+
+	// Truly invalid input must still fail (not be silently wrapped).
+	if _, _, err := ParseModelJSON("not json at all"); err == nil {
+		t.Errorf("expected error for garbage input")
+	}
+}
+
 func TestParseModelJSONArray(t *testing.T) {
 	ids, detail, err := ParseModelJSON(`["model-a", "model-b", "model-c"]`)
 	if err != nil {
@@ -201,12 +512,145 @@ func TestParseModelJSONEmptyAndInvalid(t *testing.T) {
 	}
 }
 
+func TestParseOpenCodeModelList(t *testing.T) {
+	lines := []string{
+		"",
+		"big-pickle",
+		"deepseek-v4-flash-free",
+		"hy3-free",
+		"lalarasa/oc/deepseek-v4-flash-free", // duplicate of the plain entry
+		"lalarasa/ps/poolside/laguna-s-2.1",  // duplicate (poolside accessible separately)
+		"laguna-s-2.1-free",
+		"opencode/mimo-v2.5-free", // opencode/ prefix stripped
+	}
+
+	models := parseOpenCodeModelList(lines)
+
+	// lalarasa/ aliases must NOT appear — they duplicate the plain models.
+	for _, m := range models {
+		if strings.HasPrefix(m, "lalarasa/") {
+			t.Errorf("lalarasa alias leaked into model list: %q", m)
+		}
+	}
+
+	want := map[string]bool{
+		"big-pickle":             true,
+		"deepseek-v4-flash-free": true,
+		"hy3-free":               true,
+		"laguna-s-2.1-free":      true,
+		"mimo-v2.5-free":         true,
+	}
+	if len(models) != len(want) {
+		t.Fatalf("expected %d models, got %v", len(want), models)
+	}
+	for _, m := range models {
+		if !want[m] {
+			t.Errorf("unexpected model in list: %q (all: %v)", m, models)
+		}
+	}
+}
+
+func TestMergeModelLists(t *testing.T) {
+	configured := []string{"ps/poolside/laguna-s-2.1", "ps/poolside/laguna-xs-2.1", "oc/deepseek-v4-flash-free"}
+	// Live fetch returns the same models under shorter IDs, and one extra.
+	fetched := []string{"ps/laguna-s-2.1", "ps/laguna-xs-2.1", "extra-model"}
+
+	merged := mergeModelLists(configured, fetched)
+
+	// All configured models survive (this is the user's reported bug).
+	for _, want := range configured {
+		found := false
+		for _, m := range merged {
+			if m == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("configured model %q lost in merge: %v", want, merged)
+		}
+	}
+
+	// Fetched models that duplicate a configured suffix are NOT appended twice.
+	suffixCount := map[string]int{}
+	for _, m := range merged {
+		suffixCount[lastSegment(m)]++
+	}
+	for seg, n := range suffixCount {
+		if n > 1 {
+			t.Errorf("model suffix %q listed %d times: %v", seg, n, merged)
+		}
+	}
+
+	// Fetched-only models ARE appended.
+	if !containsStr(merged, "extra-model") {
+		t.Errorf("fetched-only model should be appended: %v", merged)
+	}
+}
+
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func TestContextWindowFor(t *testing.T) {
+	cfg := AppConfig{
+		Providers: map[string]CustomProviderConfig{
+			"my-gateway": {
+				BaseURL: "https://api.my-gateway.example/v1",
+				ModelMap: map[string]CustomModel{
+					"big-model": {Limits: ModelLimits{Context: 1048576, Output: 32768}},
+				},
+			},
+		},
+	}
+
+	if got := ContextWindowFor(cfg, "my-gateway", "big-model"); got != 1048576 {
+		t.Errorf("expected 1048576 window, got %d", got)
+	}
+	if got := ContextWindowFor(cfg, "my-gateway", "unknown-model"); got != 0 {
+		t.Errorf("expected 0 for unknown model, got %d", got)
+	}
+	if got := ContextWindowFor(cfg, "unknown-provider", "big-model"); got != 0 {
+		t.Errorf("expected 0 for unknown provider, got %d", got)
+	}
+	if got := ContextWindowFor(AppConfig{}, "my-gateway", "big-model"); got != 0 {
+		t.Errorf("expected 0 for empty config, got %d", got)
+	}
+}
+
+func TestFormatTokens(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "0"},
+		{512, "512"},
+		{999, "999"},
+		{1000, "1.0k"},
+		{123443, "123.4k"},
+		{128000, "128.0k"},
+		{200000, "200.0k"},
+		{262144, "262.1k"},
+		{1048576, "1.0M"},
+	}
+	for _, c := range cases {
+		if got := FormatTokens(c.n); got != c.want {
+			t.Errorf("FormatTokens(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
 func TestCustomProviderConfigRoundTrip(t *testing.T) {
 	cfg := AppConfig{
 		Providers: map[string]CustomProviderConfig{
-			"9router": {
+			"my-gateway": {
 				Protocol: "openai-compatible",
-				BaseURL:  "https://9router.rosyidrid.com/v1",
+				BaseURL:  "https://api.my-gateway.example/v1",
 				APIKey:   "sk-test",
 				Models:   []string{"oc/deepseek-v4-flash-free", "ps/poolside/laguna-s-2.1"},
 				ModelMap: map[string]CustomModel{
@@ -229,11 +673,11 @@ func TestCustomProviderConfigRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
 
-	p, ok := out.Providers["9router"]
+	p, ok := out.Providers["my-gateway"]
 	if !ok {
-		t.Fatalf("expected provider 9router in round-tripped config")
+		t.Fatalf("expected provider my-gateway in round-tripped config")
 	}
-	if p.BaseURL != "https://9router.rosyidrid.com/v1" || len(p.Models) != 2 {
+	if p.BaseURL != "https://api.my-gateway.example/v1" || len(p.Models) != 2 {
 		t.Errorf("unexpected round-tripped provider: %+v", p)
 	}
 	if p.ModelMap["oc/deepseek-v4-flash-free"].Limits.Context != 1048576 {

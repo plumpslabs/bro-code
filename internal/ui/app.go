@@ -24,8 +24,10 @@ import (
 	"github.com/plumpslabs/bro-code/internal/loop"
 	"github.com/plumpslabs/bro-code/internal/lsp"
 	"github.com/plumpslabs/bro-code/internal/mcp"
+	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/search"
+	"github.com/plumpslabs/bro-code/internal/skill"
 	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/subagent"
 	"github.com/plumpslabs/bro-code/internal/tool"
@@ -140,6 +142,16 @@ type Model struct {
 	// findings the engine drains into the model's context each loop step.
 	scoutMgr *subagent.ScoutManager
 
+	// globalIndex is the persistent codebase-wide symbol + reference index
+	// (built once per session) that powers the code_locate tool — repo-wide
+	// "where is X and who uses it" without LSP spawns or full-file reads.
+	globalIndex *search.GlobalIndex
+
+	// memStore is the cross-session project memory (warm start + memory tool
+	// + auto-extract on compaction). Built once per session, persisted to
+	// .brocode/memory.md.
+	memStore *memory.Store
+
 	// Cancelation function for active LLM turn / tool execution
 	cancelTurn context.CancelFunc
 
@@ -225,6 +237,11 @@ type Model struct {
 	askCustomQ     int // question index with custom input open, -1 = none
 	askCustomInput textinput.Model
 	askViewport    viewport.Model
+
+	// mcpSummary is a compact one-liner of connected MCP servers injected into
+	// OpenCode CLI prompts, so the CLI model answers MCP questions directly
+	// from context instead of exploring config files with bash.
+	mcpSummary string
 }
 
 type turnResultMsg struct {
@@ -285,15 +302,15 @@ func NewApp(
 	cti.Prompt = ""
 
 	cni := textinput.New()
-	cni.Placeholder = "e.g. 9router, my-gateway, local-ai..."
+	cni.Placeholder = "e.g. my-gateway, local-ai..."
 	cni.Prompt = ""
 
 	cbi := textinput.New()
-	cbi.Placeholder = "e.g. https://9router.rosyidrid.com/v1"
+	cbi.Placeholder = "e.g. https://api.my-gateway.example/v1"
 	cbi.Prompt = ""
 
 	cmi := textarea.New()
-	cmi.Placeholder = "Optional: JSON models block, e.g.\n{\"model-a\":{\"name\":\"Model A\",\"limit\":{\"context\":1048576,\"output\":32768}}}\n\nOr a plain JSON array: [\"model-a\", \"model-b\"]"
+	cmi.Placeholder = "Optional: JSON models block, e.g.\n{\"model-a\":{\"name\":\"Model A\",\"limit\":{\"context\":1048576,\"output\":32768}}}\n(outer braces optional — a bare key:value list also works)\n\nOr a plain JSON array: [\"model-a\", \"model-b\"]"
 	cmi.Prompt = ""
 	cmi.CharLimit = 0
 	cmi.ShowLineNumbers = false
@@ -322,6 +339,16 @@ func NewApp(
 	}
 	// Gated bash commands reuse the same interactive modal for approval.
 	tools.SetUserAskHandler(brk.Ask)
+	// The OpenCode CLI adapter runs its own agent loop, so its model can't call
+	// the ask_user tool — clarification questions come back as text instead.
+	// Wire the same interactive modal to that path: structured [Q]/[O] blocks
+	// in the CLI output are parsed and shown as the selection modal. Also feed
+	// it the connected MCP server names so MCP questions get answered from
+	// context instead of filesystem exploration.
+	if oa, ok := adapter.(*provider.OpenCodeAdapter); ok {
+		oa.AskUser = brk.Ask
+		oa.MCPStatus = summarizeMCP(mcpMgr)
+	}
 
 	msgs := []string{"⚡ BroCode engine active. Type a prompt or /help for commands."}
 	if len(initialMsgs) > 0 {
@@ -352,10 +379,29 @@ func NewApp(
 		askCustomInput:      aci, logViewport: viewport.New(),
 		askViewport:      viewport.New(),
 		sessionsViewport: viewport.New(),
+		mcpSummary:       summarizeMCP(mcpMgr),
 	}
+
+	// Persistent codebase index + checkpoint tool: built/registered once per
+	// session on the shared registry (engine rebuilds reuse both).
+	cwd, _ := os.Getwd()
+	m.globalIndex = search.BuildGlobalIndex(cwd)
+	m.tools.Register(&tool.CodeLocateTool{Index: m.globalIndex})
+	m.tools.Register(&tool.CheckpointTool{})
+
 	m.modelOptions = provider.DiscoverModels(cfg)
 	m.rebuildEngine()
 	return m
+}
+
+// contextWindow returns the context window for the active model — from its
+// declared limit in the provider config (the /connect wizard's models block)
+// — or the 128k default when the model doesn't declare one.
+func (m *Model) contextWindow() int {
+	if w := provider.ContextWindowFor(m.cfg, m.activeProvider.Info.ID, m.activeModel); w > 0 {
+		return w
+	}
+	return 128000
 }
 
 func (m *Model) SetProgram(p *tea.Program) {
@@ -382,6 +428,13 @@ func (m *Model) buildFallbacks() []loop.Fallback {
 		default:
 			a = provider.NewOpenAIAdapter(d.Info.DefaultBaseURL, d.APIKey)
 		}
+		// Fallback opencode adapters surface clarification questions through the
+		// same interactive modal as the primary adapter, and carry the same MCP
+		// summary so fallback runs answer MCP questions from context too.
+		if oa, ok := a.(*provider.OpenCodeAdapter); ok && m.ask != nil {
+			oa.AskUser = m.ask.Ask
+			oa.MCPStatus = m.mcpSummary
+		}
 		model := ""
 		if len(d.Info.DefaultModels) > 0 {
 			model = d.Info.DefaultModels[0]
@@ -407,15 +460,59 @@ func (m *Model) rebuildEngine() {
 		m.projectCtx = search.BuildProjectContext(cwd)
 	}
 	m.engine.SetProjectContext(m.projectCtx.String())
+	// Available skills (.agents/skills, .brocode/skills, global) are listed in
+	// the system prompt so the model knows what it can load and use — the
+	// general, tool-agnostic standard (never .opencode/ config in the repo).
+	cwd, _ := os.Getwd()
+	m.engine.SetSkills(renderSkills(cwd))
+	// Cross-session project memory: built once, then wired into the engine
+	// (warm start + auto-extract on compaction) and the memory tool.
+	if m.memStore == nil {
+		m.memStore = memory.NewStore(cwd)
+	}
+	m.engine.SetMemoryStore(m.memStore)
+	m.tools.SetMemoryStore(m.memStore)
+	// Native type-error review after edits: wired to the LSP manager so
+	// edited files get real diagnostics (not just regex) before done.
+	m.engine.SetDiagnosticsChecker(func(path string) string {
+		if m.lspMgr == nil {
+			return ""
+		}
+		out, err := m.lspMgr.Diagnostics(context.Background(), path)
+		if err != nil {
+			return ""
+		}
+		return out
+	})
 	for _, fb := range m.buildFallbacks() {
 		m.engine.AddFallback(fb)
 	}
 	// User-defined lifecycle hooks (.brocode/hooks.json) fire at turn
 	// start/end/error and around tool calls. Loaded lazily on first engine
 	// build; engine is rebuilt on model switches but hooks are cheap to reload.
-	cwd, _ := os.Getwd()
 	m.engine.SetHooks(hooks.Load(cwd))
 	m.engine.SetScoutManager(m.scoutMgr)
+}
+
+// renderSkills builds the AVAILABLE SKILLS block for the system prompt from
+// the general tool-agnostic skill locations (.agents/skills, .brocode/skills,
+// and the global ~/.config/brocode/skills). It never reads .opencode/ from the
+// repo — skills are the agnostic standard, opencode config is not.
+func renderSkills(workspaceDir string) string {
+	loader := skill.NewLoader(workspaceDir)
+	skills := loader.All()
+	if len(skills) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, s := range skills {
+		if s.Description != "" {
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", s.Name, s.Description))
+		} else {
+			sb.WriteString(fmt.Sprintf("- %s\n", s.Name))
+		}
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func (m Model) Init() tea.Cmd {
@@ -812,7 +909,21 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.messages = append(m.messages, "📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen")
+		m.messages = append(m.messages, "📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/memory - Show cross-session project memory\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen")
+
+	case "/memory":
+		if m.memStore != nil {
+			s := m.memStore.List()
+			if m.memStore.Path() != "" {
+				s += "\n\n📍 " + m.memStore.Path()
+			}
+			m.messages = append(m.messages, s)
+		} else {
+			m.messages = append(m.messages, "⚠️ Project memory not initialized.")
+		}
+
+	case "/cost":
+		m.messages = append(m.messages, m.engine.CostSummary())
 
 	case "/lsp":
 		m.messages = append(m.messages, m.lspStatus())
@@ -857,7 +968,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		if st != nil {
 			_ = st.CreateSession(newSessID, cwd)
 		}
-		m.context = bcontext.NewManager(newSessID, st, 128000)
+		m.context = bcontext.NewManager(newSessID, st, m.contextWindow())
 		m.rebuildEngine()
 		m.messages = []string{fmt.Sprintf("✅ Started new session: %s", newSessID)}
 
@@ -930,7 +1041,25 @@ func (m *Model) lspStatus() string {
 		}
 	}
 	sb.WriteString("\nInstall e.g. gopls: go install golang.org/x/tools/gopls@latest\nInstall tsserver: npm i -g typescript-language-server typescript\nThe model falls back to grep/glob/read_file when a server is missing.")
-	return sb.String()
+	if m.globalIndex != nil {
+		sb.WriteString(fmt.Sprintf("\n🗺️ code_locate: %d files indexed (persistent per-session symbol + reference graph, no server needed)\n", m.globalIndex.FileCount()))
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// summarizeMCP returns a compact one-liner of connected MCP servers (names
+// only) injected into OpenCode CLI prompts so the model answers MCP questions
+// from context instead of exploring config files. Empty when nothing is
+// connected.
+func summarizeMCP(mgr *mcp.Manager) string {
+	if mgr == nil {
+		return ""
+	}
+	names := mgr.ServerNames()
+	if len(names) == 0 {
+		return ""
+	}
+	return "Connected MCP servers: " + strings.Join(names, ", ")
 }
 
 // mcpStatus renders a readable status of connected MCP servers and tools.
@@ -966,7 +1095,7 @@ func (m *Model) applySelectedSession() {
 	if m.sessionsSel >= 0 && m.sessionsSel < len(m.sessionList) {
 		targetSess := m.sessionList[m.sessionsSel]
 		st := m.context.Store()
-		m.context = bcontext.NewManager(targetSess.ID, st, 128000)
+		m.context = bcontext.NewManager(targetSess.ID, st, m.contextWindow())
 
 		// Load past events into context and message log
 		m.messages = []string{fmt.Sprintf("✅ Switched to session: %s", targetSess.ID)}
@@ -975,19 +1104,12 @@ func (m *Model) applySelectedSession() {
 			if removed, err := st.CleanupReplayDuplicates(targetSess.ID); err == nil && removed > 0 {
 				m.messages = append(m.messages, fmt.Sprintf("⚡ Purged %d duplicated history events", removed))
 			}
-			if events, err := st.GetSessionEvents(targetSess.ID); err == nil {
-				for _, ev := range events {
-					text := bcontext.ExtractEventContent(ev.PayloadJSON)
-					if ev.Type == "user_msg" {
-						// Import into memory without re-persisting, so switching
-						// sessions never duplicates history in the store.
-						m.context.ImportUserMessage(text)
-						m.messages = append(m.messages, "YOU:\n"+text)
-					} else if ev.Type == "assistant_msg" {
-						m.context.ImportAssistantTurn("", text, nil)
-						m.messages = append(m.messages, "BROCODE:\n"+text)
-					}
-				}
+			if events, err := st.GetSessionEvents(targetSess.ID); err == nil && len(events) > 0 {
+				// Same restore path as `brocode -c`: replay only the newest
+				// events that fit the context window, keep assistant tool calls
+				// paired with their results, and render tool-call-only turns as
+				// compact summaries instead of raw JSON.
+				m.messages = append(m.messages, bcontext.RestoreSession(m.context, events)...)
 			}
 		}
 		// Invalidate the rendered-log cache so the viewport re-renders with the
@@ -1256,7 +1378,13 @@ func (m *Model) switchProviderAndModel(pID, modelName string) {
 			} else {
 				m.adapter = provider.NewOpenAIAdapter(d.Info.DefaultBaseURL, d.APIKey)
 			}
+			if oa, ok := m.adapter.(*provider.OpenCodeAdapter); ok && m.ask != nil {
+				oa.AskUser = m.ask.Ask
+			}
 			m.rebuildEngine()
+			// The session's context window follows the newly selected model's
+			// declared limit (e.g. 1M models get a 1M window).
+			m.context.SetMaxWindow(m.contextWindow())
 			m.messages = append(m.messages, fmt.Sprintf("✅ Active model set & saved: %s/%s", pID, modelName))
 			return
 		}
@@ -1371,7 +1499,11 @@ func (m *Model) View() tea.View {
 		if len(sessID) > 16 {
 			sessID = sessID[:16] + "..."
 		}
-		tokensStr := fmt.Sprintf("Tokens: %d/%dk", m.context.TotalTokens(), m.context.MaxWindow()/1000)
+		tokensStr := fmt.Sprintf("Tokens: %s/%s", provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()))
+		// Live cost estimate in the footer (per-session, from adapter usage).
+		if cost := m.engine.SessionCostUSD(); cost > 0 {
+			tokensStr += fmt.Sprintf(" · Cost: $%.4f", cost)
+		}
 
 		// Live LSP indicator: count of available language servers (binary on
 		// PATH) with a colored badge — teal when at least one is usable.
@@ -1614,7 +1746,7 @@ func (m Model) renderConnectModal() string {
 			sb.WriteString(stepStyle.Render("Step 2/5 — Custom Provider Name") + "\n\n")
 			sb.WriteString(labelStyle.Render("Provider ID (lowercase, no spaces):") + "\n\n")
 			sb.WriteString("  " + m.connectNameInput.View() + "\n\n")
-			sb.WriteString(hintStyle.Render("[Type provider ID e.g. 9router · ENTER next · ESC back]"))
+			sb.WriteString(hintStyle.Render("[Type provider ID e.g. my-gateway · ENTER next · ESC back]"))
 		} else {
 			target := "Custom Provider"
 			if m.connectProviderSel < len(provider.BuiltinProviders) {
@@ -1636,7 +1768,7 @@ func (m Model) renderConnectModal() string {
 		sb.WriteString(stepStyle.Render("Step 4/5 — Base URL") + "\n\n")
 		sb.WriteString(labelStyle.Render("API Base URL (OpenAI-compatible /v1 endpoint):") + "\n\n")
 		sb.WriteString("  " + m.connectBaseURLInput.View() + "\n\n")
-		sb.WriteString(hintStyle.Render("[e.g. https://9router.rosyidrid.com/v1 · ENTER next · ESC back]"))
+		sb.WriteString(hintStyle.Render("[e.g. https://api.my-gateway.example/v1 · ENTER next · ESC back]"))
 
 	case 4:
 		sb.WriteString(stepStyle.Render("Step 5/5 — Models (optional)") + "\n\n")
@@ -1654,8 +1786,8 @@ func (m Model) renderConnectModal() string {
 func (m Model) renderDebugModal() string {
 	var sb strings.Builder
 	sb.WriteString("=== Active LLM Context (/debug-context) ===\n\n")
-	sb.WriteString(fmt.Sprintf("Session ID: %s\nTotal Tokens: %d / %d\nEvents Count: %d\n\n",
-		m.context.SessionID(), m.context.TotalTokens(), m.context.MaxWindow(), len(m.context.Messages())))
+	sb.WriteString(fmt.Sprintf("Session ID: %s\nTotal Tokens: %s / %s\nEvents Count: %d\n\n",
+		m.context.SessionID(), provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()), len(m.context.Messages())))
 
 	for i, msg := range m.context.Messages() {
 		sb.WriteString(fmt.Sprintf("[%d] %s:\n%s\n\n", i+1, msg.Role, msg.Content))

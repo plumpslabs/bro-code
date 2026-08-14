@@ -71,6 +71,44 @@ func (t *CodeSymbolsTool) Execute(ctx context.Context, argsJSON string) (string,
 	return CapOutput(out), nil
 }
 
+// CodeLocateTool answers repo-wide "where is X and who uses it" questions in
+// one call using the persistent session index (symbols + reference graph) — no
+// LSP spawn and no full-file reads. This is the repo-map equivalent that lets
+// the model navigate precisely before reading anything.
+type CodeLocateTool struct {
+	Index *search.GlobalIndex
+}
+
+func (t *CodeLocateTool) Name() string { return "code_locate" }
+func (t *CodeLocateTool) Description() string {
+	return "Locate a symbol across the whole codebase in one call: where it is defined (file:line, kind) AND which files reference or import it. Use BEFORE reading files to navigate precisely — e.g. code_locate(name: \"ConversationService\") returns its class/method locations plus every file that uses it. Indexed once per session, instant and free (no LSP server needed)."
+}
+func (t *CodeLocateTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string", "description": "Symbol name to locate (class, function, method, struct, variable)"},
+		},
+		"required": []string{"name"},
+	}
+}
+func (t *CodeLocateTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	if t.Index == nil {
+		return "", fmt.Errorf("code_locate index is not built (codebase index unavailable)")
+	}
+	name := strings.TrimSpace(args.Name)
+	if name == "" {
+		return "", fmt.Errorf("code_locate requires a symbol name")
+	}
+	return CapOutput(t.Index.FormatLookup(name)), nil
+}
+
 // SearchCodeTool performs a BM25 relevance search over the codebase — ranks
 // files by how relevant they are to a natural-language query, beyond regex
 // string matching.

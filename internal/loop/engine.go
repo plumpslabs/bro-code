@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/hooks"
+	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
@@ -54,14 +53,6 @@ type AgentTurn struct {
 	ToolCalls []provider.ToolCall `json:"tool_calls,omitempty"`
 	Answer    string              `json:"answer,omitempty"`
 }
-
-// SystemPrompt defines system directives and loop continuation rules (§2.3).
-const SystemPrompt = `You are BroCode, an autonomous AI coding assistant.
-Rules:
-1. Always reason through your plan BEFORE executing any tool or returning an answer.
-2. CONTINUATION RULE: After receiving tool execution results, DO NOT stop to ask the user unless technical ambiguity cannot be resolved by tools. Continue the tool loop until the goal is achieved.
-3. Use native function calling for tool execution.
-4. When you need a decision, preference, or confirmation that tools cannot determine (e.g. choosing a database or architecture, destructive operations, or unclear requirements), call the ask_user tool with 1-3 clear multiple-choice questions instead of guessing.`
 
 // Fallback is an alternative adapter+model pair tried when the primary
 // provider fails (automatic model routing).
@@ -120,6 +111,24 @@ type Engine struct {
 	// injected into the system prompt so the agent starts oriented instead of
 	// blind-grepping for file locations.
 	projectCtx string
+	// skillsCtx lists the available skills (from .agents/skills, .brocode/skills,
+	// and the global skills dir) so the model knows what it can load and use.
+	skillsCtx string
+	// mem is the cross-session project memory store. When set, a warm-start
+	// excerpt is injected into the system prompt and compaction summaries are
+	// auto-merged into memory so future sessions start warm.
+	mem *memory.Store
+	// editedFiles tracks the paths the model wrote or edited this turn so the
+	// convention checker can review them before the turn is declared done.
+	editedFiles []string
+	// diagFn optionally runs LSP diagnostics on a file (wired by the UI with
+	// the LSP manager). When set, edited files get a native type-error check
+	// after the convention review — no LLM needed.
+	diagFn func(path string) string
+	// usage accumulates token + cost across the session (per model), so the
+	// UI can show live cost tracking. Cost is estimated from the usage the
+	// adapters report and the per-model pricing table.
+	usage *UsageTracker
 	// hooks runs user-defined lifecycle commands (on-turn-start, on-tool-call,
 	// on-turn-end, ...) at the corresponding points in the loop. Optional.
 	hooks *hooks.Manager
@@ -154,6 +163,42 @@ func (e *Engine) SetProjectContext(pc string) {
 	e.projectCtx = pc
 }
 
+// SetSkills injects the list of available skills into every turn's system
+// prompt. Empty disables.
+func (e *Engine) SetSkills(sc string) {
+	e.skillsCtx = sc
+}
+
+// SetMemoryStore wires the cross-session project memory. When set, a
+// warm-start excerpt of past sessions' learnings is injected into the system
+// prompt, and compaction summaries are auto-merged back into memory.
+func (e *Engine) SetMemoryStore(st *memory.Store) {
+	e.mem = st
+}
+
+// SetDiagnosticsChecker wires a native type-error checker (the UI provides
+// one backed by the LSP manager). It runs on edited files after the
+// convention review, catching type errors without waiting for a full build.
+func (e *Engine) SetDiagnosticsChecker(fn func(path string) string) {
+	e.diagFn = fn
+}
+
+// CostSummary returns the session's estimated cost report (per model + total).
+func (e *Engine) CostSummary() string {
+	if e.usage == nil {
+		return "No LLM usage recorded yet this session."
+	}
+	return e.usage.Summary()
+}
+
+// SessionCostUSD returns the total estimated spend so far (for the footer).
+func (e *Engine) SessionCostUSD() float64 {
+	if e.usage == nil {
+		return 0
+	}
+	return e.usage.TotalCost()
+}
+
 // AddFallback registers a fallback provider+model tried on primary failure.
 func (e *Engine) AddFallback(fb Fallback) {
 	e.fallbacks = append(e.fallbacks, fb)
@@ -175,6 +220,7 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		mode:          "BUILDER",
 		maxIterations: 25,
 		state:         StateThinking,
+		usage:         NewUsageTracker(),
 	}
 }
 
@@ -299,22 +345,30 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		}
 
 		currentMode := e.Mode()
-		modeDesc := "BUILDER (Autonomous Coding Agent - dapat membaca, mengedit kode, dan menjalankan terminal)"
+		// Mode descriptions are language-agnostic on purpose: the model is
+		// told to answer in whatever language the user writes in, and must not
+		// be biased by hardcoded phrases or foreign product names.
+		modeDesc := "BUILDER (autonomous coding agent: can read, edit, and run terminal commands)"
 		if currentMode == "PLANNER" {
-			modeDesc = "PLANNER (Architecture & Strategy Agent - mode read-only untuk analisa dan perencanaan tanpa mengedit file)"
+			modeDesc = "PLANNER (architecture & strategy agent: read-only — analyze and plan without editing files)"
 		}
 
 		sysPrompt := fmt.Sprintf(`You are BroCode CLI, an autonomous AI coding assistant.
 %s`, e.projectContextBlock())
+		if e.skillsCtx != "" {
+			sysPrompt += "\n\nAVAILABLE SKILLS:\n" + e.skillsCtx + "\nWhen a task matches a skill, load its SKILL.md file (read_file) and follow its instructions."
+		}
+		if e.mem != nil {
+			if ws := e.mem.WarmStart(); ws != "" {
+				sysPrompt += "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + ws
+			}
+		}
 		sysPrompt += fmt.Sprintf(`
-CRITICAL OVERRIDE DIRECTIVE FOR MODE INQUIRIES:
-- YOUR ACTIVE BROCODE ENGINE MODE IS CURRENTLY: %s
-- IF THE USER ASKS "kamu di mode apa?", "sekarang kamu di mode apa?", "mode apa?", OR ANY QUESTION ABOUT MODE, YOU MUST RESPOND DIRECTLY WITH:
-  "Saya sedang di mode %s. Pada mode ini saya bertindak sebagai %s. Anda dapat beralih antara mode BUILDER dan PLANNER kapan saja dengan menekan Shift+Tab."
-- ABSOLUTELY DO NOT MENTION "observe", "enforce", OR "audit" UNLESS THE USER EXPLICITLY ASKS ABOUT "matcha" OR "intensity"!
+Active engine mode: %s (%s).
+If the user asks about your mode (in any language), answer directly with the mode name and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.
 
 Engine Mode Rules (%s):
-`, currentMode, currentMode, modeDesc, currentMode)
+`, currentMode, modeDesc, currentMode)
 
 		if currentMode == "PLANNER" {
 			sysPrompt += `1. Focus on inspecting codebase, analyzing files, and proposing high-level step-by-step implementation plans.
@@ -328,7 +382,10 @@ Engine Mode Rules (%s):
 5. When you need a decision, preference, or confirmation that tools cannot determine (e.g. choosing a database or architecture, destructive operations, or unclear requirements), call the ask_user tool with 1-3 clear multiple-choice questions instead of guessing.
 6. Some risky shell commands (rm, sudo, git push --force, etc.) require the user's approval. If a command is denied or blocked, do NOT retry it — adapt and use a safe alternative.
 7. Use the git tool to inspect repo state (status/diff/log/branch), fetch_url to read a specific page, web_search to find docs/errors on the web, review_changes to let the user approve or roll back your edits, and undo to revert a bad file edit made this turn.
-8. Answer in the user's language (Indonesian if they write Indonesian).`
+8. Answer in the same language the user writes in.
+9. REUSE FIRST: before writing new code, use code_locate and search_code to check whether the functionality or symbol already exists in the codebase — reimplementing existing code wastes tokens and creates duplicates. Report what you reused.
+10. TYPE SAFETY: treat type errors as blockers. After editing, run lsp_diagnostics on edited files (or rely on the auto verification) and fix any type errors before declaring done.
+11. PERFORMANCE AWARENESS: avoid N+1 query patterns (loops that query the database per iteration — prefer batch loading), quadratic loops over large collections, and unbounded fetches. When implementing data access, check for the obvious scaling trap and mention the Big-O of hot paths.`
 		}
 
 		// Auto-compact context if token count exceeds threshold
@@ -341,6 +398,11 @@ Engine Mode Rules (%s):
 				LastKnownState: "Context compacted successfully",
 			}
 			_ = e.context.Compact(summary)
+			// Auto-extract: durable session context is merged into project
+			// memory so a future session starts warm instead of cold.
+			if e.mem != nil {
+				_ = e.mem.MergeCompaction(summary.Goal, summary.DecisionsMade, summary.LastKnownState)
+			}
 		}
 
 		reqMessages := append([]provider.Message{
@@ -491,6 +553,15 @@ Engine Mode Rules (%s):
 					toolOutput = fmt.Sprintf("Tool error: %v", err)
 				}
 
+				// Track files the model edited so the native convention checker
+				// can review them (debug leftovers, markers, type safety,
+				// duplicate symbols) before the turn is declared done.
+				if tc.Name == "write_file" || tc.Name == "edit_file" {
+					if p := extractToolPath(tc.Arguments); p != "" {
+						e.editedFiles = append(e.editedFiles, p)
+					}
+				}
+
 				// Lifecycle hook: after tool execution, with the tool's output.
 				e.hookRun(ctx, hooks.EventToolResult, map[string]string{
 					"tool":   tc.Name,
@@ -507,15 +578,30 @@ Engine Mode Rules (%s):
 			continue
 		}
 
-		// 3. Verifying State (§2.4 Verification Ladder Level 1 & 2)
+		// 3. Verifying State (§2.4 Verification Ladder Level 1 & 2). Language-
+		// agnostic: the project type (Go / JS-TS / Python / Rust / Java) is
+		// detected from its config files and the matching checks run.
 		if hasCodeChanges {
 			e.state = StateVerifying
 			if onUpdate != nil {
-				onUpdate(e.state, "Running verification ladder...")
+				msg := "Running verification..."
+				if desc := describeVerification(); desc != "" {
+					msg = "Running verification: " + desc
+				}
+				onUpdate(e.state, msg)
 			}
 
-			if vetErr := runLevel1Verification(ctx); vetErr != "" {
+			if vetErr := runVerification(ctx); vetErr != "" {
 				_ = e.context.AppendUserMessage("Level 1 verification check failed:\n" + vetErr + "\nPlease fix the issues.")
+				continue
+			}
+
+			// Native code review (no LLM): debug leftovers, work markers,
+			// type-safety red flags, and duplicate symbols in edited files,
+			// plus LSP diagnostics when wired. Findings are fed back so the
+			// model fixes them before declaring done.
+			if review := e.reviewEditedFiles(); review != "" {
+				_ = e.context.AppendUserMessage("Code review:\n" + review + "\nPlease fix these issues before finishing.")
 				continue
 			}
 		}
@@ -624,15 +710,25 @@ func (e *Engine) complete(ctx context.Context, req provider.CompletionRequest) (
 func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
 	// Prefer realtime progress (local CLI tools etc.) so the UI shows what
 	// the agent is doing, then token streaming, then plain completion.
+	var resp *provider.CompletionResponse
+	var err error
 	if pa, ok := a.(provider.ProgressingAdapter); ok && e.progressHandler != nil {
-		return pa.CompleteWithProgress(ctx, req, func(line string) {
+		resp, err = pa.CompleteWithProgress(ctx, req, func(line string) {
 			e.progressHandler(e.state, line)
 		})
+	} else if sa, ok := a.(provider.StreamingAdapter); ok && e.streamHandler != nil {
+		resp, err = sa.StreamComplete(ctx, req, e.streamHandler)
+	} else {
+		resp, err = a.Complete(ctx, req)
 	}
-	if sa, ok := a.(provider.StreamingAdapter); ok && e.streamHandler != nil {
-		return sa.StreamComplete(ctx, req, e.streamHandler)
+	if err != nil {
+		return nil, err
 	}
-	return a.Complete(ctx, req)
+	// Live cost tracking: accumulate reported usage into the session tracker.
+	if resp != nil && e.usage != nil {
+		e.usage.Record(req.Model, resp.Usage)
+	}
+	return resp, nil
 }
 
 // hookRun fires a lifecycle hook event with structured env data. Output is
@@ -670,25 +766,6 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
-}
-
-// Level 1 verification check (build + vet) — only for Go projects.
-func runLevel1Verification(ctx context.Context) string {
-	if _, err := os.Stat("go.mod"); os.IsNotExist(err) {
-		return ""
-	}
-	for _, args := range [][]string{
-		{"go", "build", "./..."},
-		{"go", "vet", "./..."},
-		{"go", "test", "./..."},
-	} {
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		out, err := cmd.CombinedOutput()
-		if err != nil && len(out) > 0 {
-			return string(out)
-		}
-	}
-	return ""
 }
 
 func formatToolCallInfo(name, argsJSON string) string {

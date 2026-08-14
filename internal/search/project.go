@@ -7,14 +7,15 @@ import (
 	"strings"
 )
 
-// docFileNames are the instruction/context files agents conventionally read at
-// the start of a project (Claude Code: CLAUDE.md; opencode: AGENTS.md).
+// docFileNames are the instruction/context files BroCode reads at the start of
+// a project. BroCode follows the public AGENTS.md standard (the tool-agnostic
+// convention shared by all agents): AGENTS.md at the root, plus its own
+// project-level .brocode/AGENTS.md. Provider-specific instruction files
+// (CLAUDE.md, GEMINI.md, .cursorrules, ...) are deliberately NOT read — they
+// belong to other tools and would leak their branding into the agent.
 var docFileNames = []string{
 	"AGENTS.md",
-	"CLAUDE.md",
-	"brocode.md",
 	".brocode/AGENTS.md",
-	".brocode/CLAUDE.md",
 	"README.md",
 }
 
@@ -91,8 +92,19 @@ func BuildProjectContext(root string) *ProjectContext {
 		}
 	}
 
-	// Instruction docs: read and cap each, concatenate.
+	// Instruction docs: global BroCode instructions load first as the base
+	// layer, project docs load after so the repo wins on conflict (same
+	// layering as git config: project overrides global).
 	var docs []string
+	if home, err := os.UserHomeDir(); err == nil {
+		if data, rerr := os.ReadFile(filepath.Join(home, ".config", "brocode", "AGENTS.md")); rerr == nil {
+			content := string(data)
+			if len(content) > 12000 {
+				content = content[:12000] + "\n… (truncated)"
+			}
+			docs = append(docs, "=== ~/.config/brocode/AGENTS.md (global) ===\n"+content)
+		}
+	}
 	for _, name := range docFileNames {
 		p := filepath.Join(root, name)
 		data, err := os.ReadFile(p)

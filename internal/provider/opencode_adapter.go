@@ -23,9 +23,7 @@ func isSpinnerPrefix(line string) bool {
 		}
 	}
 	return false
-}
-
-// Legacy-v1 OpenCode free model list
+} // Legacy-v1 OpenCode free model list
 var OpenCodeFreeModels = []string{
 	"deepseek-v4-flash-free",
 	"hy3-free",
@@ -110,13 +108,25 @@ func DetectOpenCode() (bool, string) {
 type OpenCodeAdapter struct {
 	cliPath string
 	http    *OpenAIAdapter
+	// AskUser presents interactive questions to the user when the CLI model
+	// writes a structured clarification block ([Q]/[O]) instead of being able
+	// to call the ask_user tool. Wired by the TUI; nil = headless (no modal,
+	// the question text is returned as-is).
+	AskUser AskUserHandler
+	// MCPStatus is a short summary of connected MCP servers (names only),
+	// injected into the CLI prompt so the model answers MCP questions directly
+	// from context instead of exploring config files with bash (which opencode's
+	// own permission system then blocks). Wired by the TUI; empty = omit.
+	MCPStatus string
 }
 
 // NewOpenCodeAdapter creates an OpenCode provider adapter.
 func NewOpenCodeAdapter() *OpenCodeAdapter {
 	detected, binPath := DetectOpenCode()
 	a := &OpenCodeAdapter{
-		http: NewOpenAIAdapter("https://9router.rosyidrid.com/v1", ""),
+		// HTTP fallback uses the official free-model gateway (same base URL
+		// declared in the registry) — never a personal/third-party endpoint.
+		http: NewOpenAIAdapter("https://router.opencode.ai/v1", ""),
 	}
 	if detected {
 		a.cliPath = binPath
@@ -132,6 +142,12 @@ func (a *OpenCodeAdapter) Complete(ctx context.Context, req CompletionRequest) (
 // streaming its output lines to onProgress in real time — the agent's steps
 // (build banner, tool usage, thinking) become visible in the UI exactly like
 // opencode itself. The final answer is the last meaningful block of output.
+//
+// When an interactive AskUser handler is wired (the TUI), clarification
+// questions the CLI model writes as structured [Q]/[O] blocks are intercepted:
+// the block is removed from the answer, presented as the interactive selection
+// modal, and the user's answers are fed back to the CLI so the model continues
+// and produces its final answer within the same turn.
 func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req CompletionRequest, onProgress func(string)) (*CompletionResponse, error) {
 	if a.cliPath == "" {
 		return a.http.Complete(ctx, req)
@@ -153,26 +169,90 @@ func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req Completi
 		userPrompt = req.Messages[len(req.Messages)-1].Content
 	}
 
+	// The CLI model runs inside opencode's own agent loop with opencode's
+	// system prompt, so it would identify itself as "opencode". Anchor the
+	// identity with a short preamble — it only shapes identity answers.
+	prompt := brocodeIdentityPrompt + "\n\n" + userPrompt
+
+	// Orient the model about what MCP servers BroCode has connected, so
+	// questions like "what MCP is available?" are answered from context
+	// instead of triggering filesystem exploration.
+	if a.MCPStatus != "" {
+		prompt += "\n\n" + a.MCPStatus
+	}
+
+	// When the interactive ask modal is available, teach the CLI model to
+	// structure its clarification questions so they can become the modal.
+	// Without a handler (headless) the model behaves exactly as before.
+	if a.AskUser != nil {
+		prompt += "\n\n" + askMarkerInstructions
+	}
+
+	// Ask/answer rounds: the model may write question blocks, we present them
+	// as the modal, feed the answers back, and let it finish. Capped so a
+	// model that keeps asking can never loop forever.
+	const maxAskRounds = 3
+	lastClean := ""
+	for round := 0; round < maxAskRounds; round++ {
+		cleanOut, ok := a.runCLI(ctx, opencodeMod, prompt, onProgress)
+		if !ok {
+			// CLI failed, timed out, or produced nothing: fall back to the
+			// HTTP router with the original request.
+			return a.http.Complete(ctx, req)
+		}
+
+		questions, cleaned := ParseAskBlocks(cleanOut)
+		if len(questions) == 0 || a.AskUser == nil {
+			return buildCLIResponse(userPrompt, cleanOut, opencodeMod)
+		}
+		lastClean = cleaned
+
+		results, err := a.AskUser(ctx, questions)
+		if err != nil || len(results) == 0 {
+			// User skipped or the interaction failed: return the model's answer
+			// with the question block stripped (the questions were already
+			// visible in the modal the user just dismissed).
+			return buildCLIResponse(userPrompt, cleaned, opencodeMod)
+		}
+
+		prompt = brocodeIdentityPrompt + "\n\n" + userPrompt
+		if a.MCPStatus != "" {
+			prompt += "\n\n" + a.MCPStatus
+		}
+		prompt += "\n\n" + cleaned +
+			"\n\nThe user answered your clarification questions:\n" +
+			formatAskResults(results) +
+			"\n\nContinue and provide your final answer now. If everything is clear, answer directly and do NOT include any question blocks."
+	}
+
+	// Ran out of ask rounds: return the last cleaned answer (no question blocks).
+	return buildCLIResponse(userPrompt, lastClean, opencodeMod)
+}
+
+// runCLI executes one `opencode run --model <model> <prompt>` invocation with
+// a bounded timeout and returns the cleaned answer. ok is false when the CLI
+// is missing, times out, or produces no output (callers fall back to HTTP).
+func (a *OpenCodeAdapter) runCLI(ctx context.Context, model, prompt string, onProgress func(string)) (string, bool) {
 	// Bound the CLI run so a hung opencode process (no response, network
 	// stall, waiting on input) can never block the turn forever. On timeout
 	// the subprocess is killed and we fall back to the HTTP router.
 	completionCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(completionCtx, a.cliPath, "run", "--model", opencodeMod, userPrompt)
+	cmd := exec.CommandContext(completionCtx, a.cliPath, "run", "--model", model, prompt)
 	cmd.Stdin = strings.NewReader("") // Non-blocking stdin pipe prevents TTY hanging
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return a.http.Complete(ctx, req)
+		return "", false
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return a.http.Complete(ctx, req)
+		return "", false
 	}
 
 	if err := cmd.Start(); err != nil {
-		return a.http.Complete(ctx, req)
+		return "", false
 	}
 
 	// Forward stderr lines (status/progress) to the UI in real time.
@@ -216,7 +296,7 @@ func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req Completi
 
 	if completionCtx.Err() == context.DeadlineExceeded {
 		// Never surface a half-baked stream as the answer.
-		return a.http.Complete(ctx, req)
+		return "", false
 	}
 
 	// Answer = clean stdout; fall back to last stderr block if stdout empty.
@@ -226,18 +306,21 @@ func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req Completi
 	}
 
 	if err == nil && cleanOut != "" {
-		return &CompletionResponse{
-			Content:   cleanOut,
-			Reasoning: "Executed via local OpenCode CLI (" + opencodeMod + ")",
-			Usage: Usage{
-				PromptTokens:     len(userPrompt) / 4,
-				CompletionTokens: len(cleanOut) / 4,
-				TotalTokens:      (len(userPrompt) + len(cleanOut)) / 4,
-			},
-			FinishReason: "stop",
-		}, nil
+		return cleanOut, true
 	}
+	return "", false
+}
 
-	// CLI failed or produced nothing: fall back to the HTTP router.
-	return a.http.Complete(ctx, req)
+// buildCLIResponse assembles the completion response for a successful CLI run.
+func buildCLIResponse(userPrompt, content, model string) (*CompletionResponse, error) {
+	return &CompletionResponse{
+		Content:   content,
+		Reasoning: "Executed via local OpenCode CLI (" + model + ")",
+		Usage: Usage{
+			PromptTokens:     len(userPrompt) / 4,
+			CompletionTokens: len(content) / 4,
+			TotalTokens:      (len(userPrompt) + len(content)) / 4,
+		},
+		FinishReason: "stop",
+	}, nil
 }

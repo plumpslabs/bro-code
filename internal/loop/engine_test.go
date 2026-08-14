@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
+	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
@@ -291,6 +292,81 @@ func TestEngineToolBudgetResetsAfterAnswer(t *testing.T) {
 	}
 	if engine.State() != StateDone {
 		t.Errorf("expected StateDone, got %v", engine.State())
+	}
+}
+
+// captureAdapter records the system prompt of each request so tests can
+// assert what was injected.
+type captureAdapter struct {
+	sysPrompt string
+}
+
+func (c *captureAdapter) Complete(_ context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	if len(req.Messages) > 0 && req.Messages[0].Role == "system" {
+		c.sysPrompt = req.Messages[0].Content
+	}
+	return &provider.CompletionResponse{Content: "Done"}, nil
+}
+
+func TestSkillsInjectedIntoSystemPrompt(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	adapter := &captureAdapter{}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetSkills("- go-build: Build and test Go projects\n- team-rule: Team convention")
+
+	if _, err := engine.RunTurn(context.Background(), "hello", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if !strings.Contains(adapter.sysPrompt, "AVAILABLE SKILLS:") {
+		t.Error("expected AVAILABLE SKILLS block in system prompt")
+	}
+	if !strings.Contains(adapter.sysPrompt, "go-build: Build and test Go projects") {
+		t.Error("expected skill listing in system prompt")
+	}
+	// Skills must never leak the opencode-specific dir into the prompt.
+	if strings.Contains(adapter.sysPrompt, ".opencode") {
+		t.Error("system prompt must not reference .opencode")
+	}
+}
+
+func TestMemoryWarmStartInjected(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	adapter := &captureAdapter{}
+
+	memDir := t.TempDir()
+	mem := memory.NewStore(memDir)
+	mem.Retain("Decisions", "Filter omnichannel: Semua abaikan status + PIC")
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetMemoryStore(mem)
+
+	if _, err := engine.RunTurn(context.Background(), "hello", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if !strings.Contains(adapter.sysPrompt, "PROJECT MEMORY") {
+		t.Error("expected PROJECT MEMORY block in system prompt")
+	}
+	if !strings.Contains(adapter.sysPrompt, "Filter omnichannel") {
+		t.Error("expected warm-start memory content in system prompt")
+	}
+}
+
+func TestNoSkillsNoBlock(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	adapter := &captureAdapter{}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetSkills("")
+
+	if _, err := engine.RunTurn(context.Background(), "hello", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if strings.Contains(adapter.sysPrompt, "AVAILABLE SKILLS:") {
+		t.Error("expected no AVAILABLE SKILLS block when skills are empty")
 	}
 }
 
