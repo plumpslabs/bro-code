@@ -192,9 +192,15 @@ type Model struct {
 	logViewport viewport.Model
 	renderedLog string
 	renderedKey string
+	// renderedHistory/historyKey cache the rendered message history so
+	// streaming only rebuilds the cheap streaming box, not the whole log,
+	// every frame — that is what makes long unbounded history viable.
+	renderedHistory string
+	historyKey      string
 	// trimNoticeShown records whether the "older messages pruned" notice has
-	// already been inserted into the chat log, so long sessions announce the
-	// display trim once instead of silently dropping history.
+	// already been inserted into the chat log, so a pathological session that
+	// hits the safety ceiling announces it once instead of silently dropping
+	// history.
 	trimNoticeShown bool
 
 	// renderedH remembers the log viewport height from the last re-render so
@@ -289,22 +295,22 @@ type turnResultMsg struct {
 	mode string
 }
 
-// maxChatMessages bounds the in-memory message list rendered by the TUI. The
-// authoritative history lives in the engine context (compaction-bounded) and
-// the SQLite store, so the UI only needs a window — this keeps long sessions
-// from growing memory and per-frame render cost without bound.
-const maxChatMessages = 200
+// maxChatMessages is a SAFETY CEILING, not a display window: the chat log
+// keeps every message of the session in memory (the user's history must never
+// be pruned from the screen), and rendering stays cheap via the
+// renderedHistory cache. Only a pathological session (thousands of entries)
+// hits this ceiling, and even then the oldest entries remain in session
+// history in SQLite — with a one-time notice instead of silent loss.
+const maxChatMessages = 5000
 
-// appendMessages adds messages to the chat log, trimming the oldest entries
-// past maxChatMessages.
+// appendMessages adds messages to the chat log. The history is kept whole;
+// only an extreme safety ceiling (maxChatMessages) can trim it, and that is
+// announced once so it is never mistaken for a bug.
 func (m *Model) appendMessages(msgs ...string) {
 	m.messages = append(m.messages, msgs...)
 	if len(m.messages) > maxChatMessages {
 		trimmed := len(m.messages) - maxChatMessages
 		m.messages = append([]string(nil), m.messages[trimmed:]...)
-		// Make the display trim visible instead of silent: the oldest entries
-		// dropped from this in-memory view are still in session history, and
-		// the user must never think a bug ate their conversation. Noted once.
 		if !m.trimNoticeShown {
 			m.trimNoticeShown = true
 			m.messages[0] = "… older messages pruned from this view (kept in session history) — /sessions to browse …"
@@ -2075,22 +2081,31 @@ func (m *Model) View() tea.View {
 	return v
 }
 
-// buildLog renders the message history + live streaming block.
+// buildLog renders the message history + live streaming block. The history
+// part is cached (renderedHistory) and rebuilt only when the messages change,
+// so every streamed chunk re-renders just the cheap streaming box instead of
+// the whole log — this keeps unbounded history responsive.
 func (m *Model) buildLog(contentWidth int) string {
-	var sb strings.Builder
-	for _, msg := range m.messages {
-		rendered := formatMessage(msg, contentWidth, m.filesExpanded)
-		sb.WriteString(rendered + "\n\n")
+	key := fmt.Sprintf("%s|%d|%v", m.logKey(), contentWidth, m.filesExpanded)
+	if key != m.historyKey {
+		var sb strings.Builder
+		for _, msg := range m.messages {
+			sb.WriteString(formatMessage(msg, contentWidth, m.filesExpanded) + "\n\n")
+		}
+		m.renderedHistory = sb.String()
+		m.historyKey = key
 	}
+	var out strings.Builder
+	out.WriteString(m.renderedHistory)
 	if m.streaming && m.pendingStream != "" {
 		label := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("BROCODE")
 		bar := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("205")).Padding(0, 1)
 		if contentWidth > 0 {
 			bar = bar.Width(contentWidth)
 		}
-		sb.WriteString(bar.Render(label+"\n"+m.pendingStream) + "\n\n")
+		out.WriteString(bar.Render(label+"\n"+m.pendingStream) + "\n\n")
 	}
-	return sb.String()
+	return out.String()
 }
 
 // lastAssistantReasoning returns the reasoning text of the most recent

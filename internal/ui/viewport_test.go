@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -82,6 +83,48 @@ func TestViewportPreservesPositionOnHeightChange(t *testing.T) {
 	_ = m.logViewport.View() // must not panic with the shrunken height
 	if !strings.Contains(ansiRegex.ReplaceAllString(m.logViewport.View(), ""), "Baris 15.") {
 		t.Errorf("newest content not visible after height shrink:\n%q", ansiRegex.ReplaceAllString(m.logViewport.View(), ""))
+	}
+}
+
+// TestChatHistoryNeverPruned pins the "history must never disappear"
+// guarantee: far more than the old 200-message display window is appended and
+// every single message must remain in the chat log (the safety ceiling is
+// thousands, not a display window).
+func TestChatHistoryNeverPruned(t *testing.T) {
+	m := &Model{}
+	for i := 0; i < 400; i++ {
+		m.appendMessages(fmt.Sprintf("YOU:\nmessage %d", i))
+	}
+	if len(m.messages) != 400 {
+		t.Fatalf("history pruned: expected all 400 messages kept, got %d", len(m.messages))
+	}
+	// The very first message must still be there — nothing was dropped.
+	if !strings.Contains(m.messages[0], "message 0") {
+		t.Fatalf("oldest message lost: %q", m.messages[0])
+	}
+	if !strings.Contains(m.messages[len(m.messages)-1], "message 399") {
+		t.Fatalf("newest message lost: %q", m.messages[len(m.messages)-1])
+	}
+}
+
+// TestBuildLogCacheInvalidatesOnAppend verifies the rendered-history cache
+// rebuilds when messages change, so appended content always shows up.
+func TestBuildLogCacheInvalidatesOnAppend(t *testing.T) {
+	m := &Model{}
+	m.width = 120
+	m.messages = []string{"⚡ BroCode engine active. Type a prompt or /help for commands."}
+
+	log1 := m.buildLog(m.width - 4)
+	// Same state → cache hit, identical output.
+	if log2 := m.buildLog(m.width - 4); log2 != log1 {
+		t.Fatalf("cache miss on identical state")
+	}
+
+	// New message appended → the cache must rebuild and include it.
+	m.appendMessages("YOU:\nhalo bro")
+	log3 := m.buildLog(m.width - 4)
+	if !strings.Contains(log3, "halo bro") {
+		t.Fatalf("appended message missing after cache rebuild: %q", log3)
 	}
 }
 
