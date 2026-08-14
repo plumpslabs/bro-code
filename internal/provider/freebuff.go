@@ -26,14 +26,21 @@ import (
 // Freebuff2API proxy (its documented default listen address).
 const FreeBuffDefaultBaseURL = "http://localhost:8080/v1"
 
-// FreeBuffModels are the free models available on FreeBuff, sourced from the
-// official CodebuffAI free-agents.ts constant file (2026-08) plus the
-// long-standing Gemini flash-lite line used by the free agents. The list is
-// the picker baseline; the proxy's own /v1/models is merged when available.
+// FreeBuffModels are the free models declared by the official CodebuffAI
+// source tree (freebuff-model-ids.ts + model-config.ts, 2026-08):
+//
+//	mimo/mimo-v2.5 and mimo/mimo-v2.5-pro (the "mimo/" prefix is part of the
+//	wire ID — a bare "mimo-v2.5" is rejected as model_not_found),
+//	minimax/minimax-m3,
+//	google/gemini-2.5-flash-lite (the file-picker free agent).
+//
+// This is only the picker baseline when the proxy is unreachable — when the
+// local proxy responds, its live /v1/models is authoritative and replaces
+// this list so models the proxy does not actually serve are never offered.
 var FreeBuffModels = []string{
-	"minimax/minimax-m3-20260211",
-	"mimo-v2.5",
-	"mimo-v2.5-pro",
+	"minimax/minimax-m3",
+	"mimo/mimo-v2.5",
+	"mimo/mimo-v2.5-pro",
 	"google/gemini-2.5-flash-lite",
 }
 

@@ -723,6 +723,23 @@ func TestContextWindowFor(t *testing.T) {
 	}
 }
 
+// TestContextWindowForFreeBuff anchors the official FreeBuff context windows
+// (CodebuffAI FREEBUFF_MODEL_CONTEXT_WINDOWS, 2026-08): M3 is capped at 512K
+// on the free tier, MiMo and Gemini flash lite use their native 1M.
+func TestContextWindowForFreeBuff(t *testing.T) {
+	cases := map[string]int{
+		"minimax/minimax-m3":           524_288,
+		"mimo/mimo-v2.5":               1_048_576,
+		"mimo/mimo-v2.5-pro":           1_048_576,
+		"google/gemini-2.5-flash-lite": 1_048_576,
+	}
+	for model, want := range cases {
+		if got := ContextWindowFor(AppConfig{}, "freebuff", model); got != want {
+			t.Errorf("freebuff %s: expected %d window, got %d", model, want, got)
+		}
+	}
+}
+
 func TestFormatTokens(t *testing.T) {
 	cases := []struct {
 		n    int

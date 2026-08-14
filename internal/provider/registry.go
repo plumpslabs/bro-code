@@ -30,6 +30,11 @@ type ProviderInfo struct {
 	// research-backed (vendor docs, 2026): used as the fallback when the user
 	// hasn't declared a per-model limit in their config. 0 = unknown → 128k.
 	ContextLimits map[string]int `json:"context_limits,omitempty"`
+	// ModelsPublic marks an OpenAI-compatible provider whose /models endpoint
+	// needs no API key (an open local proxy, e.g. FreeBuff via Freebuff2API).
+	// The live list is fetched unconditionally and is AUTHORITATIVE — models
+	// the proxy does not serve are never offered in the picker.
+	ModelsPublic bool `json:"models_public,omitempty"`
 }
 
 // builtinContextLimits are the researched context windows for the models each
@@ -82,10 +87,15 @@ var builtinContextLimits = map[string]map[string]int{
 		"gemini-2.5-pro":   1_048_576,
 		"gemini-2.0-flash": 1_048_576,
 	}, "freebuff": {
-		// MiniMax M-series documented at 200K context; Gemini 2.5 Flash Lite
-		// shares the Gemini family's 1M window. mimo-v2.5 limits are
-		// unconfirmed — fall back to the 128k default.
-		"minimax/minimax-m3-20260211":  200_000,
+		// Official FreeBuff caps read from the CodebuffAI source tree
+		// (FREEBUFF_MODEL_CONTEXT_WINDOWS, 2026-08): MiniMax M3 is capped at
+		// 512K on the FreeBuff free tier (native is 1M); models absent from
+		// that table (MiMo, Gemini flash lite) fall back to their native 1M
+		// window. Model IDs use the official wire IDs (mimo/ prefix, no date
+		// suffix on minimax-m3).
+		"minimax/minimax-m3":           524_288,
+		"mimo/mimo-v2.5":               1_048_576,
+		"mimo/mimo-v2.5-pro":           1_048_576,
 		"google/gemini-2.5-flash-lite": 1_048_576,
 	},
 }
@@ -227,6 +237,7 @@ var BuiltinProviders = []ProviderInfo{
 		DefaultBaseURL: FreeBuffDefaultBaseURL,
 		DefaultModels:  FreeBuffModels,
 		ContextLimits:  builtinContextLimits["freebuff"],
+		ModelsPublic:   true, // open local proxy: /models needs no key, live list wins
 	},
 }
 
@@ -367,10 +378,18 @@ func DiscoverModels(cfg AppConfig) map[string][]string {
 		// fetched list is MERGED with the configured one (not a replacement):
 		// configured models stay visible even when the gateway's live list
 		// omits them or reports them under a different ID.
-		if d.APIKey != "" && d.Info.Protocol == "openai-compatible" && d.Info.DefaultBaseURL != "" {
+		// Fetch the live model list: keyed providers fetch when a key exists;
+		// public (open-local-proxy) providers like FreeBuff fetch unconditionally.
+		if (d.APIKey != "" || d.Info.ModelsPublic) && d.Info.Protocol == "openai-compatible" && d.Info.DefaultBaseURL != "" {
 			fetched, err := FetchOpenAIModels(d.Info.DefaultBaseURL, d.APIKey)
 			if err == nil && len(fetched) > 0 {
-				models = mergeModelLists(models, fetched)
+				if d.Info.ModelsPublic {
+					// Open proxy: the live list is authoritative — the proxy
+					// rejects any model not in it, so never offer dead models.
+					models = fetched
+				} else {
+					models = mergeModelLists(models, fetched)
+				}
 			}
 		}
 		result[d.Info.ID] = models

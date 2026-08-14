@@ -1,8 +1,12 @@
 package provider
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,8 +30,17 @@ func TestFreeBuffProviderEntry(t *testing.T) {
 	if len(fb.DefaultModels) == 0 {
 		t.Fatal("expected FreeBuff provider to declare free models")
 	}
-	if fb.ContextLimits["minimax/minimax-m3-20260211"] != 200_000 {
-		t.Errorf("expected MiniMax M3 context limit, got %d", fb.ContextLimits["minimax/minimax-m3-20260211"])
+	// Official FreeBuff caps (CodebuffAI FREEBUFF_MODEL_CONTEXT_WINDOWS,
+	// 2026-08): M3 is capped at 512K on the free tier; MiMo/Gemini-lite use
+	// their native 1M. IDs are the official wire IDs (mimo/ prefix).
+	if fb.ContextLimits["minimax/minimax-m3"] != 524_288 {
+		t.Errorf("expected MiniMax M3 512K FreeBuff cap, got %d", fb.ContextLimits["minimax/minimax-m3"])
+	}
+	if fb.ContextLimits["mimo/mimo-v2.5"] != 1_048_576 {
+		t.Errorf("expected MiMo-V2.5 1M context limit, got %d", fb.ContextLimits["mimo/mimo-v2.5"])
+	}
+	if !fb.ModelsPublic {
+		t.Error("expected freebuff provider to be ModelsPublic (open local proxy)")
 	}
 	if fb.Protocol != "openai-compatible" {
 		t.Errorf("expected openai-compatible protocol, got %q", fb.Protocol)
@@ -87,9 +100,54 @@ func TestFreeBuffModelsCoverOfficialFreeAgents(t *testing.T) {
 	for _, m := range FreeBuffModels {
 		known[m] = true
 	}
-	for _, m := range []string{"mimo-v2.5", "mimo-v2.5-pro", "minimax/minimax-m3-20260211"} {
+	for _, m := range []string{"mimo/mimo-v2.5", "mimo/mimo-v2.5-pro", "minimax/minimax-m3"} {
 		if !known[m] {
 			t.Errorf("official free agent model %q missing from FreeBuffModels", m)
 		}
+	}
+	// Regression: bare IDs without the provider prefix are rejected by the
+	// backend as model_not_found — never reintroduce them.
+	for _, bad := range []string{"mimo-v2.5", "minimax/minimax-m3-20260211"} {
+		if known[bad] {
+			t.Errorf("non-wire model ID %q must not be in FreeBuffModels", bad)
+		}
+	}
+}
+
+// TestDiscoverModelsFreeBuffAuthoritative proves that when a ModelsPublic
+// provider's live /v1/models responds, the fetched list REPLACES the baseline
+// (models the proxy does not serve are never offered) — unlike keyed
+// providers where the configured list is authoritative and merged.
+func TestDiscoverModelsFreeBuffAuthoritative(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"object":"list","data":[{"id":"google/gemini-2.5-flash-lite"}]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	info := ProviderInfo{
+		ID:             "freebuff",
+		Protocol:       "openai-compatible",
+		DefaultBaseURL: srv.URL,
+		DefaultModels:  FreeBuffModels,
+		ModelsPublic:   true,
+	}
+	fetched, err := FetchOpenAIModels(info.DefaultBaseURL, "")
+	if err != nil || len(fetched) == 0 {
+		t.Fatalf("fetch models failed: %v (%v)", fetched, err)
+	}
+
+	models := info.DefaultModels
+	if info.ModelsPublic {
+		models = fetched // authoritative replace
+	} else {
+		models = mergeModelLists(models, fetched)
+	}
+	if len(models) != 1 || models[0] != "google/gemini-2.5-flash-lite" {
+		t.Errorf("expected authoritative list to replace baseline, got %v", models)
 	}
 }
