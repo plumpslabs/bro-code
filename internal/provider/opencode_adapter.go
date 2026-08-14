@@ -120,6 +120,13 @@ type OpenCodeAdapter struct {
 	// from context instead of exploring config files with bash (which opencode's
 	// own permission system then blocks). Wired by the TUI; empty = omit.
 	MCPStatus string
+	// ProjectCtx is BroCode's native intelligence layer (repo map, hot files,
+	// project overview, cross-session memory warm start) injected into the CLI
+	// prompt. The gateway loop runs with the gateway's own system prompt, so
+	// without this the free models would never see the knowledge BroCode
+	// accumulates — MINER mining, usage hot-files and memory would be wasted.
+	// Wired by the TUI; empty = omit.
+	ProjectCtx string
 }
 
 // NewOpenCodeAdapter creates an OpenCode provider adapter.
@@ -184,6 +191,13 @@ func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req Completi
 		prompt += "\n\n" + a.MCPStatus
 	}
 
+	// Inject BroCode's native intelligence layer (repo map, hot files,
+	// project overview, memory warm start) so free-gateway models also benefit
+	// from what BroCode has learned across sessions.
+	if a.ProjectCtx != "" {
+		prompt += "\n\n" + a.ProjectCtx
+	}
+
 	// When the interactive ask modal is available, teach the CLI model to
 	// structure its clarification questions so they can become the modal.
 	// Without a handler (headless) the model behaves exactly as before.
@@ -221,6 +235,9 @@ func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req Completi
 		prompt = brocodeIdentityPrompt + "\n\n" + brocodeCapabilityNote + "\n\n" + userPrompt
 		if a.MCPStatus != "" {
 			prompt += "\n\n" + a.MCPStatus
+		}
+		if a.ProjectCtx != "" {
+			prompt += "\n\n" + a.ProjectCtx
 		}
 		prompt += "\n\n" + cleaned +
 			"\n\nThe user answered your clarification questions:\n" +

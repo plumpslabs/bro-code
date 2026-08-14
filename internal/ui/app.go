@@ -460,10 +460,14 @@ func (m *Model) buildFallbacks() []loop.Fallback {
 		}
 		// Fallback opencode adapters surface clarification questions through the
 		// same interactive modal as the primary adapter, and carry the same MCP
-		// summary so fallback runs answer MCP questions from context too.
-		if oa, ok := a.(*provider.OpenCodeAdapter); ok && m.ask != nil {
-			oa.AskUser = m.ask.Ask
+		// summary + native intelligence layer so fallback runs answer context
+		// questions and use learned project knowledge too.
+		if oa, ok := a.(*provider.OpenCodeAdapter); ok {
+			if m.ask != nil {
+				oa.AskUser = m.ask.Ask
+			}
 			oa.MCPStatus = m.mcpSummary
+			oa.ProjectCtx = m.intelligenceBlock()
 		}
 		model := ""
 		if len(d.Info.DefaultModels) > 0 {
@@ -499,6 +503,13 @@ func (m *Model) rebuildEngine() {
 		m.repoMap = repo.BuildMap(cwd, m.usage)
 	}
 	m.engine.SetRepoMap(m.repoMap.String())
+	// The free-gateway (opencode CLI) loop runs with the gateway's own system
+	// prompt, so its model would never see the native intelligence layer
+	// (repo map, memory, project overview). Inject it into the CLI prompt so
+	// free models benefit from what BroCode has learned too.
+	if oa, ok := m.adapter.(*provider.OpenCodeAdapter); ok {
+		oa.ProjectCtx = m.intelligenceBlock()
+	}
 	// Cross-session usage: every file the model touches this turn feeds the
 	// hot-file intelligence ("the more BroCode is used, the smarter it gets").
 	m.engine.SetUsageRecorder(func(paths []string) {
@@ -540,6 +551,28 @@ func (m *Model) rebuildEngine() {
 	// build; engine is rebuilt on model switches but hooks are cheap to reload.
 	m.engine.SetHooks(hooks.Load(cwd))
 	m.engine.SetScoutManager(m.scoutMgr)
+}
+
+// intelligenceBlock renders BroCode's native project knowledge (repo map +
+// project overview + memory warm start) as a prompt block for the opencode
+// CLI gateway loop, whose own system prompt would otherwise hide all of it.
+// Returns "" when no project context exists yet (e.g. before first build).
+func (m *Model) intelligenceBlock() string {
+	var sb strings.Builder
+	if m.repoMap != nil {
+		if s := m.repoMap.String(); s != "" {
+			sb.WriteString(s + "\n\n")
+		}
+	}
+	if m.projectCtx != nil {
+		sb.WriteString(m.projectCtx.String() + "\n\n")
+	}
+	if m.memStore != nil {
+		if ws := m.memStore.WarmStart(); ws != "" {
+			sb.WriteString("PROJECT MEMORY (learned in past sessions, use as verified prior knowledge):\n" + ws)
+		}
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 // embedderFor returns an embeddings endpoint for the active provider, or nil

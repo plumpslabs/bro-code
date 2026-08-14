@@ -262,6 +262,36 @@ func TestOpenCodeCLICapabilityNoteInjected(t *testing.T) {
 	}
 }
 
+func TestOpenCodeCLIProjectCtxInjected(t *testing.T) {
+	tmp := t.TempDir()
+	fakeCLI := filepath.Join(tmp, "opencode")
+	outFile := filepath.Join(tmp, "args.txt")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" > " + outFile + "\n" +
+		"echo 'OK'\n"
+	if err := os.WriteFile(fakeCLI, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake cli: %v", err)
+	}
+
+	a := &OpenCodeAdapter{cliPath: fakeCLI, http: NewOpenAIAdapter("http://127.0.0.1:1/v1", "")}
+	a.ProjectCtx = "REPO MAP (deterministic, auto-built):\nEntry points: go.mod, main.go\nMost-used files: internal/app/handler.go"
+	_, err := a.CompleteWithProgress(context.Background(), CompletionRequest{
+		Model:    "hy3-free",
+		Messages: []Message{{Role: "user", Content: "what is this project?"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("CompleteWithProgress failed: %v", err)
+	}
+
+	args, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	if !strings.Contains(string(args), "REPO MAP") || !strings.Contains(string(args), "internal/app/handler.go") {
+		t.Errorf("native intelligence layer not injected into gateway prompt: %q", string(args))
+	}
+}
+
 func TestOpenCodeCLIMCPStatusInjected(t *testing.T) {
 	tmp := t.TempDir()
 	fakeCLI := filepath.Join(tmp, "opencode")
