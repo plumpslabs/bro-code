@@ -13,6 +13,59 @@ import (
 	"github.com/plumpslabs/bro-code/internal/memory"
 )
 
+func TestReadFileBlockedForSensitiveAndHeavy(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Sensitive file exists on disk — reading must still be blocked.
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("SECRET=abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nmPath := filepath.Join(tmpDir, "node_modules", "pkg", "index.js")
+	if err := os.MkdirAll(filepath.Dir(nmPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nmPath, []byte("module.exports = 1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &ReadFileTool{}
+	// .env must be blocked and must NOT leak its content.
+	out, err := rt.Execute(context.Background(), `{"path":"`+envPath+`"}`)
+	if err == nil {
+		t.Fatalf("read_file(.env) must be blocked, got: %q", out)
+	}
+	if strings.Contains(out+err.Error(), "SECRET=abc") {
+		t.Error("secret content leaked into the error/response")
+	}
+	// node_modules must be blocked too.
+	if _, err := rt.Execute(context.Background(), `{"path":"`+nmPath+`"}`); err == nil {
+		t.Error("read_file(node_modules) must be blocked")
+	}
+	// A normal file still reads fine.
+	okPath := filepath.Join(tmpDir, "main.go")
+	if err := os.WriteFile(okPath, []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Execute(context.Background(), `{"path":"`+okPath+`"}`); err != nil {
+		t.Errorf("read_file(main.go) must work, got %v", err)
+	}
+}
+
+func TestWriteEditBlockedForSensitive(t *testing.T) {
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env")
+
+	wt := &WriteFileTool{}
+	if _, err := wt.Execute(context.Background(), `{"path":"`+envPath+`","content":"NEWSECRET=1"}`); err == nil {
+		t.Error("write_file(.env) must be blocked")
+	}
+
+	et := &EditFileTool{}
+	if _, err := et.Execute(context.Background(), `{"path":"`+envPath+`","target":"a","replacement":"b"}`); err == nil {
+		t.Error("edit_file(.env) must be blocked")
+	}
+}
+
 func TestMemoryToolRecallRetainList(t *testing.T) {
 	tmpDir := t.TempDir()
 	st := memory.NewStore(tmpDir)

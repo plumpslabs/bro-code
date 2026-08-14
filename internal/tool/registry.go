@@ -282,6 +282,12 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		return "", err
 	}
 
+	// Native guard: never read secrets (.env, keys) or heavy dirs
+	// (node_modules, vendor, ...) into the LLM context.
+	if err := GuardFile(args.Path); err != nil {
+		return "", err
+	}
+
 	data, err := os.ReadFile(args.Path)
 	if err != nil {
 		return "", err
@@ -335,6 +341,11 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 		return "", err
 	}
 
+	// Native guard: never write into heavy dirs or sensitive files.
+	if err := GuardFile(args.Path); err != nil {
+		return "", err
+	}
+
 	if err := os.MkdirAll(filepath.Dir(args.Path), 0755); err != nil && filepath.Dir(args.Path) != "." {
 		return "", err
 	}
@@ -373,6 +384,11 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		Replacement string `json:"replacement"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+
+	// Native guard: never edit heavy dirs or sensitive files.
+	if err := GuardFile(args.Path); err != nil {
 		return "", err
 	}
 
@@ -435,6 +451,12 @@ func (t *ListDirTool) Execute(ctx context.Context, argsJSON string) (string, err
 		args.Path = "."
 	}
 
+	// Native guard: listing inside heavy dirs is pointless and noisy; the
+	// name itself is visible from the parent listing.
+	if err := GuardHeavyPath(args.Path); err != nil {
+		return "", err
+	}
+
 	entries, err := os.ReadDir(args.Path)
 	if err != nil {
 		return "", err
@@ -477,6 +499,15 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	}
 	if args.Path == "" {
 		args.Path = "."
+	}
+
+	// Native guard: never search inside heavy dirs (node_modules, vendor,
+	// target, ...) or dump sensitive files.
+	if err := GuardHeavyPath(args.Path); err != nil {
+		return "", err
+	}
+	if err := GuardSensitivePath(args.Path); err != nil {
+		return "", err
 	}
 
 	// Skip heavy/vendored directories so searches stay fast and relevant in
@@ -607,7 +638,7 @@ func recursiveGlob(pattern string) ([]string, error) {
 			return filepath.SkipAll
 		}
 		if d.IsDir() {
-			if path != "." && isHeavyDir(d.Name()) {
+			if path != "." && IsHeavyDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			if bareNoWildcard {
@@ -624,24 +655,16 @@ func recursiveGlob(pattern string) ([]string, error) {
 			}
 			return nil
 		}
+		// Never surface sensitive files (.env, keys) in glob results.
+		if GuardSensitivePath(path) != nil {
+			return nil
+		}
 		if ok, _ := filepath.Match(basePattern, d.Name()); ok {
 			matches = append(matches, path)
 		}
 		return nil
 	})
 	return matches, walkErr
-}
-
-// isHeavyDir reports whether a directory should be skipped during recursive
-// glob (dependencies, build output, VCS metadata).
-func isHeavyDir(name string) bool {
-	switch name {
-	case "node_modules", "bower_components", "vendor", "dist", "build", "out",
-		".git", ".next", ".nuxt", "coverage", ".cache", ".turbo", "target",
-		"__pycache__", ".venv", "venv", "Pods", ".gradle", "bin", "obj":
-		return true
-	}
-	return false
 }
 
 // ---------------- Interactive User Questions ----------------
@@ -740,6 +763,12 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	lower := strings.ToLower(args.Command)
 	if strings.Contains(lower, "rm -rf /") || strings.Contains(lower, "mkfs") || strings.Contains(lower, ":(){ :|:& };:") {
 		return "", fmt.Errorf("prohibited destructive command")
+	}
+
+	// Native guard: block commands that read/dump sensitive files (cat .env,
+	// head id_rsa, ...) so secrets never enter the LLM context.
+	if msg := GuardSensitiveCommand(args.Command); msg != "" {
+		return "", fmt.Errorf("%s", msg)
 	}
 
 	// Bound every command with a timeout so a hung process cannot stall the loop.

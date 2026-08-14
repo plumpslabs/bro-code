@@ -44,6 +44,28 @@ var skipDirs = map[string]bool{
 	"coverage": true, "target": true, ".gradle": true, "Pods": true,
 }
 
+// isSensitiveRepoName mirrors the tool/search guards: secrets and keys never
+// appear in the repo map (entry points, tree, hot files).
+func isSensitiveRepoName(name string) bool {
+	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, ".env") {
+		return true
+	}
+	switch lower {
+	case ".npmrc", ".pypirc", ".netrc", ".pgpass", ".htpasswd",
+		"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials.json",
+		"service-account.json", "secrets.yaml", "secrets.yml",
+		".git-credentials", ".dockercfg":
+		return true
+	}
+	for _, ext := range []string{".pem", ".key", ".p12", ".pfx", ".ppk", ".gpg", ".kdbx", ".ovpn"} {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
 // skipExts are file extensions never listed in the tree (generated/binary).
 var skipExts = map[string]bool{
 	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".svg": true,
@@ -142,6 +164,10 @@ func listProjectFiles(root string) []string {
 			return nil // hidden files/configs
 		}
 		if skipExts[strings.ToLower(filepath.Ext(rel))] {
+			return nil
+		}
+		// Never surface sensitive files (.env, keys, credentials) in the map.
+		if isSensitiveRepoName(d.Name()) {
 			return nil
 		}
 		files = append(files, rel)

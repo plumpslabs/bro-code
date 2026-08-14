@@ -155,6 +155,11 @@ func IndexDir(dir string) ([]Document, error) {
 		if info, err := d.Info(); err == nil && info.Size() > 2*1024*1024 {
 			return nil
 		}
+		// Never index sensitive files (.env, credentials, keys) — their
+		// contents must not leak into search results.
+		if isSensitiveName(d.Name()) {
+			return nil
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil
@@ -168,6 +173,28 @@ func IndexDir(dir string) ([]Document, error) {
 		return nil
 	})
 	return docs, err
+}
+
+// isSensitiveName reports whether a file name marks secrets/credentials that
+// must never be indexed (.env, .env.*, private keys, credential files).
+func isSensitiveName(name string) bool {
+	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, ".env") {
+		return true
+	}
+	switch lower {
+	case ".npmrc", ".pypirc", ".netrc", ".pgpass", ".htpasswd",
+		"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials.json",
+		"service-account.json", "secrets.yaml", "secrets.yml",
+		".git-credentials", ".dockercfg":
+		return true
+	}
+	for _, ext := range []string{".pem", ".key", ".p12", ".pfx", ".ppk", ".gpg", ".kdbx", ".ovpn"} {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func isHeavyDirName(name string) bool {

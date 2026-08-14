@@ -52,6 +52,11 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 		default:
 			return nil
 		}
+		// Never index sensitive files (.env, credentials, keys) — their
+		// contents must not leak into code_locate results.
+		if isSensitiveName(d.Name()) {
+			return nil
+		}
 		syms, _ := ExtractSymbols(path)
 		for _, s := range syms {
 			g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: path, Line: s.Line})

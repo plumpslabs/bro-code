@@ -51,6 +51,11 @@ func (t *CodeSymbolsTool) Execute(ctx context.Context, argsJSON string) (string,
 	// Resolve relative to cwd and verify existence.
 	resolved := make([]string, 0, len(args.Paths))
 	for _, p := range args.Paths {
+		// Native guard: never extract symbols from sensitive files or heavy
+		// dirs (node_modules, vendor, ...).
+		if err := GuardFile(p); err != nil {
+			continue
+		}
 		abs, err := filepath.Abs(p)
 		if err != nil {
 			return "", err
