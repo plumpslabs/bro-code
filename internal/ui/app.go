@@ -1472,11 +1472,23 @@ func (m *Model) connectNext() {
 			m.connectNameInput.SetValue("")
 			m.connectNameInput.Focus()
 		} else {
-			// Built-in provider: only the API key is needed.
+			// Built-in provider.
 			m.connectCustom = false
 			p := provider.BuiltinProviders[m.connectProviderSel]
-			m.connectTextInput.SetValue("")
 			m.connectBaseURLInput.SetValue(p.DefaultBaseURL)
+			if p.APIKeyEnvVar == "" {
+				// Keyless provider (BroCode Free Gateway, FreeBuff, Ollama): no
+				// API key exists — asking for one would confuse (e.g. FreeBuff
+				// authenticates via its CLI token / local proxy). Save straight
+				// away with an empty key.
+				m.connectTextInput.SetValue("")
+				m.applyConnectConfig()
+				m.showConnect = false
+				m.appendMessages(fmt.Sprintf("✅ %s connected — no API key needed (token auto-loaded).", p.Name))
+				return
+			}
+			// Built-in provider with a real key: only the API key step is needed.
+			m.connectTextInput.SetValue("")
 			m.connectStep = 1
 			m.connectTextInput.Focus()
 		}

@@ -232,11 +232,14 @@ func TestActivityResetsOnNewTurn(t *testing.T) {
 func TestConnectBuiltInAPIKeyTyping(t *testing.T) {
 	m := newTestApp()
 
-	// Open /connect, pick the first built-in provider (step 0 → 1 = API key).
+	// Open /connect; the first built-ins (opencode, deepseek) — pick a KEYED
+	// provider (deepseek, index 1) so the wizard lands on the API-key step:
+	// keyless providers (opencode/FreeBuff/Ollama) skip it and save directly.
 	_, _ = m.handleSlashCommand("/connect")
 	if !m.showConnect || m.connectStep != 0 {
 		t.Fatalf("expected connect wizard at step 0, got step=%d show=%v", m.connectStep, m.showConnect)
 	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	// ENTER → step 1 (built-in provider, API key).
 	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); err != nil {
 		t.Fatalf("enter failed: %v", err)
@@ -250,6 +253,26 @@ func TestConnectBuiltInAPIKeyTyping(t *testing.T) {
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if got := m.connectTextInput.Value(); got != "sk" {
 		t.Errorf("typing at built-in API key step = %q, want %q", got, "sk")
+	}
+}
+
+// TestConnectKeylessProviderSkipsKeyStep proves keyless built-in providers
+// (opencode, FreeBuff, Ollama) save immediately instead of asking for an API
+// key that does not exist — the confusion the user hit with FreeBuff.
+func TestConnectKeylessProviderSkipsKeyStep(t *testing.T) {
+	m := newTestApp()
+
+	_, _ = m.handleSlashCommand("/connect")
+	if m.connectStep != 0 || !m.showConnect {
+		t.Fatalf("expected wizard step 0, got step=%d show=%v", m.connectStep, m.showConnect)
+	}
+
+	// First entry is opencode (APIKeyEnvVar "") — ENTER must save directly.
+	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); err != nil {
+		t.Fatalf("enter failed: %v", err)
+	}
+	if m.showConnect {
+		t.Fatal("expected keyless provider to skip the API-key step and close the wizard")
 	}
 }
 
