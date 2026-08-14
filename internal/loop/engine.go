@@ -175,6 +175,12 @@ type Engine struct {
 	// the main turn continues. Completed results are drained into the context
 	// at each loop iteration. Optional.
 	scouts ScoutDrainer
+	// autoExtendSession toggles autonomous turn extension for the rest of the session.
+	autoExtendSession bool
+	// hardCapIterations sets the absolute ceiling (default 100 turns).
+	hardCapIterations int
+	// askHandler optionally prompts the user when turn limit is reached.
+	askHandler func(question string, options []string) (string, error)
 }
 
 // SetHooks wires a lifecycle hooks manager. Nil disables hooks.
@@ -321,18 +327,24 @@ func (e *Engine) SetStreamHandler(fn func(delta string)) {
 	e.streamHandler = fn
 }
 
+// SetAskHandler wires an interactive question handler for turn extensions.
+func (e *Engine) SetAskHandler(fn func(question string, options []string) (string, error)) {
+	e.askHandler = fn
+}
+
 // NewEngine creates an agent loop engine instance.
 func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *bcontext.Manager, model string) *Engine {
 	return &Engine{
-		adapter:          adapter,
-		tools:            tools,
-		context:          ctxMgr,
-		model:            model,
-		mode:             "BUILDER",
-		maxIterations:    25,
-		state:            StateThinking,
-		usage:            NewUsageTracker(),
-		reviewLLMEnabled: true,
+		adapter:           adapter,
+		tools:             tools,
+		context:           ctxMgr,
+		model:             model,
+		mode:              "BUILDER",
+		maxIterations:     25,
+		hardCapIterations: 100,
+		state:             StateThinking,
+		usage:             NewUsageTracker(),
+		reviewLLMEnabled:  true,
 	}
 }
 
@@ -417,6 +429,47 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	for {
 		iteration++
 		if iteration > e.maxIterations {
+			hardCap := e.hardCapIterations
+			if hardCap <= 0 {
+				hardCap = 100
+			}
+
+			if iteration <= hardCap {
+				if e.autoExtendSession {
+					e.maxIterations += 15
+					if onUpdate != nil {
+						onUpdate(e.state, fmt.Sprintf("⚡ Autonomous Mode Active: Auto-extending turn limit to %d iterations", e.maxIterations))
+					}
+					continue
+				}
+
+				if e.askHandler != nil {
+					q := fmt.Sprintf("⚠️ Reached iteration limit (%d turns). Agent has explored %d files and still requires tool calls to complete the task.", e.maxIterations, len(e.explored))
+					opts := []string{
+						"Allow Once (+15 turns)",
+						"Always Allow for this session",
+						"Reject & Synthesize Now",
+					}
+					ans, err := e.askHandler(q, opts)
+					if err == nil {
+						if strings.HasPrefix(ans, "Allow Once") || strings.HasPrefix(ans, "[1]") || strings.Contains(strings.ToLower(ans), "once") {
+							e.maxIterations += 15
+							if onUpdate != nil {
+								onUpdate(e.state, fmt.Sprintf("⚡ Extended turn limit to %d iterations", e.maxIterations))
+							}
+							continue
+						} else if strings.HasPrefix(ans, "Always Allow") || strings.HasPrefix(ans, "[2]") || strings.Contains(strings.ToLower(ans), "always") {
+							e.autoExtendSession = true
+							e.maxIterations += 15
+							if onUpdate != nil {
+								onUpdate(e.state, fmt.Sprintf("⚡ Autonomous Mode Active: Extended turn limit to %d iterations", e.maxIterations))
+							}
+							continue
+						}
+					}
+				}
+			}
+
 			if onUpdate != nil {
 				onUpdate(e.state, "⚠️ Maximum iterations reached — synthesizing final answer from explored context...")
 			}

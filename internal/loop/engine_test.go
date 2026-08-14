@@ -816,3 +816,44 @@ func TestEngineStablePrefixAcrossTurns(t *testing.T) {
 		t.Error("tool definitions must be byte-identical across turns in a session")
 	}
 }
+
+type spinningToolAdapter struct {
+	calls int
+}
+
+func (s *spinningToolAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	s.calls++
+	if len(req.Tools) > 0 {
+		return &provider.CompletionResponse{
+			ToolCalls: []provider.ToolCall{{ID: fmt.Sprintf("call_%d", s.calls), Name: "read_file", Arguments: `{"path":"a.txt"}`}},
+		}, nil
+	}
+	return &provider.CompletionResponse{Content: "Finished synthesis"}, nil
+}
+
+func TestInteractiveTurnBudgetExtensionGate(t *testing.T) {
+	tools := tool.NewRegistry()
+	tools.Register(&tool.ReadFileTool{})
+	ctxMgr := bcontext.NewManager("test_extension", nil, 128000)
+
+	adapter := &spinningToolAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetMaxIterations(2)
+
+	asked := false
+	engine.SetAskHandler(func(question string, options []string) (string, error) {
+		asked = true
+		return "Allow Once (+15 turns)", nil
+	})
+
+	_, err := engine.RunTurn(context.Background(), "do work", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !asked {
+		t.Errorf("expected askHandler to be triggered when maxIterations reached")
+	}
+	if engine.maxIterations < 17 {
+		t.Errorf("expected maxIterations to be extended to at least 17, got %d", engine.maxIterations)
+	}
+}

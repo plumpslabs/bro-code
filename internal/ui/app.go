@@ -636,6 +636,27 @@ func (m *Model) buildFallbacks() []loop.Fallback {
 func (m *Model) rebuildEngine() {
 	m.engine = loop.NewEngine(m.adapter, m.tools, m.context, m.activeModel)
 	m.engine.SetMode(m.mode)
+	if m.ask != nil {
+		m.engine.SetAskHandler(func(question string, options []string) (string, error) {
+			results, err := m.ask.Ask(context.Background(), []tool.AskQuestion{
+				{
+					Question: question,
+					Options:  options,
+					Multi:    false,
+				},
+			})
+			if err != nil || len(results) == 0 {
+				return "", err
+			}
+			if len(results[0].Answers) > 0 {
+				return results[0].Answers[0], nil
+			}
+			if results[0].Custom != "" {
+				return results[0].Custom, nil
+			}
+			return "", nil
+		})
+	}
 	if m.projectCtx == nil {
 		// Build the compact project overview once (tree + AGENTS/CLAUDE/README
 		// docs) so every turn starts oriented instead of blind-grepping for
@@ -2068,6 +2089,12 @@ func (m *Model) View() tea.View {
 		}
 		log := m.buildLog(contentWidth)
 		if m.width > 0 {
+			// The viewport must be sized before it can be rendered (it returns
+			// "" when width/height are 0). Ensure it tracks the terminal even
+			// before the first WindowSizeMsg lands.
+			if m.logViewport.Width() != m.width {
+				m.logViewport.SetWidth(m.width)
+			}
 			h := m.updateLogHeight()
 			if m.streaming {
 				if log != m.renderedLog {
@@ -2092,7 +2119,14 @@ func (m *Model) View() tea.View {
 				m.renderedKey = key
 				m.renderedH = h
 			}
-			sb.WriteString(log)
+			// Render the log THROUGH the viewport window, not as a raw unbounded
+			// string. The viewport clips the log to the available height and
+			// honours the scroll position, so: newest content always lands at the
+			// bottom (GotoBottom above), older history is reachable by scrolling
+			// up instead of being silently dropped by the renderer, and the total
+			// view height always equals the terminal (no flicker, input/footer
+			// stay pinned).
+			sb.WriteString(m.logViewport.View())
 		} else {
 			sb.WriteString(log)
 		}
@@ -2195,7 +2229,15 @@ func (m *Model) View() tea.View {
 
 	v := tea.NewView(content)
 	v.AltScreen = false
-	v.MouseMode = tea.MouseModeNone
+	// Mouse wheel scrolling only works when the terminal actually reports mouse
+	// events. SELECT mode keeps the terminal's native text selection (no mouse
+	// capture); SCROLL mode (ctrl+m) enables cell-motion events so the wheel
+	// scrolls the log viewport.
+	if m.mouseMode == "SCROLL" {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
 	return v
 }
 
@@ -2280,7 +2322,14 @@ func (m *Model) logKey() string {
 }
 
 // updateLogHeight fits the log viewport between the status slot, the (dynamic
-// height) input, and the footer so the terminal never scrolls the history.
+// height) input, and the footer so the terminal never scrolls the history and
+// the viewport window exactly fills the remaining space.
+//
+// Chrome below the log, top to bottom: the activity slot (2 lines when idle,
+// actH+2 when a turn runs: spinner + steps + blank), the multi-line input
+// (taH + trailing blank), the footer banner (1) and the help hint (1). The
+// viewport must be height - (taH + actH + 6) so the whole view is exactly one
+// terminal tall — anything larger makes the renderer crop a line of history.
 // Returns the computed height so View() can re-park when it changes.
 func (m *Model) updateLogHeight() int {
 	taH := m.promptInput.Height()
@@ -2293,7 +2342,7 @@ func (m *Model) updateLogHeight() int {
 	if m.status != "Ready" && m.status != "Failed" && len(m.activity) > 0 {
 		actH = len(m.activity)
 	}
-	h := m.height - taH - 5 - actH
+	h := m.height - taH - 6 - actH
 	if h < 3 {
 		h = 3
 	}
