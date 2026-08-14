@@ -288,7 +288,7 @@ func (a *OpenCodeAdapter) runCLI(ctx context.Context, model, prompt string, onPr
 			}
 			lines = append(lines, line)
 			// Dedupe rapid spinner flicker, keep meaningful progress.
-			plain := stripOpenCodeHeader(line)
+			plain := strings.TrimSpace(ansiEscapeRe.ReplaceAllString(line, ""))
 			if plain != "" && plain != last && onProgress != nil {
 				onProgress(plain)
 				last = plain

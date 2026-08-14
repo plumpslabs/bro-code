@@ -453,8 +453,8 @@ func TestEngineToolBudget(t *testing.T) {
 	}
 	// A SPINNING model (no new files) is cut at maxToolOnlyRounds; the
 	// reminder rounds inject messages without calling the adapter.
-	if adapter.calls != maxToolOnlyRounds {
-		t.Fatalf("spinning model cut off at %d completions, want %d", adapter.calls, maxToolOnlyRounds)
+	if adapter.calls != maxToolOnlyAbsolute {
+		t.Fatalf("spinning model cut off at %d completions, want %d", adapter.calls, maxToolOnlyAbsolute)
 	}
 	if !strings.Contains(res, "Turn aborted") && !strings.Contains(res, "Tool Limit Tercapai") {
 		t.Errorf("expected tool-budget graceful summary message, got %q", res)

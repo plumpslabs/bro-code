@@ -201,8 +201,16 @@ func main() {
 	scoutMgr := subagent.NewScoutManager(subRunner)
 	tools.Register(&subagent.ScoutTool{Manager: scoutMgr})
 
-	// 8. Launch Bubble Tea v2 App
-	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr, initialMessages...)
+	// 8. Print initial/restored history directly to stdout so it sits naturally
+	// in the OS terminal scrollback buffer (Aider / REPL model), then launch TUI.
+	if len(initialMessages) > 0 {
+		for _, msg := range initialMessages {
+			fmt.Println(ui.FormatMessageForTerminal(msg, 0))
+			fmt.Println()
+		}
+	}
+
+	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr)
 	p := tea.NewProgram(&appModel)
 	appModel.SetProgram(p)
 

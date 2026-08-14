@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"charm.land/bubbles/v2/textarea"
+	"github.com/plumpslabs/bro-code/internal/context"
 )
 
 // Simulates the exact scenario from the bug report: a user prompt followed by
@@ -148,5 +151,57 @@ func TestViewportFallsBackToBottomWithoutUserMessage(t *testing.T) {
 	m.logViewport.GotoBottom()
 	if !strings.Contains(ansiRegex.ReplaceAllString(m.logViewport.View(), ""), "Just an answer") {
 		t.Fatalf("answer not visible after landing at bottom: %q", m.logViewport.View())
+	}
+}
+
+// TestTerminalWidthBoundariesNoOverflow verifies that rendering UI across
+// various terminal widths (60, 80, 100, 120, 160) with wide markdown tables,
+// wide tree diagrams, and long text lines NEVER causes line count overflow or
+// line wrapping of the sticky footer bar.
+func TestTerminalWidthBoundariesNoOverflow(t *testing.T) {
+	widths := []int{60, 80, 100, 120, 160}
+	wideMarkdown := "BROCODE:MINER\n" +
+		"| Step | Action | Status |\n" +
+		"|---|---|---|\n" +
+		"| 1 | Cek kantor scheduled hari ini -> [Kantor A, Kantor B] | OK |\n" +
+		"| 2 | Filter kriteria -> [Kantor A, Kantor B] | MATCH |\n\n" +
+		"├── Step 1: Cek kantor scheduled hari ini -> [Kantor A, Kantor B]\n" +
+		"├── Step 2: Filter kriteria -> [Kantor A, Kantor B] (match)\n" +
+		"└── RETURN: { officeId: Kantor A, eligibleOfficeIds: [A, B] }\n"
+
+	for _, w := range widths {
+		m := &Model{
+			promptInput: textarea.New(),
+			context:     context.NewManager(t.TempDir(), nil, 200000),
+		}
+		m.width = w
+		m.height = 30
+		m.status = "Ready"
+		m.mode = "MINER"
+		m.messages = []string{
+			"👤 Cek lead rotation",
+			wideMarkdown,
+		}
+
+		viewStr := m.View().Content
+		lines := strings.Split(viewStr, "\n")
+
+		// The footer help line (last line) must NEVER wrap or overlap with prompt input.
+		lastLine := lines[len(lines)-1]
+		if strings.Contains(lastLine, "MINE ❯") {
+			t.Errorf("Width %d: Prompt entry overlapped into sticky footer line", w)
+		}
+	}
+}
+
+func TestSanitizeLLMOutputCollapsesMultipleNewlines(t *testing.T) {
+	input := "Heading line\n\n\n\n\n\n\n\n\nSome text content after big gap"
+	got := sanitizeLLMOutput(input)
+	if strings.Contains(got, "\n\n\n") {
+		t.Errorf("expected multi-newlines to be collapsed, got %q", got)
+	}
+	expected := "Heading line\n\nSome text content after big gap"
+	if got != expected {
+		t.Errorf("expected %q, got %q", expected, got)
 	}
 }

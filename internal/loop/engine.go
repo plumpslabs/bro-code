@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/hooks"
@@ -207,6 +208,47 @@ const (
 	maxToolOnlyAbsolute = 20
 )
 
+// CalculateAdaptiveToolBudget dynamically scales the tool budget based on
+// prompt complexity, active mode, and task keywords (Fase 2.2).
+func CalculateAdaptiveToolBudget(prompt string, mode string) int {
+	base := 14
+	if mode == "MINER" || mode == "PLANNER" {
+		base = 18
+	}
+	p := strings.ToLower(prompt)
+	words := len(strings.Fields(p))
+	if words > 30 || strings.Contains(p, "refactor") || strings.Contains(p, "audit") || strings.Contains(p, "migrate") || strings.Contains(p, "architecture") {
+		base += 6
+	}
+	if base > 25 {
+		return 25
+	}
+	if base < 8 {
+		return 8
+	}
+	return base
+}
+
+// maxParallelReadOnlyTools caps how many read-only tools execute concurrently
+// in one round. Read-only calls are stateless, so parallel execution cuts
+// multi-read rounds from ~N×latency to ~N/cap×latency — the biggest per-turn
+// speedup available without changing model behavior. The cap keeps a 20-tool
+// batch from hammering the disk, the network, or the LSP server at once.
+const maxParallelReadOnlyTools = 4
+
+// isParallelReadOnly reports whether a tool is safe to execute concurrently:
+// read-only, stateless, no interactive prompt, no session-affecting side
+// effects. Everything else (write_file, edit_file, delete_file, bash,
+// ask_user, git, undo, review_changes, memory) stays sequential so side
+// effects and user prompts keep their order.
+func isParallelReadOnly(name string) bool {
+	switch name {
+	case "read_file", "list_dir", "grep", "glob", "code_symbols", "search_code", "fetch_url", "web_search":
+		return true
+	}
+	return false
+}
+
 // SetProjectContext injects a compact structural overview of the project into
 // every turn's system prompt (see search.BuildProjectContext). Empty disables.
 func (e *Engine) SetProjectContext(pc string) {
@@ -375,11 +417,48 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	for {
 		iteration++
 		if iteration > e.maxIterations {
-			e.state = StateFailed
 			if onUpdate != nil {
-				onUpdate(e.state, "Max loop iterations reached")
+				onUpdate(e.state, "⚠️ Maximum iterations reached — synthesizing final answer from explored context...")
 			}
-			return "", fmt.Errorf("reached max iterations (%d)", e.maxIterations)
+			synthPrompt := fmt.Sprintf("⚠️ MAXIMUM ITERATIONS REACHED (%d): You have reached the maximum iteration limit for this task. Tools are now DISABLED for this final response. You MUST now synthesize a helpful, comprehensive response for the user in the user's language based ONLY on the files and context you have explored so far. Answer as much of the user's prompt as possible, summarize your findings, and clearly state any missing context or next steps.%s", e.maxIterations, e.exploredSummary())
+			_ = e.context.AppendUserMessage(synthPrompt)
+
+			localSysPrompt := fmt.Sprintf("You are BroCode CLI, an autonomous AI coding assistant.\n%s", e.projectContextBlock())
+			reqMessages := append([]provider.Message{
+				{Role: "system", Content: localSysPrompt},
+			}, e.context.Messages()...)
+
+			synthReq := provider.CompletionRequest{
+				Model:       e.model,
+				Messages:    reqMessages,
+				Tools:       nil,
+				Temperature: 0.2,
+			}
+
+			synthResp, synthErr := e.complete(ctx, synthReq)
+			if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) != "" {
+				res := synthResp.Content + "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (Batas Maksimal 25 Ronde Tercapai).* "
+				_ = e.context.AppendAssistantTurn("", res, nil)
+				e.state = StateDone
+				if onUpdate != nil {
+					onUpdate(e.state, "Completed with graceful context synthesis")
+				}
+				return res, nil
+			}
+
+			// Deterministic Fallback if synthesis completion fails/times out:
+			// NEVER surface a raw error to the user — construct a helpful summary!
+			e.state = StateDone
+			fallbackMsg := fmt.Sprintf("⚠️ Exploration budget limit reached (%d rounds).\n\nHere is what was verified from the explored codebase:\n%s", e.maxIterations, e.exploredSummary())
+			if e.lastReasoning != "" {
+				fallbackMsg += "\n\n**Last Working Focus**: " + e.lastReasoning
+			}
+			fallbackMsg += "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (Batas Maksimal 25 Ronde Tercapai).* "
+			_ = e.context.AppendAssistantTurn("", fallbackMsg, nil)
+			if onUpdate != nil {
+				onUpdate(e.state, "Completed with fallback context synthesis")
+			}
+			return fallbackMsg, nil
 		}
 
 		// Progress detection: a tool-only round that examined NO new file is a
@@ -455,8 +534,12 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			sysPrompt += "\n\nAVAILABLE SKILLS:\n" + e.skillsCtx + "\nWhen a task matches a skill, load its SKILL.md file (read_file) and follow its instructions."
 		}
 		if e.mem != nil {
-			if ws := e.mem.WarmStart(); ws != "" {
+			prompt := e.context.LastUserPrompt()
+			if ws := e.mem.WarmStartRelevant(prompt); ws != "" {
 				sysPrompt += "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + ws
+				if onUpdate != nil && iteration == 1 {
+					onUpdate(e.state, "🧠 Warm Start: Recalled project memory & hot files")
+				}
 			}
 		}
 		sysPrompt += fmt.Sprintf(`
@@ -498,7 +581,8 @@ Engine Mode Rules (%s):
 19. LARGE FILES & TRUNCATION: read_file of a file over 250 lines returns the first 250 with a notice — cover the rest with start_line/end_line range reads (2-3 max for a typical large file), or use code_search to locate symbols first. If a tool result is truncated, narrow the range ONCE and move on; NEVER fight truncation with bash sed/head/tail/grep loops on the same file hoping for different output — that burns rounds and gets the turn aborted. Range reads of a large file ARE progress; answer from what you have after covering the key sections.`
 		}
 
-		if e.toolOnlyRounds >= maxToolOnlyRounds && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute) {
+		adaptiveCap := CalculateAdaptiveToolBudget(e.context.LastUserPrompt(), e.Mode())
+		if e.toolOnlyRounds >= adaptiveCap && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute) {
 			if onUpdate != nil {
 				onUpdate(e.state, "⚠️ Tool exploration limit reached — synthesizing graceful answer from explored context...")
 			}
@@ -624,11 +708,25 @@ Engine Mode Rules (%s):
 			// This round was tool-only (no answer text); count it toward the
 			// budget so a model that never answers gets cut off.
 			e.toolOnlyRounds++
-			// Loop guard: if the model repeats the exact same tool call
-			// (name + args) multiple times in a row it is spinning, not
-			// progressing. Block the repeat and tell the model to answer from
-			// the results it already has instead of re-running the tool.
-			for _, tc := range resp.ToolCalls {
+
+			// PHASE 1 — DECISION (sequential, in call order): classify every
+			// tool call as either blocked (guard/deny/override message) or
+			// pending real execution. This phase MUST stay sequential: the
+			// mode guards, repeat detection and permission gate are stateful
+			// or interactive (the gate can pop a confirmation modal), and the
+			// tool-call hook can veto/override. Outcomes are stored in an
+			// index-aligned slice so the append phase below can emit results
+			// in the model's ORIGINAL call order — providers require the
+			// tool_call → tool_result pairing to be in order.
+			type pendingTool struct {
+				tc     provider.ToolCall
+				exec   bool   // true → run the tool for real
+				output string // guard/denied/override message when !exec
+			}
+			pending := make([]pendingTool, len(resp.ToolCalls))
+			execCount := 0
+
+			for i, tc := range resp.ToolCalls {
 				if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" {
 					hasCodeChanges = true
 				}
@@ -644,7 +742,7 @@ Engine Mode Rules (%s):
 						if onUpdate != nil {
 							onUpdate(e.state, guardMsg)
 						}
-						_ = e.context.AppendToolResult(tc.ID, guardMsg)
+						pending[i] = pendingTool{tc: tc, output: guardMsg}
 						continue
 					}
 				case "MINER":
@@ -653,7 +751,7 @@ Engine Mode Rules (%s):
 						if onUpdate != nil {
 							onUpdate(e.state, guardMsg)
 						}
-						_ = e.context.AppendToolResult(tc.ID, guardMsg)
+						pending[i] = pendingTool{tc: tc, output: guardMsg}
 						continue
 					}
 				}
@@ -690,7 +788,7 @@ Engine Mode Rules (%s):
 						if onUpdate != nil {
 							onUpdate(e.state, "⚠️ Loop detected — instructing model to answer directly")
 						}
-						_ = e.context.AppendToolResult(tc.ID, guardMsg)
+						pending[i] = pendingTool{tc: tc, output: guardMsg}
 						continue
 					}
 				} else {
@@ -702,7 +800,7 @@ Engine Mode Rules (%s):
 				// (Allow once / Always allow / Deny) via the interactive modal.
 				approved, reason, gerr := e.tools.GateAction(ctx, tc)
 				if gerr != nil {
-					_ = e.context.AppendToolResult(tc.ID, fmt.Sprintf("Tool error: %v", gerr))
+					pending[i] = pendingTool{tc: tc, output: fmt.Sprintf("Tool error: %v", gerr)}
 					continue
 				}
 				if !approved {
@@ -710,7 +808,7 @@ Engine Mode Rules (%s):
 					if onUpdate != nil {
 						onUpdate(e.state, guardMsg)
 					}
-					_ = e.context.AppendToolResult(tc.ID, guardMsg)
+					pending[i] = pendingTool{tc: tc, output: guardMsg}
 					continue
 				}
 
@@ -722,35 +820,91 @@ Engine Mode Rules (%s):
 					"args": tc.Arguments,
 				})
 				if hookOverride != "" {
-					e.state = StateObserving
-					if err := e.context.AppendToolResult(tc.ID, hookOverride); err != nil {
-						return "", err
-					}
+					pending[i] = pendingTool{tc: tc, output: hookOverride}
 					continue
 				}
 
-				toolOutput, err := e.tools.Execute(ctx, tc.Name, tc.Arguments)
-				if err != nil {
-					toolOutput = fmt.Sprintf("Tool error: %v", err)
-				}
+				pending[i] = pendingTool{tc: tc, exec: true}
+				execCount++
+			}
 
-				// Track files the model edited so the native convention checker
-				// can review them (debug leftovers, markers, type safety,
-				// duplicate symbols) before the turn is declared done.
-				if tc.Name == "write_file" || tc.Name == "edit_file" {
-					if p := extractToolPath(tc.Arguments); p != "" {
-						e.editedFiles = append(e.editedFiles, p)
+			// PHASE 2 — EXECUTION: run every pending call. Read-only tools
+			// (read_file, grep, glob, list_dir, search_code, code_symbols,
+			// fetch_url, web_search) execute CONCURRENTLY — they are stateless
+			// and their results land in index-aligned slots, so ordering is
+			// preserved regardless of completion order. Mutating/interactive
+			// tools (write_file, edit_file, delete_file, bash, ask_user, git,
+			// undo, review_changes, memory) run sequentially to keep their
+			// side effects and user prompts ordered.
+			if execCount > 0 {
+				sem := make(chan struct{}, maxParallelReadOnlyTools)
+				var wg sync.WaitGroup
+				for i := range pending {
+					if !pending[i].exec || !isParallelReadOnly(pending[i].tc.Name) {
+						continue
 					}
+					wg.Add(1)
+					go func(idx int) {
+						defer wg.Done()
+						select {
+						case sem <- struct{}{}:
+							defer func() { <-sem }()
+						case <-ctx.Done():
+							pending[idx].output = "Tool call cancelled: " + ctx.Err().Error()
+							return
+						}
+						out, err := e.tools.Execute(ctx, pending[idx].tc.Name, pending[idx].tc.Arguments)
+						if err != nil {
+							out = fmt.Sprintf("Tool error: %v", err)
+						}
+						pending[idx].output = out
+						e.hookRun(ctx, hooks.EventToolResult, map[string]string{
+							"tool":   pending[idx].tc.Name,
+							"output": out,
+						})
+					}(i)
+				}
+				wg.Wait()
+				if ctx.Err() != nil {
+					return "", ctx.Err()
 				}
 
-				// Lifecycle hook: after tool execution, with the tool's output.
-				e.hookRun(ctx, hooks.EventToolResult, map[string]string{
-					"tool":   tc.Name,
-					"output": toolOutput,
-				})
+				// Sequential pass for non-parallel tools (mutating / interactive).
+				for i := range pending {
+					if !pending[i].exec || isParallelReadOnly(pending[i].tc.Name) {
+						continue
+					}
+					out, err := e.tools.Execute(ctx, pending[i].tc.Name, pending[i].tc.Arguments)
+					if err != nil {
+						out = fmt.Sprintf("Tool error: %v", err)
+					}
+					pending[i].output = out
 
-				e.state = StateObserving
-				if err := e.context.AppendToolResult(tc.ID, toolOutput); err != nil {
+					// Track files the model edited so the native convention checker
+					// can review them (debug leftovers, markers, type safety,
+					// duplicate symbols) before the turn is declared done.
+					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" {
+						if p := extractToolPath(pending[i].tc.Arguments); p != "" {
+							e.editedFiles = append(e.editedFiles, p)
+						}
+					}
+
+					// Lifecycle hook: after tool execution, with the tool's output.
+					e.hookRun(ctx, hooks.EventToolResult, map[string]string{
+						"tool":   pending[i].tc.Name,
+						"output": out,
+					})
+				}
+			}
+
+			// PHASE 3 — APPEND (original call order): emit every result — real
+			// outputs AND guard/deny/override messages — in the exact order the
+			// model issued its tool calls. Providers require the tool_call →
+			// tool_result pairing to be sequential; parallel execution must
+			// never reorder it.
+			e.state = StateObserving
+			for i := range pending {
+				if err := e.context.AppendToolResult(pending[i].tc.ID, pending[i].output); err != nil {
 					return "", err
 				}
 			}

@@ -19,6 +19,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/glamour"
+	"golang.org/x/term"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/hooks"
 	"github.com/plumpslabs/bro-code/internal/loop"
@@ -53,8 +54,8 @@ var mdRenderers = struct {
 }{m: map[int]*glamour.TermRenderer{}}
 
 func renderMarkdown(text string, wrap int) string {
-	if wrap < 40 {
-		wrap = 90 // fallback for headless/narrow terminals
+	if wrap < 30 {
+		wrap = 30
 	}
 
 	mdRenderers.Lock()
@@ -82,6 +83,7 @@ func renderMarkdown(text string, wrap int) string {
 	// and make tables/paragraphs look ragged ("acak-acakan"). Strip per-line
 	// trailing whitespace; the box border is the right edge.
 	res = stripTrailingWS(res)
+	res = formatTableOutput(res, wrap)
 
 	// Clean up any remaining unparsed **text** into bold lipgloss styling
 	if strings.Contains(res, "**") {
@@ -109,6 +111,49 @@ func stripTrailingWS(s string) string {
 		lines[i] = strings.TrimRight(l, " \t")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// formatTableOutput cleans up Glamour table rendering by clamping horizontal
+// divider lines to the terminal width and merging orphaned table cell wraps.
+func formatTableOutput(text string, wrap int) string {
+	if !strings.Contains(text, "│") && !strings.Contains(text, "┼") && !strings.Contains(text, "─") {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	var cleaned []string
+	inTable := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, " \t")
+		cleanText := ansiRegex.ReplaceAllString(trimmed, "")
+		cleanTrimmed := strings.TrimSpace(cleanText)
+
+		// Detect table state
+		if strings.Contains(trimmed, "│") {
+			inTable = true
+		} else if cleanTrimmed == "" {
+			inTable = false
+		}
+
+		// Clamp horizontal divider lines to terminal wrap width
+		if strings.Contains(trimmed, "─") && (strings.Contains(trimmed, "┼") || strings.Contains(trimmed, "│")) {
+			runes := []rune(trimmed)
+			if wrap > 10 && len(runes) > wrap {
+				trimmed = string(runes[:wrap])
+			}
+		}
+
+		// Merge orphaned table cell wrap lines (lines inside a table that lack column separators)
+		if inTable && !strings.Contains(trimmed, "│") && !strings.Contains(trimmed, "─") && cleanTrimmed != "" {
+			if len(cleaned) > 0 {
+				cleaned[len(cleaned)-1] = cleaned[len(cleaned)-1] + " " + cleanTrimmed
+				continue
+			}
+		}
+
+		cleaned = append(cleaned, trimmed)
+	}
+	return strings.Join(cleaned, "\n")
 }
 
 // Model defines the Bubble Tea v2 TUI state.
@@ -250,6 +295,10 @@ type Model struct {
 	// filesExpanded toggles the FILES change summary at the end of the answer
 	// between compact per-file rows and the full +/- diff (ctrl+f).
 	filesExpanded bool
+
+	// mouseMode toggles between "SELECT" (native mouse text selection) and
+	// "SCROLL" (mouse wheel viewport scrolling) via ctrl+m.
+	mouseMode string
 
 	// Connect Modal State (multi-step wizard)
 	connectStep         int // 0=provider pick, 1=name, 2=API key, 3=base URL, 4=models
@@ -493,6 +542,7 @@ func NewApp(
 		lspMgr:              lspMgr,
 		scoutMgr:            scoutMgr,
 		mode:                "BUILDER",
+		mouseMode:           "SELECT",
 		status:              "Ready",
 		messages:            msgs,
 		promptInput:         ti,
@@ -737,6 +787,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connectBaseURLInput.SetWidth(cw)
 			m.connectModelsInput.SetWidth(cw)
 			m.updateLogHeight()
+			m.logViewport.GotoBottom()
 		}
 
 	case spinnerTickMsg:
@@ -891,6 +942,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.openFileConfirm(msg)
 		return m, nil
 
+	case tea.MouseMsg:
+		m.logViewport, _ = m.logViewport.Update(msg)
+		return m, nil
+
 	case tea.KeyMsg:
 		keyStr := msg.String()
 
@@ -940,6 +995,46 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filesExpanded = !m.filesExpanded
 				m.renderedLog = "" // force re-render of the cached log
 				m.renderedKey = ""
+			}
+		case "ctrl+m":
+			// Toggle mouse mode between SELECT (native text selection) and SCROLL (mouse wheel scrolling)
+			if m.mouseMode == "SCROLL" {
+				m.mouseMode = "SELECT"
+				m.appendMessages("🖱️ Mouse Mode: SELECT (Native mouse drag highlight & copy enabled)")
+			} else {
+				m.mouseMode = "SCROLL"
+				m.appendMessages("🖱️ Mouse Mode: SCROLL (Mouse wheel viewport scrolling enabled)")
+			}
+			return m, nil
+
+		case "ctrl+y":
+			// Copy the last assistant response directly to OS clipboard
+			lastAns := m.lastAssistantAnswer()
+			if lastAns != "" {
+				if err := clipboard.WriteAll(lastAns); err == nil {
+					m.appendMessages("📋 Copied last assistant response to OS clipboard!")
+				}
+			}
+			return m, nil
+
+		case "ctrl+u":
+			m.logViewport.HalfPageUp()
+			return m, nil
+
+		case "ctrl+p":
+			// Open full conversation log in system pager (`less -R`)
+			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug {
+				contentWidth := m.width - 4
+				if contentWidth < 20 {
+					contentWidth = 80
+				}
+				fullLog := m.buildLog(contentWidth)
+				cmd := exec.Command("less", "-R")
+				cmd.Stdin = strings.NewReader(fullLog)
+				cmd.Stdout = os.Stdout
+				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+					return statusUpdateMsg("Ready")
+				})
 			}
 			return m, nil
 
@@ -1986,7 +2081,7 @@ func (m *Model) View() tea.View {
 				// the END of the answer. Parking at the user's prompt instead left
 				// long answers cut off below the fold and made earlier history look
 				// like it vanished (it was only scrolled above the parked view).
-				if key != m.renderedKey {
+				if key != m.renderedKey || m.renderedH == 0 {
 					m.logViewport.GotoBottom()
 				}
 				// Height-only change (the live activity slot grew/shrunk): content
@@ -1996,7 +2091,7 @@ func (m *Model) View() tea.View {
 				m.renderedKey = key
 				m.renderedH = h
 			}
-			sb.WriteString(m.logViewport.View())
+			sb.WriteString(log)
 		} else {
 			sb.WriteString(log)
 		}
@@ -2061,8 +2156,10 @@ func (m *Model) View() tea.View {
 		}
 		tokensStr := fmt.Sprintf("Tokens: %s/%s", provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()))
 		// Live cost estimate in the footer (per-session, from adapter usage).
-		if cost := m.engine.SessionCostUSD(); cost > 0 {
-			tokensStr += fmt.Sprintf(" · Cost: $%.4f", cost)
+		if m.engine != nil {
+			if cost := m.engine.SessionCostUSD(); cost > 0 {
+				tokensStr += fmt.Sprintf(" · Cost: $%.4f", cost)
+			}
 		}
 
 		// Live LSP indicator: count of available language servers (binary on
@@ -2079,13 +2176,37 @@ func (m *Model) View() tea.View {
 		footerBanner := fmt.Sprintf(" BROCODE🔥 | Mode: %s | Provider: %s | Model: %s | Session: %s | %s%s ",
 			modeBadgeStyle.Render(m.mode+" (Shift+Tab)"), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
 
+		helpStr := " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+M mouse · /help "
+		if m.width >= 120 {
+			helpStr = " ENTER send · Alt+Enter newline · Tab/Shift+Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+M mouse mode · /sessions · /models · /lsp · /help "
+		} else if m.width >= 90 {
+			helpStr = " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · Ctrl+Y copy · Ctrl+M mouse · /sessions · /models · /help "
+		}
+		helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		if m.width > 0 {
+			helpStyle = helpStyle.MaxWidth(m.width)
+		}
+
 		sb.WriteString(bannerStyle.Render(footerBanner) + "\n")
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(" ENTER send · Alt+Enter newline · Tab/Shift+Tab mode · ↑/↓ history · PgUp/PgDn scroll · /sessions · /models · /lsp · /help "))
+		sb.WriteString(helpStyle.Render(helpStr))
 		content = sb.String()
 	}
 
 	v := tea.NewView(content)
+	v.AltScreen = false
+	v.MouseMode = tea.MouseModeNone
 	return v
+}
+
+func clipToTerminalBounds(content string, maxH int) string {
+	if maxH <= 0 {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > maxH {
+		lines = lines[:maxH]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // buildLog renders the message history + live streaming block. The history
@@ -2122,6 +2243,25 @@ func (m *Model) lastAssistantReasoning() string {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role == "assistant" && msgs[i].Reasoning != "" {
 			return msgs[i].Reasoning
+		}
+	}
+	return ""
+}
+
+// lastAssistantAnswer returns the text of the most recent assistant answer.
+func (m *Model) lastAssistantAnswer() string {
+	msgs := m.context.Messages()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" && strings.TrimSpace(msgs[i].Content) != "" {
+			return msgs[i].Content
+		}
+	}
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if strings.HasPrefix(m.messages[i], "BROCODE") {
+			parts := strings.SplitN(m.messages[i], "\n", 2)
+			if len(parts) > 1 {
+				return parts[1]
+			}
 		}
 	}
 	return ""
@@ -2419,6 +2559,8 @@ func isStatusLine(trimmed string) bool {
 	return false
 }
 
+var multiNewlineRegex = regexp.MustCompile(`\n{3,}`)
+
 func sanitizeLLMOutput(content string) string {
 	content = ansiRegex.ReplaceAllString(content, "")
 
@@ -2441,10 +2583,27 @@ func sanitizeLLMOutput(content string) string {
 	res := strings.TrimSpace(strings.Join(cleanLines, "\n"))
 	res = strings.TrimPrefix(res, "[0m")
 	res = strings.TrimSuffix(res, "[0m")
+	res = multiNewlineRegex.ReplaceAllString(res, "\n\n")
 	return strings.TrimSpace(res)
 }
 
+func getTerminalWidth() int {
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 20 {
+		return w
+	}
+	return 120
+}
+
+// FormatMessageForTerminal renders a formatted message string for stdout stream printing.
+func FormatMessageForTerminal(msg string, width int) string {
+	return formatMessage(msg, width, false)
+}
+
 func formatMessage(msg string, width int, filesExpanded bool) string {
+	if width <= 0 {
+		width = getTerminalWidth() - 2
+	}
+
 	userLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 	userBarStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("86")).Padding(1, 2)
 
@@ -2536,9 +2695,9 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 		// Wrap markdown to the actual content width (border 1 + padding 2×2 are
 		// consumed by the box), so lines use the full terminal instead of a
 		// hardcoded 90 columns.
-		wrap := width - 5
-		if wrap < 40 {
-			wrap = 90
+		wrap := width - 6
+		if wrap < 30 {
+			wrap = 30
 		}
 		formattedBody := renderMarkdown(body, wrap)
 		if strings.Contains(formattedBody, "--- ") || strings.Contains(formattedBody, "+++ ") || strings.Contains(formattedBody, "@@ ") {
@@ -2548,20 +2707,21 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 		// Mode badge: a small colored chip next to the BROCODE label so the
 		// user always knows which engine mode produced this answer.
 		label := botLabelStyle.Render("BROCODE")
-		if mode != "" {
-			badge := lipgloss.NewStyle().Bold(true).Padding(0, 1)
-			switch mode {
-			case "BUILDER":
-				badge = badge.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("42"))
-			case "PLANNER":
-				badge = badge.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("39"))
-			case "MINER":
-				badge = badge.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("214"))
-			default:
-				badge = badge.Foreground(lipgloss.Color("241"))
-			}
-			label += " " + badge.Render(mode)
+		if mode == "" {
+			mode = "BUILDER"
 		}
+		badge := lipgloss.NewStyle().Bold(true).Padding(0, 1)
+		switch mode {
+		case "BUILDER":
+			badge = badge.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("42"))
+		case "PLANNER":
+			badge = badge.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("39"))
+		case "MINER":
+			badge = badge.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("214"))
+		default:
+			badge = badge.Foreground(lipgloss.Color("241"))
+		}
+		label += " " + badge.Render(mode)
 
 		if thinking != "" {
 			return botBarStyle.Render(label + "\n" +

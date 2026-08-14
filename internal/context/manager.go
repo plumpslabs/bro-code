@@ -237,6 +237,19 @@ func (m *Manager) Messages() []provider.Message {
 	return cp
 }
 
+// LastUserPrompt returns the content of the most recent user prompt in context.
+func (m *Manager) LastUserPrompt() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].Role == "user" && m.messages[i].ToolCallID == "" {
+			return m.messages[i].Content
+		}
+	}
+	return ""
+}
+
 // NeedsCompaction checks if token usage exceeds 85% threshold.
 func (m *Manager) NeedsCompaction() bool {
 	m.mu.Lock()
@@ -332,16 +345,21 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 	var display []string
 	skipped := 0
 	restored := 0
+	var pendingTools []string
+
+	flushPendingTools := func() {
+		if len(pendingTools) > 0 {
+			display = append(display, compactToolSummary(pendingTools))
+			pendingTools = nil
+		}
+	}
+
 	for _, ev := range events {
 		if m.TotalTokens() > int(float64(m.MaxWindow())*0.8) && restored > 0 {
 			skipped = len(events) - restored
 			break
 		}
 
-		// Parse the payload so assistant turns keep their real structure
-		// instead of being rendered as raw JSON — a tool-call-only turn has
-		// empty Content, and the ExtractEventContent fallback would dump the
-		// whole payload into the history and the LLM context.
 		var msg provider.Message
 		_ = json.Unmarshal([]byte(ev.PayloadJSON), &msg)
 
@@ -352,17 +370,18 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 				text = ExtractEventContent(ev.PayloadJSON)
 			}
 			m.ImportUserMessage(text)
-			if isEngineReminder(text) {
-				display = append(display, "⚙️ "+text)
-			} else {
+			if !isEngineReminder(text) {
+				flushPendingTools()
 				display = append(display, "YOU:\n"+text)
 			}
 		case "assistant_msg":
 			m.ImportAssistantTurn(msg.Reasoning, msg.Content, msg.ToolCalls)
+			for _, tc := range msg.ToolCalls {
+				pendingTools = append(pendingTools, tc.Name)
+			}
 			if strings.TrimSpace(msg.Content) != "" {
+				flushPendingTools()
 				display = append(display, "BROCODE:\n"+msg.Content)
-			} else if len(msg.ToolCalls) > 0 {
-				display = append(display, "BROCODE: 🔧 "+toolCallSummary(msg.ToolCalls))
 			}
 		case "tool_result":
 			text := msg.Content
@@ -373,6 +392,7 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 		}
 		restored++
 	}
+	flushPendingTools()
 	if skipped > 0 {
 		display = append(display, fmt.Sprintf("💾 Restored the %d most recent events; %d older events omitted to stay within the context window.", restored, skipped))
 	}
@@ -380,28 +400,32 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 }
 
 // isEngineReminder reports whether a persisted user_msg was injected by the
-// engine (loop guard, tool budget, verification failure) rather than typed by
-// the user. Such messages must be restored for the model's context but should
-// not be displayed as if the user had said them.
+// engine (loop guard, tool budget, verification failure, synthesis prompt)
+// rather than typed by the user. Such messages must be restored for the model's
+// context but should not be displayed as if the user had said them.
 func isEngineReminder(text string) bool {
-	for _, prefix := range []string{
-		"⚠️ You have been calling tools",
-		"⚠️ [LOOP GUARD]",
-		"Level 1 verification check failed:",
-	} {
-		if strings.HasPrefix(text, prefix) {
-			return true
-		}
+	if strings.Contains(text, "⚠️") || strings.Contains(text, "[LOOP GUARD]") || strings.Contains(text, "verification check failed") {
+		return true
 	}
 	return false
 }
 
-// toolCallSummary renders a compact, human-readable list of tool calls for
-// resumed history instead of dumping the raw arguments JSON.
-func toolCallSummary(calls []provider.ToolCall) string {
-	names := make([]string, 0, len(calls))
-	for _, tc := range calls {
-		names = append(names, tc.Name)
+// compactToolSummary renders a single compact 1-line process summary for tool calls.
+func compactToolSummary(tools []string) string {
+	if len(tools) == 0 {
+		return ""
 	}
-	return strings.Join(names, " → ")
+	counts := make(map[string]int)
+	var order []string
+	for _, name := range tools {
+		if counts[name] == 0 {
+			order = append(order, name)
+		}
+		counts[name]++
+	}
+	var parts []string
+	for _, name := range order {
+		parts = append(parts, fmt.Sprintf("%s (x%d)", name, counts[name]))
+	}
+	return fmt.Sprintf("PROCESS:\n⚙️ Process (%d tools executed): %s", len(tools), strings.Join(parts, " · "))
 }

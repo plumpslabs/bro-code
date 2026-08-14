@@ -151,3 +151,26 @@ func fmtTokens(n int) string {
 		return fmt.Sprintf("%d", n)
 	}
 }
+
+// TelemetryAdvisor analyzes session usage patterns and returns optimization suggestions (Fase 5.2).
+func (u *UsageTracker) TelemetryAdvisor() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	totalTokens := 0
+	for _, m := range u.models {
+		totalTokens += m.TotalTokens
+	}
+
+	var suggestions []string
+	if totalTokens > 100_000 {
+		suggestions = append(suggestions, "💡 High token usage detected: consider using /compact or specifying narrower search paths.")
+	}
+	if len(u.models) > 1 {
+		suggestions = append(suggestions, "ℹ️ Multiple models active: fallback routing engaged successfully.")
+	}
+	if len(suggestions) == 0 {
+		return "✅ BroCode session operating efficiently. Token consumption is within optimal bounds."
+	}
+	return strings.Join(suggestions, "\n")
+}

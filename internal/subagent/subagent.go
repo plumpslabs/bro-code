@@ -341,3 +341,30 @@ func (t *Tool) Execute(ctx context.Context, argsJSON string) (string, error) {
 		return "", fmt.Errorf("subagent requires either 'task' or 'tasks'")
 	}
 }
+
+// RunScoutSwarm executes parallel speculative research subagents across different
+// subdirectories, returning aggregated findings without polluting the main conversation (Inovasi 1).
+func (r *Runner) RunScoutSwarm(ctx context.Context, subpaths []string, goal string) string {
+	if r == nil || len(subpaths) == 0 {
+		return "No subpaths provided for scout swarm."
+	}
+
+	var agents []SubAgent
+	for i, p := range subpaths {
+		agents = append(agents, SubAgent{
+			ID:   fmt.Sprintf("Scout_%d", i+1),
+			Task: fmt.Sprintf("Scout directory %s to accomplish goal: %s", p, goal),
+		})
+	}
+
+	reports, err := r.RunMany(ctx, agents, true, nil)
+	if err != nil {
+		return "Scout swarm error: " + err.Error()
+	}
+	var sb strings.Builder
+	sb.WriteString("⚡ Speculative Scout Swarm Findings:\n")
+	for i, res := range reports {
+		sb.WriteString(fmt.Sprintf("\n### [Scout_%d]\n%s\n", i+1, res))
+	}
+	return strings.TrimSpace(sb.String())
+}

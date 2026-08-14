@@ -92,11 +92,8 @@ func TestRestoreSessionRendersToolCallsNotRawJSON(t *testing.T) {
 		t.Fatalf("raw JSON leaked into restored history: %v", display)
 	}
 
-	// The compact tool summary and the real answer are both present.
+	// The final answer is present in display, tool-only turns are kept for model context.
 	joined := strings.Join(display, "\n")
-	if !strings.Contains(joined, "grep → read_file") {
-		t.Errorf("expected compact tool summary, got: %v", display)
-	}
 	if !strings.Contains(joined, "ini jawabannya") {
 		t.Errorf("expected final answer in history, got: %v", display)
 	}
@@ -131,14 +128,14 @@ func TestRestoreSessionEngineReminderAndCap(t *testing.T) {
 		t.Errorf("expected some events dropped to fit window, restored %d", len(mgr.Messages()))
 	}
 
-	// Engine-injected reminders restore for the model but display as ⚙️ notes.
+	// Engine-injected reminders restore for the model but are hidden from display.
 	mgr2 := NewManager("s2", nil, 128000)
 	events2 := []store.Event{
 		{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: "⚠️ You have been calling tools for many rounds without answering. STOP calling tools"})},
 	}
 	display2 := RestoreSession(mgr2, events2)
-	if !strings.HasPrefix(strings.Join(display2, "\n"), "⚙️ ") {
-		t.Errorf("engine reminder should display as system note, got: %v", display2)
+	if len(display2) != 0 {
+		t.Errorf("engine reminder should be hidden from display, got: %v", display2)
 	}
 	if len(mgr2.Messages()) != 1 || mgr2.Messages()[0].Content == "" {
 		t.Errorf("reminder must still be restored to model context: %+v", mgr2.Messages())

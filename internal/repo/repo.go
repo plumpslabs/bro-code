@@ -103,7 +103,7 @@ func BuildMap(workspaceDir string, usage *Usage) *Map {
 		EntryPoints: detectEntryPoints(files),
 	}
 	if usage != nil {
-		m.HotFiles = usage.Top(5)
+		m.HotFiles = usage.Top(10)
 	}
 
 	// Cache hit: same file list → same map (tree + entry points are pure
