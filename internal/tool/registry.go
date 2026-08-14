@@ -166,6 +166,7 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 			return false, "invalid write_file arguments: " + err.Error(), nil
 		}
+		args.Path = resolvePath(args.Path)
 		if _, err := os.Stat(args.Path); err == nil {
 			return true, "", nil // existing file → normal edit
 		}
@@ -177,6 +178,7 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 			return false, "invalid delete_file arguments: " + err.Error(), nil
 		}
+		args.Path = resolvePath(args.Path)
 		return r.gateFileAction(ctx, "delete_file", args.Path)
 	case "bash":
 		var args struct {
@@ -371,6 +373,11 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		return "", err
 	}
 
+	// Leading-slash paths (" /crm_sales_backend/src/...") are a common LLM
+	// habit that would fail against the filesystem root — resolve to the
+	// project-relative form when the absolute one does not exist.
+	args.Path = resolvePath(args.Path)
+
 	// Native guard: never read secrets (.env, keys) or heavy dirs
 	// (node_modules, vendor, ...) into the LLM context.
 	if err := GuardFile(args.Path); err != nil {
@@ -435,6 +442,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+	args.Path = resolvePath(args.Path)
 
 	// Native guard: never write into heavy dirs or sensitive files.
 	if err := GuardFile(args.Path); err != nil {
@@ -494,6 +502,7 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+	args.Path = resolvePath(args.Path)
 
 	// Native guard: never edit heavy dirs or sensitive files.
 	if err := GuardFile(args.Path); err != nil {
@@ -561,6 +570,7 @@ func (t *DeleteFileTool) Execute(ctx context.Context, argsJSON string) (string, 
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+	args.Path = resolvePath(args.Path)
 
 	// Native guard: never delete inside heavy dirs or sensitive files.
 	if err := GuardFile(args.Path); err != nil {
@@ -604,6 +614,8 @@ func (t *ListDirTool) Execute(ctx context.Context, argsJSON string) (string, err
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+	args.Path = resolvePath(args.Path)
+
 	if args.Path == "" {
 		args.Path = "."
 	}
@@ -654,9 +666,13 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+
 	if args.Path == "" {
 		args.Path = "."
 	}
+	// Leading-slash paths (a common LLM habit) would resolve against the
+	// filesystem root and silently return "no matches", burning rounds.
+	args.Path = resolvePath(args.Path)
 
 	// Native guard: never search inside heavy dirs (node_modules, vendor,
 	// target, ...) or dump sensitive files.
@@ -872,6 +888,7 @@ func (t *AskUserTool) Execute(ctx context.Context, argsJSON string) (string, err
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+
 	if len(args.Questions) == 0 {
 		return "", fmt.Errorf("ask_user requires at least one question")
 	}
@@ -993,6 +1010,7 @@ func (t *FetchURLTool) Execute(ctx context.Context, argsJSON string) (string, er
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+
 	if !strings.HasPrefix(args.URL, "http://") && !strings.HasPrefix(args.URL, "https://") {
 		return "", fmt.Errorf("only http(s) URLs are supported")
 	}
@@ -1133,6 +1151,7 @@ func (t *WebSearchTool) Execute(ctx context.Context, argsJSON string) (string, e
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+
 	if strings.TrimSpace(args.Query) == "" {
 		return "", fmt.Errorf("web_search requires a query")
 	}
