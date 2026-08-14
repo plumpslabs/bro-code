@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -337,7 +338,11 @@ func fetchOpenCodeCLIModels() ([]string, error) {
 		return nil, fmt.Errorf("opencode cli not found")
 	}
 
-	cmd := exec.Command(binPath, "models")
+	// Bound the CLI call so a hung `opencode models` (network stall, waiting
+	// on input) can never block startup/model-picker forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binPath, "models")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err

@@ -891,7 +891,10 @@ func (t *GitTool) Execute(ctx context.Context, argsJSON string) (string, error) 
 		return "", fmt.Errorf("unknown git action %q (allowed: status, diff, log, branch, commit)", args.Action)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", argv...)
+	// Bound git ops so a slow/hung repo cannot stall the agent loop.
+	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(tctx, "git", argv...)
 	out, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(out))
 	if err != nil {
@@ -1019,7 +1022,9 @@ func (t *ReviewChangesTool) Parameters() map[string]any {
 	}
 }
 func (t *ReviewChangesTool) Execute(ctx context.Context, argsJSON string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff")
+	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(tctx, "git", "diff")
 	diffOut, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository or git unavailable: %w", err)

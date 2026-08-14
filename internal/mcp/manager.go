@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -138,7 +139,11 @@ func (m *Manager) Start(ctx context.Context) {
 			m.errors[name] = "spawn failed: " + err.Error()
 			continue
 		}
-		if _, err := c.Initialize(ctx, mcp.InitializeRequest{
+		// Bound the handshake per server: Start runs with a background ctx, so
+		// a hung MCP server (no response on init/list) must not block startup
+		// forever — one broken server is skipped, not fatal.
+		handshakeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		if _, err := c.Initialize(handshakeCtx, mcp.InitializeRequest{
 			Params: mcp.InitializeParams{
 				ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
 				ClientInfo: mcp.Implementation{
@@ -147,12 +152,14 @@ func (m *Manager) Start(ctx context.Context) {
 				},
 			},
 		}); err != nil {
+			cancel()
 			_ = c.Close()
 			m.errors[name] = "initialize failed: " + err.Error()
 			continue
 		}
 
-		toolsRes, err := c.ListTools(ctx, mcp.ListToolsRequest{})
+		toolsRes, err := c.ListTools(handshakeCtx, mcp.ListToolsRequest{})
+		cancel()
 		if err != nil {
 			_ = c.Close()
 			m.errors[name] = "list tools failed: " + err.Error()

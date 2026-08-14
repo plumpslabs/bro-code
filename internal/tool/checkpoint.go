@@ -87,7 +87,10 @@ func validCheckpointName(name string) bool {
 // .brocode itself.
 func checkpointFiles(cwd string) ([]string, error) {
 	if _, err := exec.LookPath("git"); err == nil {
-		cmd := exec.Command("git", "ls-files", "-co", "--exclude-standard", "-z")
+		// Bound the git call so a slow/hung repo cannot stall a snapshot.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", "ls-files", "-co", "--exclude-standard", "-z")
 		cmd.Dir = cwd
 		if out, err := cmd.Output(); err == nil {
 			var files []string
