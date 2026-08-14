@@ -315,7 +315,7 @@ func (a *OpenCodeAdapter) runCLI(ctx context.Context, model, prompt string, onPr
 func buildCLIResponse(userPrompt, content, model string) (*CompletionResponse, error) {
 	return &CompletionResponse{
 		Content:   content,
-		Reasoning: "Executed via local OpenCode CLI (" + model + ")",
+		Reasoning: "Executed via local gateway (" + model + ")",
 		Usage: Usage{
 			PromptTokens:     len(userPrompt) / 4,
 			CompletionTokens: len(content) / 4,

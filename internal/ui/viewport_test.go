@@ -18,7 +18,7 @@ func TestViewportParksAtUserPromptAfterLongAnswer(t *testing.T) {
 		"YOU:\nok bro dni ad pnysuaian bgian filter di omnichannel di bagian yng filter smua sednag ditangan dan juga belum di tangani nh dnsi eprmintaanya ad pnyesuaiaan",
 		"PROCESS:\n⚡ Turn 1 reasoning...",
 		"PROCESS:\n⚡ Thinking & analyzing request...",
-		"BROCODE:\n💭 Executed via local OpenCode CLI (opencode/hy3-free)\n\n# ClientConnect — CRM Sales Management System (Monorepo)\n\n## 1. Stack & Architecture\n\n| Component | Stack |\n|---|---|\n| Backend | Node.js 20+ |\n| Admin Frontend | React 18 |\n\n## 2. Hard Rules\n\n- Package Manager: bun\n- Backend Language: JavaScript (CommonJS)\n- ORM: Prisma ONLY\n\n## 3. Verification Commands\n\n```bash\ncd crm_sales_backend && bun test\ncd crm_sales_backend && npx prisma validate\n```\n\nThis is a long answer that scrolls far past the user's prompt line.",
+		"BROCODE:\n💭 Executed via local gateway (opencode/hy3-free)\n\n# ClientConnect — CRM Sales Management System (Monorepo)\n\n## 1. Stack & Architecture\n\n| Component | Stack |\n|---|---|\n| Backend | Node.js 20+ |\n| Admin Frontend | React 18 |\n\n## 2. Hard Rules\n\n- Package Manager: bun\n- Backend Language: JavaScript (CommonJS)\n- ORM: Prisma ONLY\n\n## 3. Verification Commands\n\n```bash\ncd crm_sales_backend && bun test\ncd crm_sales_backend && npx prisma validate\n```\n\nThis is a long answer that scrolls far past the user's prompt line.",
 	}
 
 	contentWidth := m.width - 4

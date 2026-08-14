@@ -86,13 +86,26 @@ var builtinContextLimits = map[string]map[string]int{
 	},
 }
 
+// FriendlyName returns the display name for a provider ID, falling back to
+// the ID itself for custom providers. The UI uses this everywhere so BroCode
+// brands itself as its own product — the underlying gateway tool is never
+// shown in the terminal.
+func FriendlyName(id string) string {
+	for _, p := range BuiltinProviders {
+		if p.ID == id {
+			return p.Name
+		}
+	}
+	return id
+}
+
 // BuiltinProviders maps all pre-registered LLM providers. Context limits come
 // from builtinContextLimits (research-backed) unless overridden by the user's
 // own config model_map.
 var BuiltinProviders = []ProviderInfo{
 	{
 		ID:             "opencode",
-		Name:           "OpenCode CLI & Zen Gateway (Free)",
+		Name:           "BroCode Free Gateway",
 		Protocol:       "openai-compatible",
 		APIKeyEnvVar:   "", // No key required
 		DefaultBaseURL: "https://router.opencode.ai/v1",

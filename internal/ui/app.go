@@ -1768,7 +1768,7 @@ func (m Model) renderModelsModal() string {
 				statusTag = greenBadge.Render(" [✓ ready]")
 			}
 
-			sb.WriteString(fmt.Sprintf("%s %-28s (%s)%s\n", cursor, item.ModelName, item.ProviderID, statusTag))
+			sb.WriteString(fmt.Sprintf("%s %-28s (%s)%s\n", cursor, item.ModelName, provider.FriendlyName(item.ProviderID), statusTag))
 		}
 	}
 
