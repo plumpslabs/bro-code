@@ -175,13 +175,19 @@ func (e *Engine) SetScoutManager(sm ScoutDrainer) {
 	e.scouts = sm
 }
 
-// maxToolOnlyRounds caps how many consecutive tool-only iterations a turn may
-// run. After this many rounds of tool calls with no answer, the engine forces
-// the model to answer directly instead of looping forever. 20 is generous
-// enough for legitimate deep exploration (many read_file/grep rounds in a big
-// monorepo) while still guaranteeing a turn always finishes with an answer
-// well before the 25-iteration hard cap.
-const maxToolOnlyRounds = 20
+// Tool-only budget: a model that keeps calling tools without answering is
+// nudged EARLY (so a rabbit-hole exploration like "search the schema for more
+// models" is cut before it burns a dollar of tokens) and aborted shortly
+// after. 10 rounds of pure tool calls is plenty for a legitimate overview in
+// a big monorepo; the first reminder lands right after that.
+const (
+	// toolWarnRounds — first "stop and answer" reminder.
+	toolWarnRounds = 10
+	// toolFinalWarnRounds — second, firmer warning.
+	toolFinalWarnRounds = 12
+	// maxToolOnlyRounds — hard abort. Still well below the 25-iteration cap.
+	maxToolOnlyRounds = 14
+)
 
 // SetProjectContext injects a compact structural overview of the project into
 // every turn's system prompt (see search.BuildProjectContext). Empty disables.
@@ -358,23 +364,26 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// explored, remind it again more firmly one round later, and only then
 		// abort. Legitimate deep exploration in big monorepos needs room, but
 		// a tool-happy model must still be cut off with an answer.
+		if e.toolOnlyRounds >= toolWarnRounds && !e.toolReminderSent {
+			e.toolReminderSent = true
+			// Specific, actionable: name the round count and the files already
+			// examined so a rabbit-hole model ("search for more models…") stops
+			// instead of re-exploring.
+			_ = e.context.AppendUserMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files — that is usually enough. STOP calling tools NOW and answer the user's question directly using what you have read; do not explore further."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
+			if onUpdate != nil {
+				onUpdate(e.state, "⚠️ Tool budget nearly exhausted — forcing model to answer")
+			}
+			continue
+		}
+		if e.toolOnlyRounds >= toolFinalWarnRounds && !e.toolReminder2Sent {
+			e.toolReminder2Sent = true
+			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. Do NOT call any more tools. Write your complete answer to the user's question now, based on everything you have read." + e.exploredSummary())
+			if onUpdate != nil {
+				onUpdate(e.state, "⚠️ Final warning — answer immediately or the turn will be stopped")
+			}
+			continue
+		}
 		if e.toolOnlyRounds >= maxToolOnlyRounds {
-			if !e.toolReminderSent {
-				e.toolReminderSent = true
-				_ = e.context.AppendUserMessage("⚠️ You have been calling tools for many rounds without answering. STOP calling tools NOW and answer the user's question directly using the information you have already gathered." + e.exploredSummary())
-				if onUpdate != nil {
-					onUpdate(e.state, "⚠️ Tool budget exhausted — forcing model to answer")
-				}
-				continue
-			}
-			if !e.toolReminder2Sent {
-				e.toolReminder2Sent = true
-				_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. Do NOT call any more tools. Write your complete answer to the user's question now, based on everything you have read." + e.exploredSummary())
-				if onUpdate != nil {
-					onUpdate(e.state, "⚠️ Final warning — answer immediately or the turn will be stopped")
-				}
-				continue
-			}
 			e.state = StateBlocked
 			msg := "Turn aborted: the model kept calling tools without producing an answer after two warnings. " + e.exploredSummary()
 			if onUpdate != nil {

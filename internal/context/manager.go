@@ -193,13 +193,21 @@ func (m *Manager) ImportToolResult(toolCallID, content string) {
 	m.totalTokens += EstimateTokens(content)
 }
 
+// maxToolResultContextChars caps how much of each tool result is kept in the
+// persistent context. The model still receives the full result (up to the
+// tool layer's CapOutput, ~40k) in the round it runs the tool — this smaller
+// recap is what gets RE-SENT on every later loop iteration. Keeping it lean
+// directly cuts the per-round token burn of multi-round agentic turns (a
+// 20-round exploration re-sends each recap 19 times).
+const maxToolResultContextChars = 2500
+
 // AppendToolResult adds a tool execution result to the context.
 func (m *Manager) AppendToolResult(toolCallID, content string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Prevention: limit raw tool output length to prevent context stuff bloating
-	content = TruncateToolOutput(content, 4000)
+	content = TruncateToolOutput(content, maxToolResultContextChars)
 
 	msg := provider.Message{
 		Role:       "user",

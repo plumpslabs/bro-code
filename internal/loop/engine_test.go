@@ -366,8 +366,8 @@ func TestEngineToolBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTurn failed: %v", err)
 	}
-	// Budget is 20 tool rounds; the 2 reminder rounds and the abort round do
-	// not call the adapter (they only inject messages / return).
+	// Budget aborts after maxToolOnlyRounds adapter calls; the reminder rounds
+	// inject messages without calling the adapter.
 	if adapter.calls != maxToolOnlyRounds {
 		t.Fatalf("tool budget cut off at %d completions, want %d", adapter.calls, maxToolOnlyRounds)
 	}
@@ -376,6 +376,20 @@ func TestEngineToolBudget(t *testing.T) {
 	}
 	if engine.State() != StateBlocked {
 		t.Errorf("expected StateBlocked, got %v", engine.State())
+	}
+	// The FIRST reminder must fire early (at toolWarnRounds, well before the
+	// abort) and name the round/file counts — the rabbit-hole cut that saves
+	// tokens instead of letting the loop burn to the abort.
+	msgs := ctxMgr.Messages()
+	found := false
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "already examined") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected early 'already examined' reminder in context before abort")
 	}
 }
 
