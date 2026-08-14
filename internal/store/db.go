@@ -211,6 +211,35 @@ func (s *Store) ListSessions() ([]Session, error) {
 	return list, nil
 }
 
+// DeleteSession permanently removes a session and all of its events from the
+// database (the events table has no ON DELETE CASCADE, so events are deleted
+// first). Returns the number of events removed.
+func (s *Store) DeleteSession(sessionID string) (int, error) {
+	res, err := s.db.Exec("DELETE FROM events WHERE session_id = ?", sessionID)
+	if err != nil {
+		return 0, err
+	}
+	evRemoved, _ := res.RowsAffected()
+	if _, err := s.db.Exec("DELETE FROM sessions WHERE id = ?", sessionID); err != nil {
+		return int(evRemoved), err
+	}
+	return int(evRemoved), nil
+}
+
+// DeleteAllSessions permanently removes every session and all events from the
+// database. Returns the number of events removed.
+func (s *Store) DeleteAllSessions() (int, error) {
+	res, err := s.db.Exec("DELETE FROM events")
+	if err != nil {
+		return 0, err
+	}
+	evRemoved, _ := res.RowsAffected()
+	if _, err := s.db.Exec("DELETE FROM sessions"); err != nil {
+		return int(evRemoved), err
+	}
+	return int(evRemoved), nil
+}
+
 // ListSessionsByProjectPath retrieves sessions created in specific directory path.
 func (s *Store) ListSessionsByProjectPath(projectPath string) ([]Session, error) {
 	if projectPath == "" {

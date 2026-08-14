@@ -2,12 +2,14 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
@@ -343,6 +345,72 @@ func TestConnectKeylessProviderSkipsKeyStep(t *testing.T) {
 	}
 	if m.showConnect {
 		t.Fatal("expected keyless provider to skip the API-key step and close the wizard")
+	}
+}
+
+// TestSessionsDeleteWithConfirm verifies the sessions-modal delete flow: d
+// arms a confirmation (never deletes instantly), n cancels it, y executes, and
+// D arms a delete-all that also survives its own confirm.
+func TestSessionsDeleteWithConfirm(t *testing.T) {
+	tmpDir := t.TempDir()
+	st, err := store.NewStore(filepath.Join(tmpDir, "test_brocode.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer st.Close()
+
+	for _, id := range []string{"sess_a", "sess_b"} {
+		if err := st.CreateSession(id, "/tmp/proj"); err != nil {
+			t.Fatalf("failed to create %s: %v", id, err)
+		}
+	}
+
+	ctx := bcontext.NewManager("test-sess", st, 128000)
+	m := NewApp(provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, "⚡ test")
+
+	_, _ = m.handleSlashCommand("/sessions")
+	if !m.showSessions || len(m.sessionList) != 2 {
+		t.Fatalf("expected sessions modal with 2 sessions, got show=%v list=%d", m.showSessions, len(m.sessionList))
+	}
+
+	// d arms a confirm — nothing may be deleted yet.
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if m.sessionsConfirmID == "" {
+		t.Fatal("expected confirm pending after pressing d")
+	}
+	if list, _ := st.ListSessions(); len(list) != 2 {
+		t.Fatalf("d must not delete before confirm: %d sessions left", len(list))
+	}
+
+	// n cancels the confirm; the session survives.
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if m.sessionsConfirmID != "" {
+		t.Fatal("expected confirm cancelled after n")
+	}
+	if list, _ := st.ListSessions(); len(list) != 2 {
+		t.Fatalf("n must not delete: %d sessions left", len(list))
+	}
+
+	// d again + y executes the single delete.
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	if list, _ := st.ListSessions(); len(list) != 1 {
+		t.Fatalf("expected 1 session after confirmed delete, got %d", len(list))
+	}
+	if len(m.messages) == 0 || !strings.Contains(m.messages[len(m.messages)-1], "Deleted session") {
+		t.Errorf("expected delete confirmation message in history")
+	}
+
+	// D arms delete-all; y wipes everything except the active session row,
+	// which is recreated so the events FK stays valid.
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
+	if m.sessionsConfirmID != "ALL" {
+		t.Fatalf("expected delete-all confirm, got %q", m.sessionsConfirmID)
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	list, _ := st.ListSessions()
+	if len(list) != 1 || list[0].ID != "test-sess" {
+		t.Fatalf("expected only recreated active session, got %+v", list)
 	}
 }
 

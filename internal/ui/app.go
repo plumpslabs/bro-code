@@ -228,6 +228,11 @@ type Model struct {
 	sessionsSel      int
 	sessionsViewport viewport.Model
 
+	// sessionsConfirmID guards destructive deletes from the sessions modal:
+	// "" = no confirm pending, "ALL" = delete every session, otherwise the
+	// session ID to delete. The modal blocks until the user answers y/n.
+	sessionsConfirmID string
+
 	// Connect Modal State (multi-step wizard)
 	connectStep         int // 0=provider pick, 1=name, 2=API key, 3=base URL, 4=models
 	connectProviderSel  int
@@ -908,7 +913,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.showSessions {
-				m.showSessions = false
+				// ESC first cancels a pending delete confirmation, then closes
+				// the modal — a stray ESC must never silently skip a confirm.
+				if m.sessionsConfirmID != "" {
+					m.sessionsConfirmID = ""
+				} else {
+					m.showSessions = false
+				}
 				return m, nil
 			}
 			if m.showDebug {
@@ -992,6 +1003,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.startTurn(userQuery)
+
+		case "d", "D":
+			// Sessions modal: d = delete the selected session, D = delete all.
+			// Outside the modal these must fall through to the prompt input
+			// below the switch (plain letters still type normally).
+			if !m.showSessions || m.sessionsConfirmID != "" {
+				break
+			}
+			if keyStr == "d" {
+				if m.sessionsSel >= 0 && m.sessionsSel < len(m.sessionList) {
+					m.sessionsConfirmID = m.sessionList[m.sessionsSel].ID
+				}
+			} else {
+				if len(m.sessionList) > 0 {
+					m.sessionsConfirmID = "ALL"
+				}
+			}
+			return m, nil
+
+		case "y", "n":
+			// Sessions modal confirmation: y executes the pending delete, n
+			// cancels. Outside a pending confirm these fall through to normal
+			// typing.
+			if !m.showSessions || m.sessionsConfirmID == "" {
+				break
+			}
+			if keyStr == "y" {
+				m.confirmDeleteSessions()
+			}
+			m.sessionsConfirmID = ""
+			return m, nil
 
 		case "space":
 			if m.showAsk && m.askCustomQ < 0 {
@@ -1127,7 +1169,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.appendMessages("📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
+		m.appendMessages("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
 
 	case "/miner":
 		// Jump straight into MINER mode so the next prompt is a knowledge
@@ -1414,7 +1456,59 @@ func (m *Model) mcpStatus() string {
 	return strings.TrimSpace(sb.String())
 }
 
+// confirmDeleteSessions executes the pending sessions-modal delete (single
+// session or ALL, per sessionsConfirmID), recreates the active session row so
+// the events FK stays valid, and refreshes the list.
+func (m *Model) confirmDeleteSessions() {
+	st := m.context.Store()
+	if st == nil {
+		m.appendMessages("⚠️ Session store not initialized.")
+		return
+	}
+
+	active := m.context.SessionID()
+	cwd, _ := os.Getwd()
+	target := m.sessionsConfirmID
+	var removed int
+	var err error
+
+	if target == "ALL" {
+		removed, err = st.DeleteAllSessions()
+	} else {
+		removed, err = st.DeleteSession(target)
+	}
+	if err != nil {
+		m.appendMessages("❌ Failed to delete session(s): " + err.Error())
+		return
+	}
+
+	// The current session row may have been deleted (single = the active one,
+	// ALL = every row). Recreate it so future events still satisfy the FK and
+	// keep persisting — the in-memory conversation continues untouched.
+	if target == "ALL" || target == active {
+		if err := st.CreateSession(active, cwd); err == nil {
+			m.appendMessages(fmt.Sprintf("🗑️ Deleted %d session(s) (%d events). Current session reset — history cleared.", len(m.sessionList), removed))
+		} else {
+			m.appendMessages(fmt.Sprintf("🗑️ Deleted %d session(s) (%d events).", len(m.sessionList), removed))
+		}
+	} else {
+		m.appendMessages(fmt.Sprintf("🗑️ Deleted session %s (%d events).", target, removed))
+	}
+
+	// Refresh the list; clamp the cursor into the new bounds.
+	if list, lerr := st.ListSessions(); lerr == nil {
+		m.sessionList = list
+		if m.sessionsSel >= len(list) {
+			m.sessionsSel = len(list) - 1
+		}
+		if m.sessionsSel < 0 && len(list) > 0 {
+			m.sessionsSel = 0
+		}
+	}
+}
+
 func (m *Model) applySelectedSession() {
+	m.sessionsConfirmID = "" // switching is not a delete; drop any pending confirm
 	if m.sessionsSel >= 0 && m.sessionsSel < len(m.sessionList) {
 		targetSess := m.sessionList[m.sessionsSel]
 		st := m.context.Store()
@@ -1979,8 +2073,26 @@ func (m *Model) renderSessionsModal() string {
 	greenBadge := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
 	activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
 
-	if len(m.sessionList) == 0 {
+	if len(m.sessionList) == 0 && m.sessionsConfirmID == "" {
 		sb.WriteString("No previous sessions found in SQLite database.\n")
+	} else if m.sessionsConfirmID != "" {
+		// Destructive action pending: block the list and ask explicitly. The
+		// user must answer y (execute) or n/ESC (cancel) before anything else.
+		dangerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+		sb.WriteString(dangerStyle.Render("⚠️  CONFIRM DELETION — this cannot be undone\n\n"))
+		if m.sessionsConfirmID == "ALL" {
+			sb.WriteString(fmt.Sprintf("Delete ALL %d sessions? Every conversation in every project is permanently removed.\n", len(m.sessionList)))
+		} else {
+			for _, sess := range m.sessionList {
+				if sess.ID != m.sessionsConfirmID {
+					continue
+				}
+				dateStr := sess.CreatedAt.Format("2006-01-02 15:04:05")
+				sb.WriteString(fmt.Sprintf("Delete session %s (%s)? Its history is permanently removed.\n", sess.ID, dateStr))
+				break
+			}
+		}
+		sb.WriteString("\n[y] confirm delete · [n / ESC] cancel")
 	} else {
 		for i, sess := range m.sessionList {
 			cursor := "  "
@@ -2004,7 +2116,7 @@ func (m *Model) renderSessionsModal() string {
 		}
 	}
 
-	sb.WriteString("\n[↑/↓ navigate · ENTER switch session · PgUp/PgDn scroll · /new create clean session · ESC close]")
+	sb.WriteString("\n[↑/↓ navigate · ENTER switch session · d delete · D delete all · PgUp/PgDn scroll · ESC close]")
 
 	body := sb.String()
 	// NOTE: do not GotoTop here — that would reset the user's manual scroll
