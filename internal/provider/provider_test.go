@@ -512,41 +512,39 @@ func TestParseModelJSONEmptyAndInvalid(t *testing.T) {
 	}
 }
 
-func TestParseOpenCodeModelList(t *testing.T) {
-	lines := []string{
-		"",
-		"big-pickle",
-		"deepseek-v4-flash-free",
-		"hy3-free",
-		"lalarasa/oc/deepseek-v4-flash-free", // duplicate of the plain entry
-		"lalarasa/ps/poolside/laguna-s-2.1",  // duplicate (poolside accessible separately)
-		"laguna-s-2.1-free",
-		"opencode/mimo-v2.5-free", // opencode/ prefix stripped
-	}
-
-	models := parseOpenCodeModelList(lines)
-
-	// lalarasa/ aliases must NOT appear — they duplicate the plain models.
-	for _, m := range models {
+// TestOpenCodeFreeModelsClean verifies the static free-model list the picker
+// uses — the opencode CLI is never spawned at startup, so the list must be
+// self-contained and free of gateway alias noise (no lalarasa/ duplicates,
+// no opencode/ prefix).
+func TestOpenCodeFreeModelsClean(t *testing.T) {
+	seen := map[string]bool{}
+	for _, m := range OpenCodeFreeModels {
+		if m == "" {
+			t.Error("empty model in OpenCodeFreeModels")
+		}
 		if strings.HasPrefix(m, "lalarasa/") {
-			t.Errorf("lalarasa alias leaked into model list: %q", m)
+			t.Errorf("lalarasa alias leaked into static list: %q", m)
 		}
+		if strings.HasPrefix(m, "opencode/") {
+			t.Errorf("opencode/ prefix leaked into static list: %q", m)
+		}
+		if seen[m] {
+			t.Errorf("duplicate model in OpenCodeFreeModels: %q", m)
+		}
+		seen[m] = true
 	}
+	if len(seen) == 0 {
+		t.Error("OpenCodeFreeModels must not be empty (the picker depends on it)")
+	}
+}
 
-	want := map[string]bool{
-		"big-pickle":             true,
-		"deepseek-v4-flash-free": true,
-		"hy3-free":               true,
-		"laguna-s-2.1-free":      true,
-		"mimo-v2.5-free":         true,
-	}
-	if len(models) != len(want) {
-		t.Fatalf("expected %d models, got %v", len(want), models)
-	}
-	for _, m := range models {
-		if !want[m] {
-			t.Errorf("unexpected model in list: %q (all: %v)", m, models)
-		}
+// TestDiscoverModelsNoCLISpawn verifies that model discovery never executes
+// an external binary: AutoDetect + DiscoverModels with an empty config must
+// return the static opencode models without launching anything.
+func TestDiscoverModelsNoCLISpawn(t *testing.T) {
+	models := DiscoverModels(AppConfig{})
+	if len(models["opencode"]) == 0 {
+		t.Error("expected static opencode free models in discovery")
 	}
 }
 

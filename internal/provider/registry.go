@@ -1,13 +1,11 @@
 package provider
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -335,67 +333,12 @@ func DiscoverModels(cfg AppConfig) map[string][]string {
 		result[d.Info.ID] = models
 	}
 
-	// Try fetching models directly from local OpenCode CLI binary if installed
-	if OpenCodeImportEnabled() {
-		if cliModels, err := fetchOpenCodeCLIModels(); err == nil && len(cliModels) > 0 {
-			result["opencode"] = cliModels
-		}
-	}
+	// NOTE: the local opencode CLI binary is deliberately NOT spawned here.
+	// The opencode provider's free models come from the built-in static list
+	// (OpenCodeFreeModels), so starting BroCode never launches an external
+	// process and never flashes its spinner/output on the terminal.
 
 	return result
-}
-
-func fetchOpenCodeCLIModels() ([]string, error) {
-	detected, binPath := DetectOpenCode()
-	if !detected || binPath == "" {
-		return nil, fmt.Errorf("opencode cli not found")
-	}
-
-	// Bound the CLI call so a hung `opencode models` (network stall, waiting
-	// on input) can never block startup/model-picker forever.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binPath, "models")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-
-	models := parseOpenCodeModelList(strings.Split(string(out), "\n"))
-	if len(models) == 0 {
-		return nil, fmt.Errorf("no models found")
-	}
-	return models, nil
-}
-
-// parseOpenCodeModelList cleans and dedupes the raw `opencode models` output
-// into model IDs. Models namespaced under lalarasa/ — opencode's own gateway
-// alias for the SAME free models already listed plainly (deepseek-v4-flash-free,
-// hy3-free, laguna-s-2.1-free, ...) — are dropped so the picker never shows
-// every model twice. The opencode/ prefix is stripped for a clean ID.
-func parseOpenCodeModelList(lines []string) []string {
-	var models []string
-	seen := map[string]bool{}
-	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			continue
-		}
-		// lalarasa/<ns>/<model> duplicates the plain <model> entry — skip it.
-		if strings.HasPrefix(l, "lalarasa/") {
-			continue
-		}
-		clean := l
-		if strings.HasPrefix(clean, "opencode/") {
-			clean = strings.TrimPrefix(clean, "opencode/")
-		}
-		if !seen[clean] {
-			seen[clean] = true
-			models = append(models, clean)
-		}
-	}
-	sort.Strings(models)
-	return models
 }
 
 // mergeModelLists merges the live-fetched model list with the configured one.
