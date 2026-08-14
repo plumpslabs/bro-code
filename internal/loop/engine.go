@@ -898,16 +898,26 @@ func (e *Engine) complete(ctx context.Context, req provider.CompletionRequest) (
 }
 
 func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
-	// Prefer realtime progress (local CLI tools etc.) so the UI shows what
-	// the agent is doing, then token streaming, then plain completion.
+	// Snapshot the live handlers ONCE. Progressing adapters (e.g. the opencode
+	// CLI) forward output from their own goroutines that can outlive this call:
+	// the subprocess keeps streaming stderr while the turn is already wrapping
+	// up, and RunTurn's deferred reset sets e.progressHandler to nil on exit.
+	// Reading the field inside the callback would then nil-panic (and race the
+	// reset). Capturing the value here keeps in-flight goroutines safe — the
+	// callback checks its own snapshot, never the field.
+	progress := e.progressHandler
+	stream := e.streamHandler
+	st := e.state
 	var resp *provider.CompletionResponse
 	var err error
-	if pa, ok := a.(provider.ProgressingAdapter); ok && e.progressHandler != nil {
+	if pa, ok := a.(provider.ProgressingAdapter); ok && progress != nil {
 		resp, err = pa.CompleteWithProgress(ctx, req, func(line string) {
-			e.progressHandler(e.state, line)
+			if progress != nil {
+				progress(st, line)
+			}
 		})
-	} else if sa, ok := a.(provider.StreamingAdapter); ok && e.streamHandler != nil {
-		resp, err = sa.StreamComplete(ctx, req, e.streamHandler)
+	} else if sa, ok := a.(provider.StreamingAdapter); ok && stream != nil {
+		resp, err = sa.StreamComplete(ctx, req, stream)
 	} else {
 		resp, err = a.Complete(ctx, req)
 	}

@@ -156,6 +156,13 @@ type Model struct {
 	// Cancelation function for active LLM turn / tool execution
 	cancelTurn context.CancelFunc
 
+	// turnRunning is true while a turn is in flight. Prompts sent while a turn
+	// runs are queued in pendingQueue and auto-sent when it finishes: one turn
+	// at a time, because concurrent RunTurn calls clobber the engine's shared
+	// per-turn state and can crash the CLI progress goroutine (nil handler).
+	turnRunning  bool
+	pendingQueue []string
+
 	// quitting is set when the user quits (ctrl+c) so in-flight turn
 	// goroutines stop sending to the (already exiting) program — prevents a
 	// blocked Send from leaking the turn goroutine forever.
@@ -278,6 +285,51 @@ func (m *Model) appendMessages(msgs ...string) {
 	if len(m.messages) > maxChatMessages {
 		m.messages = append([]string(nil), m.messages[len(m.messages)-maxChatMessages:]...)
 	}
+}
+
+// startTurn launches a fresh engine turn for userQuery: it records the prompt
+// in history, appends it to the chat, resets streaming state, and returns the
+// batch that runs the turn. Callers must ensure no turn is already running
+// (the queue in handleEnter / turnResultMsg enforces one at a time).
+func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
+	m.appendMessages("YOU:\n" + userQuery)
+	m.status = "Thinking..."
+	// Clear any stale streaming state from a previous interrupted turn.
+	m.streaming = false
+	m.pendingStream = ""
+	m.activity = nil
+	m.turnRunning = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelTurn = cancel
+
+	m.engine.SetStreamHandler(func(delta string) {
+		if m.quitting {
+			return
+		}
+		if m.prog != nil {
+			m.prog.Send(streamChunkMsg(delta))
+		}
+	})
+
+	runTurnCmd := func() tea.Msg {
+		res, err := m.engine.RunTurn(ctx, userQuery, func(state loop.LoopState, info string) {
+			if m.quitting {
+				return
+			}
+			if m.prog != nil {
+				m.prog.Send(stepProgressMsg(info))
+			}
+		})
+		// The program may already be exiting (ctrl+c): a Send to a
+		// closed program can block forever, so drop the result instead.
+		if m.quitting {
+			return nil
+		}
+		return turnResultMsg{content: res, err: err, mode: m.mode}
+	}
+
+	return m, tea.Batch(runTurnCmd, tickCmd())
 }
 
 type statusUpdateMsg string
@@ -686,17 +738,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.pendingStream = ""
 		m.activity = nil
+		// The in-flight turn is done; the queue may start the next one.
+		m.turnRunning = false
 		if msg.err != nil {
 			// A user-initiated interrupt (ESC) aborts the context, which the
 			// adapter reports as "context canceled". That is not an error —
 			// the interruption notice was already shown when ESC was pressed.
 			if m.interrupted {
 				m.interrupted = false
-				m.status = "Ready"
-				return m, nil
+			} else {
+				m.appendMessages("ERROR: " + msg.err.Error())
+				m.status = "Failed"
 			}
-			m.appendMessages("ERROR: " + msg.err.Error())
-			m.status = "Failed"
 		} else if msg.content != "" {
 			// Surface the model's reasoning (thinking) above the answer, like
 			// opencode, so the agent's deliberation is visible — not just the
@@ -731,6 +784,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status = "Ready"
 		}
+
+		// One turn at a time: fire the next queued prompt, if any. The queue
+		// drains even after an interrupt/error — a queued message was
+		// explicitly requested and must not be silently dropped.
+		if len(m.pendingQueue) > 0 {
+			next := m.pendingQueue[0]
+			m.pendingQueue = m.pendingQueue[1:]
+			return m.startTurn(next)
+		}
+		return m, nil
 
 	case streamChunkMsg:
 		if !m.streaming {
@@ -918,43 +981,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleSlashCommand(userQuery)
 			}
 
-			m.appendMessages("YOU:\n" + userQuery)
-			m.status = "Thinking..."
-			// Clear any stale streaming state from a previous interrupted turn.
-			m.streaming = false
-			m.pendingStream = ""
-			m.activity = nil
-
-			ctx, cancel := context.WithCancel(context.Background())
-			m.cancelTurn = cancel
-
-			m.engine.SetStreamHandler(func(delta string) {
-				if m.quitting {
-					return
-				}
-				if m.prog != nil {
-					m.prog.Send(streamChunkMsg(delta))
-				}
-			})
-
-			runTurnCmd := func() tea.Msg {
-				res, err := m.engine.RunTurn(ctx, userQuery, func(state loop.LoopState, info string) {
-					if m.quitting {
-						return
-					}
-					if m.prog != nil {
-						m.prog.Send(stepProgressMsg(info))
-					}
-				})
-				// The program may already be exiting (ctrl+c): a Send to a
-				// closed program can block forever, so drop the result instead.
-				if m.quitting {
-					return nil
-				}
-				return turnResultMsg{content: res, err: err, mode: m.mode}
+			// One turn at a time: a prompt sent while a turn is in flight is
+			// queued and auto-sent when the current turn finishes. Concurrent
+			// turns would clobber the engine's shared per-turn state and could
+			// crash the CLI progress goroutine (nil-handler panic).
+			if m.turnRunning {
+				m.pendingQueue = append(m.pendingQueue, userQuery)
+				m.appendMessages("⏳ Previous turn still running — message queued and will send automatically when it finishes.")
+				m.status = "Queued..."
+				return m, nil
 			}
-
-			return m, tea.Batch(runTurnCmd, tickCmd())
+			return m.startTurn(userQuery)
 
 		case "space":
 			if m.showAsk && m.askCustomQ < 0 {

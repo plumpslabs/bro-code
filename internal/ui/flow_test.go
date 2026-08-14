@@ -207,6 +207,44 @@ func TestInterruptedTurnIsNotAnError(t *testing.T) {
 	}
 }
 
+// TestTurnQueueOneAtATime verifies a prompt sent while a turn is in flight is
+// queued (never run concurrently — that clobbers engine state and caused the
+// nil-handler panic) and auto-sends when the current turn finishes.
+func TestTurnQueueOneAtATime(t *testing.T) {
+	m := newTestApp()
+
+	// First prompt starts a turn.
+	m.promptInput.SetValue("first")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.turnRunning {
+		t.Fatal("expected turnRunning after first send")
+	}
+
+	// Second prompt while the turn is in flight must be queued, not run.
+	m.promptInput.SetValue("second")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if len(m.pendingQueue) != 1 || m.pendingQueue[0] != "second" {
+		t.Fatalf("expected 'second' queued, got %v", m.pendingQueue)
+	}
+	if m.status != "Queued..." {
+		t.Fatalf("expected Queued status, got %q", m.status)
+	}
+
+	// Turn finishes → the queued prompt auto-starts (one at a time). The
+	// returned Cmd is the batch that runs the next turn — non-nil by design.
+	m.Update(turnResultMsg{content: "answer", err: nil, mode: "BUILDER"})
+	if len(m.pendingQueue) != 0 {
+		t.Fatalf("queue should be empty after drain, got %v", m.pendingQueue)
+	}
+	if !m.turnRunning {
+		t.Fatal("expected next turn running after queue drain")
+	}
+	last := m.messages[len(m.messages)-1]
+	if !strings.HasPrefix(last, "YOU:\nsecond") {
+		t.Fatalf("expected queued prompt auto-sent, last message %q", last)
+	}
+}
+
 // TestActivityResetsOnNewTurn verifies activity clears when a fresh turn starts.
 func TestActivityResetsOnNewTurn(t *testing.T) {
 	m := newTestApp()

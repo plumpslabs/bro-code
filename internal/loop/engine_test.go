@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/memory"
@@ -36,6 +37,61 @@ func (m *mockAdapter) Complete(ctx context.Context, req provider.CompletionReque
 	return &provider.CompletionResponse{
 		Content: "Done testing",
 	}, nil
+}
+
+// lateProgressAdapter is a ProgressingAdapter that fires the progress callback
+// from its own goroutine AFTER CompleteWithProgress returns — simulating the
+// opencode CLI's stderr goroutine, which can keep streaming after the turn
+// wraps up (and RunTurn has already reset the engine's progress handler to
+// nil via its deferred cleanup).
+type lateProgressAdapter struct {
+	calls int
+}
+
+func (m *lateProgressAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	return &provider.CompletionResponse{Content: "done"}, nil
+}
+
+func (m *lateProgressAdapter) CompleteWithProgress(ctx context.Context, req provider.CompletionRequest, onProgress func(string)) (*provider.CompletionResponse, error) {
+	m.calls++
+	go func() {
+		// Fire well after RunTurn returns so the engine's progressHandler
+		// field has already been reset to nil. Before the snapshot fix this
+		// dereferenced the nil field and panicked.
+		time.Sleep(10 * time.Millisecond)
+		onProgress("late progress")
+	}()
+	return &provider.CompletionResponse{Content: "done"}, nil
+}
+
+// TestEngineLateProgressNoPanic guards the nil-progress-handler panic (the
+// crash the user hit when spamming prompts while a turn was in flight): the
+// adapter's own goroutine keeps streaming progress after the turn finished and
+// the engine reset its handler. completeWith must hold a snapshot so the late
+// callback is a safe no-op, and the engine must remain usable afterwards.
+func TestEngineLateProgressNoPanic(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	adapter := &lateProgressAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	res, err := engine.RunTurn(context.Background(), "hi", func(state LoopState, info string) {})
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if res != "done" {
+		t.Fatalf("expected answer 'done', got %q", res)
+	}
+
+	// Give the late goroutine time to fire. Before the snapshot fix this
+	// panics inside the goroutine and crashes the test binary.
+	time.Sleep(40 * time.Millisecond)
+
+	// The engine must stay usable for subsequent turns (the handler is nil
+	// now, so the plain path is taken — no goroutine, no panic).
+	if _, err := engine.RunTurn(context.Background(), "again", nil); err != nil {
+		t.Fatalf("second RunTurn failed: %v", err)
+	}
 }
 
 func TestPlannerModeToolGuard(t *testing.T) {
