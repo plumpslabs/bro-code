@@ -222,8 +222,10 @@ func TestOpenCodeCLIIdentityPreamble(t *testing.T) {
 	if !strings.Contains(string(args), "You are BroCode") {
 		t.Errorf("identity preamble not sent to CLI: %q", string(args))
 	}
-	if strings.Contains(string(args), "You are NOT") {
-		t.Errorf("identity assertion inverted? got: %q", string(args))
+	// The preamble must explicitly reject the gateway's identity so a free
+	// model never answers "I'm opencode" — the exact bug the user hit.
+	if !strings.Contains(string(args), "You are NOT opencode") {
+		t.Errorf("identity preamble must reject opencode identity: %q", string(args))
 	}
 	if !strings.Contains(res.Content, "I am BroCode") {
 		t.Errorf("expected fake CLI answer, got %q", res.Content)

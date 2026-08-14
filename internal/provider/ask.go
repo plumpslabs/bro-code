@@ -35,7 +35,7 @@ type AskUserHandler func(ctx context.Context, questions []AskQuestion) ([]AskRes
 // short firm preamble in the user message tells the model who it is talking
 // to. Kept minimal and brand-agnostic (it never names other tools) so it only
 // shapes identity questions like "who are you?" — never task behavior.
-const brocodeIdentityPrompt = `You are BroCode, a terminal coding agent for software engineering (writing, debugging, refactoring, and explaining code). The user is talking to you through BroCode. If asked who you are or what your name is, say you are BroCode.`
+const brocodeIdentityPrompt = `You are BroCode, a terminal coding agent for software engineering (writing, debugging, refactoring, and explaining code). The user is talking to you through BroCode. You are NOT opencode and you are not any other tool — never introduce yourself as opencode or claim to be another product. If asked who you are, or when greeting the user, say you are BroCode.`
 
 // brocodeCapabilityNote orients the CLI model about BroCode's architecture so
 // capability questions ("whose subagents?", "can you spawn subagents?", "do

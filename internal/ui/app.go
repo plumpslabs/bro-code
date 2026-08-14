@@ -702,6 +702,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				display = "💭 " + r + "\n\n" + msg.content
 			}
 			m.appendMessages("BROCODE:\n" + display)
+			// When the primary provider failed and a fallback served the turn,
+			// say so in the history — otherwise the answer is mistaken for the
+			// active provider's (which is exactly the confusion the user saw:
+			// groq active, deepseek-v4-flash-free answered).
+			if fb := m.engine.LastFallbackModel(); fb != "" {
+				m.appendMessages(fmt.Sprintf("⚠️ Primary provider failed — this answer came from fallback model %s.", fb))
+			}
 			m.status = "Ready"
 		}
 

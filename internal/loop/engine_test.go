@@ -257,6 +257,30 @@ func TestEngineFallbackOnPrimaryFailure(t *testing.T) {
 	}
 }
 
+func TestLastFallbackModelReported(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	engine := NewEngine(&failAdapter{err: fmt.Errorf("provider down")}, tools, ctxMgr, "primary-model")
+	engine.AddFallback(Fallback{Adapter: &mockAdapter{}, Model: "fallback-model"})
+
+	if _, err := engine.RunTurn(context.Background(), "hello", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if engine.LastFallbackModel() != "fallback-model" {
+		t.Errorf("expected lastFallback=fallback-model, got %q", engine.LastFallbackModel())
+	}
+
+	// A turn served by the primary provider resets the marker.
+	engine2 := NewEngine(&mockAdapter{}, tools, bcontext.NewManager("s2", nil, 128000), "primary-model")
+	if _, err := engine2.RunTurn(context.Background(), "hello", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if engine2.LastFallbackModel() != "" {
+		t.Errorf("expected no fallback marker for primary-served turn, got %q", engine2.LastFallbackModel())
+	}
+}
+
 // repeatingAdapter always returns the SAME tool call, simulating a model that
 // is stuck in a loop (re-running grep on the same file forever).
 type repeatingAdapter struct {

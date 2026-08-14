@@ -83,6 +83,11 @@ type Engine struct {
 	fallbacks       []Fallback
 	streamHandler   func(delta string)
 	progressHandler TurnOutputHandler
+	// lastFallback records the fallback model actually used in the most recent
+	// turn ("" when the primary provider served the turn). The UI surfaces it
+	// persistently in the history so a turn answered by a fallback provider is
+	// never mistaken for the primary one.
+	lastFallback string
 	// lastToolCall tracks the previous tool invocation within a turn so the
 	// loop guard can detect the model repeating the exact same call and stop
 	// it from spinning (grep the same file 3x in a row, etc.).
@@ -289,6 +294,9 @@ type TurnOutputHandler func(state LoopState, info string)
 
 func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOutputHandler) (answer string, err error) {
 	e.progressHandler = onUpdate
+	// Reset the fallback marker for this turn (set when a fallback provider
+	// serves the turn; "" when the primary does).
+	e.lastFallback = ""
 	defer func() { e.progressHandler = nil }()
 	// Lifecycle hook on every exit path: fire on-turn-end when the turn
 	// produced an answer (or a hard abort message), on-turn-error otherwise.
@@ -480,6 +488,7 @@ Engine Mode Rules (%s):
 				fbReq.Model = fb.Model
 				resp, err = e.completeWith(ctx, fb.Adapter, fbReq)
 				if err == nil {
+					e.lastFallback = fb.Model
 					if onUpdate != nil {
 						onUpdate(e.state, fmt.Sprintf("⚠️ Primary provider failed — using fallback model %s", fb.Model))
 					}
@@ -698,9 +707,14 @@ Engine Mode Rules (%s):
 		if onUpdate != nil {
 			onUpdate(e.state, "Completed")
 		}
-
 		return resp.Content, nil
 	}
+}
+
+// LastFallbackModel returns the fallback model used in the most recent turn
+// ("" when the primary provider served it).
+func (e *Engine) LastFallbackModel() string {
+	return e.lastFallback
 }
 
 // recordExplored keeps a capped, de-duplicated list of files/directories the
