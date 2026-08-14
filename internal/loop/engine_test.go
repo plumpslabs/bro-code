@@ -472,6 +472,49 @@ func TestEngineToolBudget(t *testing.T) {
 	}
 }
 
+// rangeReadingAdapter never answers but reads DIFFERENT line ranges of the
+// SAME file every round — the exact "I need lines 60-100" pattern the user
+// kept hitting, where the model was methodically covering a large file and
+// the budget wrongly treated same-path reads as spinning.
+type rangeReadingAdapter struct {
+	calls int
+}
+
+func (m *rangeReadingAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	m.calls++
+	return &provider.CompletionResponse{
+		Reasoning: "exploring",
+		ToolCalls: []provider.ToolCall{
+			{ID: "tc", Name: "read_file", Arguments: fmt.Sprintf(`{"path":"big.js","start_line":%d,"end_line":%d}`, (m.calls-1)*50+1, m.calls*50)},
+		},
+	}, nil
+}
+
+// TestEngineToolBudgetRangeReadsAreProgress proves that reading DIFFERENT
+// ranges of the SAME large file counts as genuine progress: the model must
+// NOT be cut at maxToolOnlyRounds (the old behaviour that aborted the
+// "I need lines 60-100" case) — it gets room up to the absolute cap.
+func TestEngineToolBudgetRangeReadsAreProgress(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &rangeReadingAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	_, err := engine.RunTurn(context.Background(), "explore big file", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	// Range reads of the same file must NOT be treated as spinning: the model
+	// survives past maxToolOnlyRounds (only the absolute cap stops it).
+	if adapter.calls <= maxToolOnlyRounds {
+		t.Fatalf("range-reading model cut at %d calls (<= maxToolOnlyRounds %d): same-path range reads must count as progress", adapter.calls, maxToolOnlyRounds)
+	}
+	if adapter.calls > maxToolOnlyAbsolute {
+		t.Fatalf("range-reading model exceeded absolute cap: %d > %d", adapter.calls, maxToolOnlyAbsolute)
+	}
+}
+
 // TestEngineToolBudgetProgressing proves the adaptive budget: a model that
 // keeps discovering NEW files (genuine deep exploration) is NOT cut at
 // maxToolOnlyRounds — it gets room until the absolute cap, so an agent that

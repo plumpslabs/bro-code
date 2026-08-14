@@ -398,13 +398,15 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		return strings.Join(lines[start:end], "\n"), nil
 	}
 
-	if len(lines) > 200 {
-		head := strings.Join(lines[:100], "\n")
-		// Actionable guidance instead of a vague "request more": a weak model
-		// that reads a big file and sees truncation tends to fight it with bash
-		// sed/head/tail loops instead of using the range parameters — which
-		// burns rounds and ends in a tool-budget abort.
-		return fmt.Sprintf("%s\n\n[file has %d lines, showing first 100. Read specific ranges with start_line/end_line, or use code_search to locate symbols first]", head, len(lines)), nil
+	// Window is 250 lines (not 100): a larger first read means a big file needs
+	// far fewer range reads to cover, which keeps models inside the tool-budget
+	// (each range read is a round that re-sends the whole conversation). The
+	// guidance is actionable — a weak model that sees truncation tends to
+	// fight it with bash sed/head/tail loops instead of using the range
+	// parameters, burning rounds until the budget aborts the turn.
+	if len(lines) > 250 {
+		head := strings.Join(lines[:250], "\n")
+		return fmt.Sprintf("%s\n\n[file has %d lines, showing first 250. Read specific ranges with start_line/end_line, or use code_search to locate symbols first]", head, len(lines)), nil
 	}
 
 	return CapOutput(string(data)), nil

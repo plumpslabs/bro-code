@@ -201,8 +201,10 @@ const (
 	// the 25-iteration cap.
 	maxToolOnlyRounds = 14
 	// maxToolOnlyAbsolute — unconditional abort even for a model that keeps
-	// discovering new files (freedom is bounded, never infinite).
-	maxToolOnlyAbsolute = 18
+	// discovering new files (freedom is bounded, never infinite). 20 leaves
+	// room for the final-warning pattern (ONE last targeted read, then the
+	// answer) to complete instead of being cut right after the read.
+	maxToolOnlyAbsolute = 20
 )
 
 // SetProjectContext injects a compact structural overview of the project into
@@ -406,17 +408,23 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// what it knows and what context is still missing.
 		if e.toolOnlyRounds >= toolWarnRounds && !e.toolReminderSent {
 			e.toolReminderSent = true
-			_ = e.context.AppendUserMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files. If you have enough context, answer the user's question NOW using what you have read — do not explore further. If you genuinely do NOT have enough context, stop anyway and say exactly what is missing instead of guessing."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
+			// The reminder must NOT forbid tools absolutely: a model that
+			// knows exactly which one more read (a specific line range of a
+			// big file) would settle the answer should be allowed to make it,
+			// then answer. An absolute "do not call tools" left models stuck
+			// deliberating in reasoning forever ("warning says stop but I
+			// genuinely need lines 60-100") until the budget aborted them.
+			_ = e.context.AppendUserMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files. If you know exactly which ONE more read would settle the answer (a specific file or line range), make that single read — then answer. Otherwise answer NOW using what you have read; do not keep exploring. If you genuinely do NOT have enough context, stop and say exactly what is missing instead of guessing."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Tool budget nearly exhausted — answer with what you have")
+				onUpdate(e.state, "⚠️ Tool budget nearly exhausted — one final read allowed, then answer")
 			}
 			continue
 		}
 		if e.toolOnlyRounds >= toolFinalWarnRounds && !e.toolReminder2Sent {
 			e.toolReminder2Sent = true
-			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. Do NOT call any more tools. Write your answer now based on what you have read. If you cannot fully answer, give a partial answer with what you know and state clearly what context is still missing — never fabricate." + e.exploredSummary())
+			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. You may make AT MOST ONE more tool call — only a specific read you already know you need (a file or line range) — and then you MUST write your answer in the next response. No further exploration, no re-reading. If you cannot fully answer, give a partial answer with what you know and state clearly what context is still missing — never fabricate." + e.exploredSummary())
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Final warning — answer now or the turn will be stopped")
+				onUpdate(e.state, "⚠️ Final warning — one final read max, then answer or stop")
 			}
 			continue
 		}
@@ -508,7 +516,7 @@ Engine Mode Rules (%s):
 16. ANSWER PROPORTIONALITY: match answer length to the question's depth. Exploration/architecture questions deserve thorough, detailed answers — structure, evidence from the code, examples. Do NOT compress a full explanation into a terse summary; the user wants the detail. Short answers are for simple questions only. Never pad a short answer into an essay either.
 17. BATCH YOUR TOOL CALLS (cost-critical): every round re-sends the ENTIRE conversation to the model, so the number of rounds is the single biggest cost driver. Issue MULTIPLE independent tool calls in ONE message — e.g. 3-4 read_file/grep/glob/list_dir calls together instead of one per round. They execute in sequence within the round. A senior consultant explores with a few high-signal batch reads, not dozens of narrow single-file greps.
 18. SENIOR CONSULTANT POSTURE: think before you act. For a question, first form a hypothesis about where the answer lives (likely files/symbols), then verify it with ONE batched round of targeted reads, then answer directly with what you verified. Do not dump raw exploration or file lists into your answer — synthesize. If a tool result is unhelpful, say so and adapt; never re-run the same narrow search hoping for a different outcome.
-19. LARGE FILES & TRUNCATION: read_file of a file over 200 lines returns only the first 100 — read specific ranges with start_line/end_line, or use code_search to locate symbols first, then read the exact lines. If a tool result is truncated, narrow the range ONCE and move on; NEVER fight truncation with bash sed/head/tail/grep loops on the same file hoping for different output — that burns rounds and gets the turn aborted. Two range reads per file max, then answer from what you have.`
+19. LARGE FILES & TRUNCATION: read_file of a file over 250 lines returns the first 250 with a notice — cover the rest with start_line/end_line range reads (2-3 max for a typical large file), or use code_search to locate symbols first. If a tool result is truncated, narrow the range ONCE and move on; NEVER fight truncation with bash sed/head/tail/grep loops on the same file hoping for different output — that burns rounds and gets the turn aborted. Range reads of a large file ARE progress; answer from what you have after covering the key sections.`
 		}
 
 		// Auto-compact context if token count exceeds threshold
@@ -821,6 +829,18 @@ func (e *Engine) recordExplored(tc provider.ToolCall) {
 		switch tc.Name {
 		case "read_file", "edit_file", "write_file":
 			target, _ = m["path"].(string)
+			// A deliberate line-range read of a large file (read_file with
+			// start_line) is genuine progress — the model is covering the file in
+			// sections — NOT spinning, even though the path is the same. Reset the
+			// stall counter so the budget does not kill a model methodically
+			// reading a big file (the exact abort the user kept hitting). True
+			// spinning is still caught: identical repeated calls are blocked by
+			// repeat detection, and the absolute cap bounds everything.
+			if tc.Name == "read_file" {
+				if _, hasRange := m["start_line"]; hasRange {
+					e.exploredStalls = 0
+				}
+			}
 		case "list_dir", "grep", "glob":
 			target, _ = m["path"].(string)
 			if target == "" {

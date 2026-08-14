@@ -72,14 +72,14 @@ func TestReadFileTruncationGuidance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read_file failed: %v", err)
 	}
-	if !strings.Contains(out, "file has 50") || !strings.Contains(out, "showing first 100") {
+	if !strings.Contains(out, "file has 50") || !strings.Contains(out, "showing first 250") {
 		t.Fatalf("truncation notice missing line count: %q", out)
 	}
 	if !strings.Contains(out, "start_line/end_line") || !strings.Contains(out, "code_search") {
 		t.Fatalf("truncation notice must give actionable guidance: %q", out)
 	}
 	if strings.Contains(out, "line 300") {
-		t.Fatalf("read_file returned content past the first 100 lines")
+		t.Fatalf("read_file returned content past the first 250 lines")
 	}
 
 	// A range read returns the requested section.
