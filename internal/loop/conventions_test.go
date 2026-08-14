@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/provider"
@@ -209,7 +210,7 @@ func TestReviewEditedFilesEndToEnd(t *testing.T) {
 	engine := NewEngine(&captureAdapter{}, tools, ctxMgr, "test-model")
 	engine.SetReviewLLM(false)
 	engine.editedFiles = []string{p}
-	out := engine.reviewEditedFiles()
+	out := engine.reviewEditedFiles(context.Background())
 	if !strings.Contains(out, "console.log") {
 		t.Errorf("review should flag console.log, got %q", out)
 	}
@@ -231,6 +232,46 @@ func (s *seniorReviewAdapter) Complete(_ context.Context, req provider.Completio
 	return &provider.CompletionResponse{Content: "Done"}, nil
 }
 
+// blockingReviewAdapter blocks the LLM review call until the context is
+// done. Proves the review inherits turn cancellation (ESC) instead of the old
+// context.Background, which ignored ESC and could stall the turn up to the
+// HTTP client's full timeout.
+type blockingReviewAdapter struct{ captureAdapter }
+
+func (s *blockingReviewAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	if strings.Contains(req.Messages[0].Content, "senior code reviewer") {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return &provider.CompletionResponse{Content: "Done"}, nil
+}
+
+func TestReviewLLMUsesTurnContext(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "svc.js", "export function list() {\n  return users.map(u => db.query(u.id));\n}\n")
+
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	engine := NewEngine(&blockingReviewAdapter{}, tools, ctxMgr, "test-model")
+
+	engine.editedFiles = []string{p}
+	// Canceled up front — the ESC-equivalent state. The review must abort
+	// promptly instead of blocking on the provider.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	out := engine.reviewEditedFiles(ctx)
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Fatalf("LLM review ignored turn cancellation: took %v", elapsed)
+	}
+	if out != "" {
+		t.Errorf("review should abort on canceled ctx, got %q", out)
+	}
+}
+
 func TestReviewLayer2LLMRunsOnceOnCleanLayer1(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "svc.js", "export function list() {\n  return users.map(u => db.query(u.id));\n}\n")
@@ -241,7 +282,7 @@ func TestReviewLayer2LLMRunsOnceOnCleanLayer1(t *testing.T) {
 	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
 
 	engine.editedFiles = []string{p}
-	out := engine.reviewEditedFiles()
+	out := engine.reviewEditedFiles(context.Background())
 	// Layer 1 is clean (no console.log/any/TODO), so Layer 2 must run and
 	// surface the N+1 finding.
 	if !strings.Contains(out, "N+1") {
@@ -259,7 +300,7 @@ func TestReviewLayer2SkippedWhenLayer1FindsIssues(t *testing.T) {
 	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
 
 	engine.editedFiles = []string{p}
-	out := engine.reviewEditedFiles()
+	out := engine.reviewEditedFiles(context.Background())
 	// Layer 1 already flagged console.log — Layer 2 must NOT spend tokens.
 	if strings.Contains(out, "N+1") {
 		t.Errorf("Layer 2 must be skipped when Layer 1 found issues, got %q", out)
@@ -280,14 +321,14 @@ func TestReviewLayer2CappedPerTurn(t *testing.T) {
 
 	// Round 1: clean Layer 1 → Layer 2 runs once.
 	engine.editedFiles = []string{p}
-	out1 := engine.reviewEditedFiles()
+	out1 := engine.reviewEditedFiles(context.Background())
 	if !strings.Contains(out1, "N+1") {
 		t.Errorf("round 1 should run Layer 2, got %q", out1)
 	}
 	// Round 2 (model edited again after feedback): Layer 2 must NOT run again
 	// — the per-turn budget is spent.
 	engine.editedFiles = []string{p}
-	out2 := engine.reviewEditedFiles()
+	out2 := engine.reviewEditedFiles(context.Background())
 	if strings.Contains(out2, "N+1") {
 		t.Errorf("round 2 must skip Layer 2 (budget), got %q", out2)
 	}

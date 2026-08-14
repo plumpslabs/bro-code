@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/plumpslabs/bro-code/internal/provider"
 )
@@ -351,7 +352,7 @@ const maxReviewPasses = 2
 // Returns the formatted review block, or "" when everything is clean. The
 // two layers are deliberately ordered so the expensive LLM pass only runs
 // after the free checks pass (and only on the first review round per turn).
-func (e *Engine) reviewEditedFiles() string {
+func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 	if len(e.editedFiles) == 0 {
 		return ""
 	}
@@ -379,7 +380,7 @@ func (e *Engine) reviewEditedFiles() string {
 	// are still inside the per-turn budget. If Layer 1 already found problems,
 	// don't spend tokens — the model must fix those first.
 	if len(issues) == 0 && e.reviewLLMEnabled && e.reviewPasses == 1 {
-		if out := e.llmReviewEditedFiles(); out != "" {
+		if out := e.llmReviewEditedFiles(ctx); out != "" {
 			issues = append(issues, conventionIssue{
 				Kind:    "senior-review",
 				Message: out,
@@ -396,8 +397,12 @@ func (e *Engine) reviewEditedFiles() string {
 
 // llmReviewEditedFiles runs one bounded senior-level code review over the
 // edited files. It returns "" on any failure (never blocks the turn) and
-// keeps the prompt + output small so the cost stays proportional.
-func (e *Engine) llmReviewEditedFiles() string {
+// keeps the prompt + output small so the cost stays proportional. The call
+// inherits the turn's context (so ESC interrupts it) and is additionally
+// bounded by a 60s timeout — a hung provider must never stall the turn
+// (previously it used context.Background, which ignored ESC and could block
+// up to the HTTP client's full timeout).
+func (e *Engine) llmReviewEditedFiles(ctx context.Context) string {
 	files := e.editedFiles
 	if len(files) == 0 {
 		return ""
@@ -434,12 +439,15 @@ Be terse. Format: one line per issue as "file:line — problem → fix". If the 
 
 ` + sb.String()
 
+	reviewCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
 	req := provider.CompletionRequest{
 		Model:       e.model,
 		Messages:    []provider.Message{{Role: "user", Content: prompt}},
 		Temperature: 0.1,
 	}
-	resp, err := e.complete(context.Background(), req)
+	resp, err := e.complete(reviewCtx, req)
 	if err != nil || resp == nil {
 		return ""
 	}

@@ -749,7 +749,7 @@ Engine Mode Rules (%s):
 			// type-safety red flags, and duplicate symbols in edited files,
 			// plus LSP diagnostics when wired. Findings are fed back so the
 			// model fixes them before declaring done.
-			if review := e.reviewEditedFiles(); review != "" {
+			if review := e.reviewEditedFiles(ctx); review != "" {
 				_ = e.context.AppendUserMessage("Code review:\n" + review + "\nPlease fix these issues before finishing.")
 				continue
 			}

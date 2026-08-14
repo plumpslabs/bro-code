@@ -149,11 +149,16 @@ type ScoutManager struct {
 	Runner *Runner
 	mu     sync.Mutex
 	jobs   map[string]*ScoutJob
+	// sem caps how many scouts run CONCURRENTLY: each scout is a full agent
+	// loop with its own provider calls and tool executions, so an unbounded
+	// batch (a model spawning a dozen scouts at once) would hammer the
+	// provider and rate-limit everything. Same cap as parallel sub-agents.
+	sem chan struct{}
 }
 
 // NewScoutManager creates a scout manager backed by the given runner.
 func NewScoutManager(r *Runner) *ScoutManager {
-	return &ScoutManager{Runner: r, jobs: make(map[string]*ScoutJob)}
+	return &ScoutManager{Runner: r, jobs: make(map[string]*ScoutJob), sem: make(chan struct{}, 3)}
 }
 
 // Start launches a background scout. Returns the job id immediately; the job
@@ -168,10 +173,13 @@ func (sm *ScoutManager) Start(ctx context.Context, task string) (string, error) 
 	sm.jobs[id] = job
 	sm.mu.Unlock()
 
-	// 10-minute hard cap so a hung scout cannot leak a goroutine forever.
+	// 10-minute hard cap so a hung scout cannot leak a goroutine forever, and
+	// a concurrency semaphore so a scout batch never hammers the provider.
 	tctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	go func() {
 		defer cancel()
+		sm.sem <- struct{}{}
+		defer func() { <-sm.sem }()
 		result, err := sm.Runner.runOne(tctx, id, task, nil)
 		sm.mu.Lock()
 		job.Done = true

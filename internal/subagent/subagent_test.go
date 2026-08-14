@@ -66,6 +66,72 @@ func (f *fakeAdapter) StreamComplete(ctx context.Context, req provider.Completio
 	return f.Complete(ctx, req)
 }
 
+// blockingAdapter tracks the max number of concurrent in-flight completions,
+// so the scout concurrency cap can be verified deterministically.
+type blockingAdapter struct {
+	mu   sync.Mutex
+	cur  int
+	max  int
+	gate chan struct{}
+}
+
+func (b *blockingAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	b.mu.Lock()
+	b.cur++
+	if b.cur > b.max {
+		b.max = b.cur
+	}
+	b.mu.Unlock()
+	<-b.gate
+	b.mu.Lock()
+	b.cur--
+	b.mu.Unlock()
+	return &provider.CompletionResponse{Content: "scout done"}, nil
+}
+
+func (b *blockingAdapter) maxConcurrent() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.max
+}
+
+// TestScoutConcurrencyCapped verifies that spawning more scouts than the
+// concurrency cap never runs more than 3 agent loops at once — an unbounded
+// batch would hammer the provider with parallel full agent loops.
+func TestScoutConcurrencyCapped(t *testing.T) {
+	gate := make(chan struct{})
+	adapter := &blockingAdapter{gate: gate}
+	tools := tool.NewRegistry()
+	r := &Runner{Adapter: adapter, Model: "test-model", Tools: tools}
+	sm := NewScoutManager(r)
+
+	ctx := context.Background()
+	for i := 0; i < 6; i++ {
+		if _, err := sm.Start(ctx, fmt.Sprintf("scout task %d", i)); err != nil {
+			t.Fatalf("start scout: %v", err)
+		}
+	}
+
+	// Wait until the semaphore is saturated (3 concurrent runs in flight).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && adapter.maxConcurrent() < 3 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	close(gate) // release all blocked scouts
+
+	if m := adapter.maxConcurrent(); m > 3 {
+		t.Fatalf("scouts exceeded concurrency cap: max concurrent = %d (want <= 3)", m)
+	}
+	// All six scouts must complete after release.
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && sm.Pending() > 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := sm.Pending(); n != 0 {
+		t.Fatalf("%d scouts still pending after release", n)
+	}
+}
+
 func TestSubAgentRunsIsolatedTurn(t *testing.T) {
 	f := &fakeAdapter{}
 	tools := tool.NewRegistry()
