@@ -38,6 +38,19 @@ type Tool interface {
 	Execute(ctx context.Context, argsJSON string) (string, error)
 }
 
+// FileActionRequest describes a critical file mutation (create/delete) that
+// needs the user's confirmation before it runs.
+type FileActionRequest struct {
+	Kind string // "create_file" | "delete_file"
+	Path string
+}
+
+// FileActionDecision is the user's answer to a file-action confirmation.
+type FileActionDecision struct {
+	Allow  bool // false = discard (deny) the action
+	Always bool // remember this path for the rest of the session
+}
+
 // Registry holds all registered tools plus the permission gate state.
 type Registry struct {
 	tools    map[string]Tool
@@ -45,6 +58,12 @@ type Registry struct {
 	allow    map[string]bool // session allow-list (keys from AllowKey)
 	askFunc  func(context.Context, []AskQuestion) ([]AskResult, error)
 	sandbox  *Sandbox // granular per-tool policy (.brocode/sandbox.json)
+
+	// fileActionFunc asks the user before critical file mutations (create /
+	// delete) via the input-bar confirm; fileAllow remembers "always allow"
+	// paths for the rest of the session (keys "create_file:<path>").
+	fileActionFunc func(context.Context, FileActionRequest) (FileActionDecision, error)
+	fileAllow      map[string]bool
 }
 
 // NewRegistry initializes default built-in tools.
@@ -53,6 +72,7 @@ func NewRegistry() *Registry {
 	r.Register(&ReadFileTool{})
 	r.Register(&WriteFileTool{})
 	r.Register(&EditFileTool{})
+	r.Register(&DeleteFileTool{})
 	r.Register(&ListDirTool{})
 	r.Register(&GrepTool{})
 	r.Register(&GlobTool{})
@@ -94,6 +114,13 @@ func (r *Registry) SetUserAskHandler(fn func(context.Context, []AskQuestion) ([]
 	}
 }
 
+// SetFileActionHandler wires the input-bar confirmation for critical file
+// mutations (create/delete file). Without it (headless), gated file actions
+// run — mirroring the bash gate's unattended behavior.
+func (r *Registry) SetFileActionHandler(fn func(context.Context, FileActionRequest) (FileActionDecision, error)) {
+	r.fileActionFunc = fn
+}
+
 // SetMemoryStore wires the cross-session project memory into the memory tool.
 // Nil leaves the tool reporting that memory is unavailable.
 func (r *Registry) SetMemoryStore(st *memory.Store) {
@@ -129,6 +156,28 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 
 	var cmd string
 	switch tc.Name {
+	case "write_file":
+		// Only CREATING a new file is gated — that is the critical action.
+		// Overwriting an existing file is normal edit work (shown in the
+		// change summary, reviewed via review_changes, but not gated per write).
+		var args struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return false, "invalid write_file arguments: " + err.Error(), nil
+		}
+		if _, err := os.Stat(args.Path); err == nil {
+			return true, "", nil // existing file → normal edit
+		}
+		return r.gateFileAction(ctx, "create_file", args.Path)
+	case "delete_file":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return false, "invalid delete_file arguments: " + err.Error(), nil
+		}
+		return r.gateFileAction(ctx, "delete_file", args.Path)
 	case "bash":
 		var args struct {
 			Command string `json:"command"`
@@ -167,6 +216,41 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 		return true, "", nil // headless/unattended: proceed
 	}
 
+	return r.askViaModal(ctx, cmd)
+}
+
+// gateFileAction asks the user for approval of a critical file mutation
+// (create/delete) through the input-bar confirm handler, with an "always allow
+// this path" option that persists for the session. Without a handler
+// (headless) the action proceeds, mirroring the bash gate.
+func (r *Registry) gateFileAction(ctx context.Context, kind, path string) (bool, string, error) {
+	key := kind + ":" + path
+	if r.fileAllow != nil && r.fileAllow[key] {
+		return true, "", nil
+	}
+	if r.fileActionFunc == nil {
+		return true, "", nil // headless/unattended: proceed
+	}
+	dec, err := r.fileActionFunc(ctx, FileActionRequest{Kind: kind, Path: path})
+	if err != nil {
+		return false, "file action approval failed: " + err.Error(), nil
+	}
+	if !dec.Allow {
+		return false, fmt.Sprintf("user discarded %s %s", kind, path), nil
+	}
+	if dec.Always {
+		if r.fileAllow == nil {
+			r.fileAllow = map[string]bool{}
+		}
+		r.fileAllow[key] = true
+	}
+	return true, "", nil
+}
+
+// askViaModal presents a gated command to the user via the interactive modal
+// (Allow once / Always allow / Deny). Extracted so the file-action gate can
+// stay separate from the command gate.
+func (r *Registry) askViaModal(ctx context.Context, cmd string) (bool, string, error) {
 	results, err := r.askFunc(ctx, []AskQuestion{
 		{
 			Question: "⚠️ BroCode wants to run a gated command:\n\n```\n" + cmd + "\n```",
@@ -250,6 +334,11 @@ func (r *Registry) SubRegistry() *Registry {
 	// request interactive approval, so gated commands are blocked outright.
 	nr.askFunc = func(ctx context.Context, q []AskQuestion) ([]AskResult, error) {
 		return nil, fmt.Errorf("sub-agents cannot run commands that require user approval — the main agent must run %q", q[0].Question)
+	}
+	// Same for critical file mutations (create/delete): the confirm bar only
+	// exists in the main TUI, so sub-agents may not create or delete files.
+	nr.fileActionFunc = func(ctx context.Context, req FileActionRequest) (FileActionDecision, error) {
+		return FileActionDecision{}, fmt.Errorf("sub-agents cannot create/delete files — the main agent must run %s %s", req.Kind, req.Path)
 	}
 	return nr
 }
@@ -350,12 +439,25 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 		return "", err
 	}
 
+	// Capture the previous content (if any) so the turn's change summary can
+	// distinguish "created" from "modified" and render a +/- diff.
+	old := ""
+	if data, err := os.ReadFile(args.Path); err == nil {
+		old = string(data)
+	}
+
 	// One-turn rollback window: keep a backup before overwriting.
 	_ = Snapshot(args.Path)
 
 	if err := os.WriteFile(args.Path, []byte(args.Content), 0644); err != nil {
 		return "", err
 	}
+
+	action := "created"
+	if old != "" {
+		action = "modified"
+	}
+	RecordChange(FileChange{Path: args.Path, Action: action, Old: old, New: args.Content})
 	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(args.Content), args.Path), nil
 }
 
@@ -421,9 +523,58 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		return "", err
 	}
 
+	RecordChange(FileChange{Path: args.Path, Action: "modified", Old: content, New: newContent})
+
 	edits := myers.ComputeEdits(span.URIFromPath(args.Path), content, newContent)
 	unified := gotextdiff.ToUnified(args.Path, args.Path, content, edits)
 	return fmt.Sprintf("Successfully updated %s\nDiff:\n%s", args.Path, unified), nil
+}
+
+// DeleteFileTool permanently removes a file. It is gated (GateAction asks the
+// user before deletion) and its old content is recorded so the turn's change
+// summary shows the deletion and the undo snapshot can restore the file.
+type DeleteFileTool struct{}
+
+func (t *DeleteFileTool) Name() string { return "delete_file" }
+func (t *DeleteFileTool) Description() string {
+	return "Delete a file permanently (requires user confirmation)"
+}
+func (t *DeleteFileTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string", "description": "Target file path to delete"},
+		},
+		"required": []string{"path"},
+	}
+}
+func (t *DeleteFileTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+
+	// Native guard: never delete inside heavy dirs or sensitive files.
+	if err := GuardFile(args.Path); err != nil {
+		return "", err
+	}
+
+	// Record the old content before removal so the change summary can show
+	// what was deleted (and the snapshot restores it on undo).
+	old := ""
+	if data, err := os.ReadFile(args.Path); err == nil {
+		old = string(data)
+	}
+	_ = Snapshot(args.Path)
+
+	if err := os.Remove(args.Path); err != nil {
+		return "", err
+	}
+
+	RecordChange(FileChange{Path: args.Path, Action: "deleted", Old: old})
+	return fmt.Sprintf("Successfully deleted %s", args.Path), nil
 }
 
 // ListDirTool

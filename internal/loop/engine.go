@@ -596,7 +596,7 @@ Engine Mode Rules (%s):
 			// progressing. Block the repeat and tell the model to answer from
 			// the results it already has instead of re-running the tool.
 			for _, tc := range resp.ToolCalls {
-				if tc.Name == "write_file" || tc.Name == "edit_file" {
+				if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" {
 					hasCodeChanges = true
 				}
 
@@ -606,7 +606,7 @@ Engine Mode Rules (%s):
 				// verified facts into project memory.
 				switch e.Mode() {
 				case "PLANNER":
-					if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "bash" {
+					if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" || tc.Name == "bash" {
 						guardMsg := fmt.Sprintf("⚠️ [PLANNER GUARD]: Tool '%s' is disabled in PLANNER mode (read-only architecture mode). Switch to BUILDER mode (Shift+Tab) to execute code changes.", tc.Name)
 						if onUpdate != nil {
 							onUpdate(e.state, guardMsg)
@@ -615,7 +615,7 @@ Engine Mode Rules (%s):
 						continue
 					}
 				case "MINER":
-					if tc.Name == "write_file" || tc.Name == "edit_file" {
+					if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" {
 						guardMsg := fmt.Sprintf("⚠️ [MINER GUARD]: Tool '%s' is blocked in MINER mode (read-only knowledge agent). Switch to BUILDER mode (Shift+Tab) to modify code.", tc.Name)
 						if onUpdate != nil {
 							onUpdate(e.state, guardMsg)

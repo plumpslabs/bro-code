@@ -247,6 +247,106 @@ func TestTurnQueueOneAtATime(t *testing.T) {
 	}
 }
 
+// TestFileConfirmBarFlow verifies the input-bar file-action confirm: the bar
+// replaces the input, ENTER submits the chosen option, and the broker receives
+// the decision (allow / always / discard).
+func TestFileConfirmBarFlow(t *testing.T) {
+	m := newTestApp()
+
+	// A pending create_file confirm opens the bar.
+	m.Update(fileConfirmMsg{id: "f1", kind: "create_file", path: "src/new.ts"})
+	if !m.showFileConfirm {
+		t.Fatal("expected file confirm bar to open")
+	}
+	if m.fileConfirmKind != "create_file" || m.fileConfirmPath != "src/new.ts" {
+		t.Fatalf("unexpected confirm state: %+v", m.fileConfirm)
+	}
+
+	// Default selection is Allow once — ENTER answers with Allow=true.
+	got := make(chan tool.FileActionDecision, 1)
+	m.fileConfirm.pending["f1"] = got
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	select {
+	case d := <-got:
+		if !d.Allow || d.Always {
+			t.Fatalf("expected Allow once, got %+v", d)
+		}
+	default:
+		t.Fatal("broker did not receive the decision")
+	}
+	if m.showFileConfirm {
+		t.Fatal("confirm bar must close after submit")
+	}
+
+	// Always allow via the '2' key.
+	m.Update(fileConfirmMsg{id: "f2", kind: "delete_file", path: "src/old.ts"})
+	got2 := make(chan tool.FileActionDecision, 1)
+	m.fileConfirm.pending["f2"] = got2
+	m.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	select {
+	case d := <-got2:
+		if !d.Allow || !d.Always {
+			t.Fatalf("expected Always allow, got %+v", d)
+		}
+	default:
+		t.Fatal("broker did not receive the always decision")
+	}
+
+	// Discard via ESC.
+	m.Update(fileConfirmMsg{id: "f3", kind: "delete_file", path: "src/other.ts"})
+	got3 := make(chan tool.FileActionDecision, 1)
+	m.fileConfirm.pending["f3"] = got3
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	select {
+	case d := <-got3:
+		if d.Allow {
+			t.Fatalf("expected discard (Allow=false), got %+v", d)
+		}
+	default:
+		t.Fatal("broker did not receive the discard decision")
+	}
+}
+
+// TestTurnResultAppendsFileSummary verifies the FILES change summary is
+// appended after a turn that touched files, with the compact block rendered by
+// default and the diff revealed when filesExpanded is toggled.
+func TestTurnResultAppendsFileSummary(t *testing.T) {
+	m := newTestApp()
+	tool.ResetChanges()
+	defer tool.ResetChanges()
+
+	// Record a change the way write_file would.
+	tool.RecordChange(tool.FileChange{Path: "src/a.ts", Action: "created", New: "x\ny\n"})
+
+	m.Update(turnResultMsg{content: "done", err: nil, mode: "BUILDER"})
+	if m.filesExpanded {
+		t.Fatal("summary must start collapsed")
+	}
+	if len(m.messages) == 0 {
+		t.Fatal("no messages appended")
+	}
+	last := m.messages[len(m.messages)-1]
+	if !strings.HasPrefix(last, "FILES:\n") {
+		t.Fatalf("expected FILES summary message, got %q", last)
+	}
+
+	// Collapsed render shows the compact row but not the diff body.
+	collapsed := ansiRegex.ReplaceAllString(formatMessage(last, 120, false), "")
+	if !strings.Contains(collapsed, "src/a.ts") {
+		t.Fatalf("collapsed summary missing file row:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, "+ x") {
+		t.Fatalf("collapsed summary must hide the diff body:\n%s", collapsed)
+	}
+
+	// Expanded render shows the +/- diff lines.
+	expanded := ansiRegex.ReplaceAllString(formatMessage(last, 120, true), "")
+	if !strings.Contains(expanded, "+ x") {
+		t.Fatalf("expanded summary missing diff lines:\n%s", expanded)
+	}
+}
+
 // TestActivityResetsOnNewTurn verifies activity clears when a fresh turn starts.
 func TestActivityResetsOnNewTurn(t *testing.T) {
 	m := newTestApp()
@@ -284,13 +384,13 @@ func TestTurnResultModeBadge(t *testing.T) {
 
 	// Renderer must draw the mode chip next to the BROCODE label. ANSI codes
 	// are stripped first — glamour interleaves them mid-word.
-	rendered := ansiRegex.ReplaceAllString(formatMessage(last, 120), "")
+	rendered := ansiRegex.ReplaceAllString(formatMessage(last, 120, false), "")
 	if !strings.Contains(rendered, "PLANNER") {
 		t.Fatalf("rendered answer missing PLANNER badge:\n%s", rendered)
 	}
 
 	// Legacy unstamped format still renders (no badge, no crash).
-	legacy := ansiRegex.ReplaceAllString(formatMessage("BROCODE:\nplain answer", 120), "")
+	legacy := ansiRegex.ReplaceAllString(formatMessage("BROCODE:\nplain answer", 120, false), "")
 	if !strings.Contains(legacy, "plain answer") {
 		t.Fatalf("legacy format broken:\n%s", legacy)
 	}

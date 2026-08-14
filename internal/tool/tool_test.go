@@ -498,6 +498,162 @@ func TestReviewChangesToolApproveAndRevert(t *testing.T) {
 	}
 }
 
+func TestFileChangesRecordedOnTools(t *testing.T) {
+	ResetChanges()
+	defer ResetChanges()
+	tmpDir := t.TempDir()
+	p := filepath.Join(tmpDir, "a.go")
+
+	// write_file on a NEW file → created.
+	reg := NewRegistry()
+	_, err := reg.Execute(context.Background(), "write_file", `{"path":"`+p+`","content":"v1"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := TakeChanges()
+	if len(ch) != 1 || ch[0].Action != "created" || ch[0].Path != p {
+		t.Fatalf("expected created change, got %+v", ch)
+	}
+
+	// write_file over an existing file → modified, with old content captured.
+	_, err = reg.Execute(context.Background(), "write_file", `{"path":"`+p+`","content":"v2"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch = TakeChanges()
+	if len(ch) != 1 || ch[0].Action != "modified" || ch[0].Old != "v1" || ch[0].New != "v2" {
+		t.Fatalf("expected modified change with old content, got %+v", ch)
+	}
+
+	// edit_file → modified.
+	_, err = reg.Execute(context.Background(), "edit_file", `{"path":"`+p+`","target":"v2","replacement":"v3"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch = TakeChanges()
+	if len(ch) != 1 || ch[0].Action != "modified" {
+		t.Fatalf("expected edit_file modified, got %+v", ch)
+	}
+
+	// delete_file → deleted, old content recorded.
+	_, err = reg.Execute(context.Background(), "delete_file", `{"path":"`+p+`"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch = TakeChanges()
+	if len(ch) != 1 || ch[0].Action != "deleted" || ch[0].Old != "v3" {
+		t.Fatalf("expected deleted change with old content, got %+v", ch)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("file should be gone after delete_file, stat err=%v", err)
+	}
+}
+
+func TestFileChangesMessageFormat(t *testing.T) {
+	msg := FileChangesMessage([]FileChange{
+		{Path: "src/new.ts", Action: "created", New: "line1\nline2\n"},
+		{Path: "src/old.ts", Action: "deleted", Old: "gone\n"},
+		{Path: "src/edit.ts", Action: "modified", Old: "a\n", New: "b\n"},
+	})
+	if !strings.HasPrefix(msg, "FILES:\n") {
+		t.Errorf("message must start with FILES:, got %q", msg)
+	}
+	if !strings.Contains(msg, FileChangesSep) {
+		t.Errorf("message must contain the compact/diff separator")
+	}
+	compact, diff, _ := strings.Cut(msg, FileChangesSep)
+	if !strings.Contains(compact, "src/new.ts") || !strings.Contains(compact, "created") {
+		t.Errorf("compact block missing file rows: %q", compact)
+	}
+	if !strings.Contains(diff, "+") || !strings.Contains(diff, "-") {
+		t.Errorf("diff block missing +/- markers: %q", diff)
+	}
+}
+
+func TestGateFileActionCreateAndDelete(t *testing.T) {
+	ResetChanges()
+	defer ResetChanges()
+	tmpDir := t.TempDir()
+	newPath := filepath.Join(tmpDir, "new.go") // does not exist → create gate
+	existing := filepath.Join(tmpDir, "exists.go")
+	if err := os.WriteFile(existing, []byte("v"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := NewRegistry()
+
+	// Overwriting an existing file is NOT gated (normal edit work).
+	approved, _, err := reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+existing+`","content":"v2"}`))
+	if err != nil || !approved {
+		t.Fatalf("overwrite must not be gated: approved=%v err=%v", approved, err)
+	}
+
+	// Creating a new file without a confirm handler (headless) proceeds.
+	approved, _, err = reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+newPath+`","content":"v"}`))
+	if err != nil || !approved {
+		t.Fatalf("headless create must proceed: approved=%v err=%v", approved, err)
+	}
+
+	// With a handler: deny (discard) blocks the create.
+	reg.SetFileActionHandler(func(_ context.Context, req FileActionRequest) (FileActionDecision, error) {
+		if req.Kind != "create_file" {
+			t.Errorf("expected create_file request, got %q", req.Kind)
+		}
+		return FileActionDecision{Allow: false}, nil
+	})
+	approved, reason, err := reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+newPath+`","content":"v"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved || !strings.Contains(reason, "discarded") {
+		t.Fatalf("create must be discardable: approved=%v reason=%q", approved, reason)
+	}
+
+	// Always allow persists for the session.
+	reg.SetFileActionHandler(func(_ context.Context, _ FileActionRequest) (FileActionDecision, error) {
+		return FileActionDecision{Allow: true, Always: true}, nil
+	})
+	approved, _, err = reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+newPath+`","content":"v"}`))
+	if err != nil || !approved {
+		t.Fatalf("always-allow create must proceed: approved=%v err=%v", approved, err)
+	}
+	// Second call: handler must NOT be invoked again (always-allow remembered).
+	calls := 0
+	reg.SetFileActionHandler(func(_ context.Context, _ FileActionRequest) (FileActionDecision, error) {
+		calls++
+		return FileActionDecision{Allow: false}, nil
+	})
+	approved, _, err = reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+newPath+`","content":"v"}`))
+	if err != nil || !approved {
+		t.Fatalf("always-allow must be remembered: approved=%v err=%v", approved, err)
+	}
+	if calls != 0 {
+		t.Fatalf("always-allow path must skip the handler, got %d calls", calls)
+	}
+
+	// delete_file is always gated.
+	approved, reason, err = reg.GateAction(context.Background(), providerToolCall("delete_file", `{"path":"`+existing+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved || !strings.Contains(reason, "discarded") {
+		t.Fatalf("delete must be gated: approved=%v reason=%q", approved, reason)
+	}
+}
+
+func TestSubAgentDeniesFileActions(t *testing.T) {
+	reg := NewRegistry()
+	sub := reg.SubRegistry()
+
+	approved, reason, err := sub.GateAction(context.Background(), providerToolCall("delete_file", `{"path":"/tmp/x.go"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved || !strings.Contains(reason, "sub-agents cannot") {
+		t.Fatalf("sub-agent delete must be denied: approved=%v reason=%q", approved, reason)
+	}
+}
+
 func TestGitToolCommitGated(t *testing.T) {
 	r := NewRegistry()
 

@@ -233,6 +233,20 @@ type Model struct {
 	// session ID to delete. The modal blocks until the user answers y/n.
 	sessionsConfirmID string
 
+	// File-action confirm bar (create/delete file): replaces the chat input
+	// until the user picks Allow once / Always / Discard. showFileConfirm
+	// blocks tool execution (the tool layer waits on fileConfirmBroker).
+	fileConfirm     *fileConfirmBroker
+	showFileConfirm bool
+	fileConfirmID   string
+	fileConfirmKind string // "create_file" | "delete_file"
+	fileConfirmPath string
+	fileConfirmSel  int // 0=Allow once, 1=Always allow, 2=Discard
+
+	// filesExpanded toggles the FILES change summary at the end of the answer
+	// between compact per-file rows and the full +/- diff (ctrl+f).
+	filesExpanded bool
+
 	// Connect Modal State (multi-step wizard)
 	connectStep         int // 0=provider pick, 1=name, 2=API key, 3=base URL, 4=models
 	connectProviderSel  int
@@ -297,6 +311,11 @@ func (m *Model) appendMessages(msgs ...string) {
 // batch that runs the turn. Callers must ensure no turn is already running
 // (the queue in handleEnter / turnResultMsg enforces one at a time).
 func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
+	// A fresh user turn resets the file-change recorder: changes from the
+	// previous turn were already summarized at its end, and the recorder must
+	// never leak stale entries into the next turn's summary.
+	tool.ResetChanges()
+	m.filesExpanded = false
 	m.appendMessages("YOU:\n" + userQuery)
 	m.status = "Thinking..."
 	// Clear any stale streaming state from a previous interrupted turn.
@@ -430,6 +449,11 @@ func NewApp(
 	}
 	// Gated bash commands reuse the same interactive modal for approval.
 	tools.SetUserAskHandler(brk.Ask)
+	// Critical file actions (create/delete) use a compact confirm bar that
+	// replaces the chat input until the user answers — a different, lighter
+	// interaction than the full question modal.
+	fbrk := newFileConfirmBroker()
+	tools.SetFileActionHandler(fbrk.Confirm)
 	// The OpenCode CLI adapter runs its own agent loop, so its model can't call
 	// the ask_user tool — clarification questions come back as text instead.
 	// Wire the same interactive modal to that path: structured [Q]/[O] blocks
@@ -467,6 +491,7 @@ func NewApp(
 		promptHistory:       []string{},
 		historyIdx:          0,
 		ask:                 brk,
+		fileConfirm:         fbrk,
 		askCustomInput:      aci, logViewport: viewport.New(),
 		askViewport:      viewport.New(),
 		sessionsViewport: viewport.New(),
@@ -790,6 +815,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Ready"
 		}
 
+		// Append the turn's file-change summary (create/edit/delete) right
+		// after the answer, so the user sees exactly which files were touched
+		// with +/- line markers — collapsed to one row per file, expandable
+		// with ctrl+f. Appended even on error/interrupt so partial edits are
+		// never silently lost.
+		if ch := tool.TakeChanges(); len(ch) > 0 {
+			if files := tool.FileChangesMessage(ch); files != "" {
+				m.filesExpanded = false
+				m.appendMessages(files)
+			}
+		}
+
 		// One turn at a time: fire the next queued prompt, if any. The queue
 		// drains even after an interrupt/error — a queued message was
 		// explicitly requested and must not be silently dropped.
@@ -818,6 +855,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case askUserMsg:
 		m.openAsk(msg)
+		return m, nil
+
+	case fileConfirmMsg:
+		m.openFileConfirm(msg)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -862,6 +903,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch keyStr {
+		case "ctrl+f":
+			// Toggle the FILES change summary at the end of the last answer
+			// between compact per-file rows and the full +/- diff.
+			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug {
+				m.filesExpanded = !m.filesExpanded
+				m.renderedLog = "" // force re-render of the cached log
+				m.renderedKey = ""
+			}
+			return m, nil
+
 		case "ctrl+c":
 			// Cancel any running turn first: without this, the turn goroutine
 			// keeps running after the program exits and its prog.Send calls
@@ -898,6 +949,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
+			// Input-bar file-action confirm: ESC discards (denies) the action.
+			if m.showFileConfirm {
+				m.discardFileConfirm()
+				return m, nil
+			}
 			if m.showAsk {
 				if m.askCustomQ >= 0 {
 					m.askCustomQ = -1
@@ -945,6 +1001,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter":
+			// Input-bar file-action confirm: ENTER submits the current choice.
+			if m.showFileConfirm {
+				m.submitFileConfirm()
+				return m, nil
+			}
 			if m.showAsk {
 				if m.askCustomQ >= 0 {
 					m.askSaveCustom()
@@ -1034,6 +1095,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.sessionsConfirmID = ""
 			return m, nil
+
+		case "left", "right", "1", "2", "3":
+			// Input-bar file-action confirm: arrows or 1/2/3 move the cursor.
+			if m.showFileConfirm {
+				switch keyStr {
+				case "left", "1":
+					m.fileConfirmSel = 0
+				case "2":
+					m.fileConfirmSel = 1
+				case "right", "3":
+					m.fileConfirmSel = 2
+				}
+				return m, nil
+			}
 
 		case "space":
 			if m.showAsk && m.askCustomQ < 0 {
@@ -1913,22 +1988,28 @@ func (m *Model) View() tea.View {
 			sb.WriteString("\n\n")
 		}
 
-		// Input Box (Borderless & Minimalist, multi-line textarea that grows)
-		promptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-		promptStr := "❯ "
-		switch m.mode {
-		case "PLANNER":
-			promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
-			promptStr = "PLAN ❯ "
-			m.promptInput.Placeholder = "Planner Mode: Ask for architecture plans, code analysis, or roadmaps..."
-		case "MINER":
-			promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
-			promptStr = "MINE ❯ "
-			m.promptInput.Placeholder = "Miner Mode: Explore the codebase and persist verified knowledge to project memory..."
-		default:
-			m.promptInput.Placeholder = "Type a prompt or command (/help, /sessions, /new)..."
+		// Input area: while a critical file action (create/delete) awaits
+		// approval, the chat input is temporarily replaced by the confirm bar.
+		if m.showFileConfirm {
+			sb.WriteString(m.renderFileConfirmBar() + "\n\n")
+		} else {
+			// Input Box (Borderless & Minimalist, multi-line textarea that grows)
+			promptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+			promptStr := "❯ "
+			switch m.mode {
+			case "PLANNER":
+				promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
+				promptStr = "PLAN ❯ "
+				m.promptInput.Placeholder = "Planner Mode: Ask for architecture plans, code analysis, or roadmaps..."
+			case "MINER":
+				promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
+				promptStr = "MINE ❯ "
+				m.promptInput.Placeholder = "Miner Mode: Explore the codebase and persist verified knowledge to project memory..."
+			default:
+				m.promptInput.Placeholder = "Type a prompt or command (/help, /sessions, /new)..."
+			}
+			sb.WriteString(promptStyle.Render(promptStr) + m.promptInput.View() + "\n\n")
 		}
-		sb.WriteString(promptStyle.Render(promptStr) + m.promptInput.View() + "\n\n")
 
 		// STICKY BOTTOM FOOTER BANNER (Never disappears when history grows long)
 		bannerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Padding(0, 1)
@@ -1992,7 +2073,7 @@ func (m *Model) buildLog(contentWidth int) string {
 			m.lastUserLine = line
 			m.foundUserLine = true
 		}
-		rendered := formatMessage(msg, contentWidth)
+		rendered := formatMessage(msg, contentWidth, m.filesExpanded)
 		sb.WriteString(rendered + "\n\n")
 		line += strings.Count(rendered, "\n") + 3 // rendered lines + blank separator
 	}
@@ -2348,7 +2429,7 @@ func sanitizeLLMOutput(content string) string {
 	return strings.TrimSpace(res)
 }
 
-func formatMessage(msg string, width int) string {
+func formatMessage(msg string, width int, filesExpanded bool) string {
 	userLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 	userBarStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("86")).Padding(1, 2)
 
@@ -2374,6 +2455,25 @@ func formatMessage(msg string, width int) string {
 	if strings.HasPrefix(msg, "YOU:\n") || strings.HasPrefix(msg, "👤 ") {
 		content := strings.TrimPrefix(strings.TrimPrefix(msg, "YOU:\n"), "👤 ")
 		return userBarStyle.Render(userLabelStyle.Render("YOU") + "\n" + content)
+	}
+
+	// File-change summary (see tool.FileChangesMessage): compact per-file rows
+	// by default, full +/- diff when the user pressed ctrl+f.
+	if strings.HasPrefix(msg, "FILES:\n") && strings.Contains(msg, tool.FileChangesSep) {
+		compact, diff, _ := strings.Cut(msg, tool.FileChangesSep)
+		compact = strings.TrimPrefix(compact, "FILES:\n")
+		fileBarStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
+		if width > 0 {
+			fileBarStyle = fileBarStyle.Width(width)
+		}
+		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
+		var body string
+		if filesExpanded {
+			body = compact + "\n\n" + formatDiffLines(diff)
+		} else {
+			body = compact
+		}
+		return fileBarStyle.Render(labelStyle.Render("FILES") + "\n" + body)
 	}
 
 	if strings.HasPrefix(msg, "PROCESS:\n") {
