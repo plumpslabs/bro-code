@@ -105,7 +105,8 @@ type Engine struct {
 	// called tools and never produced an answer. Once it exceeds
 	// maxToolOnlyRounds the loop stops so a tool-happy model cannot burn all
 	// 25 iterations without ever answering.
-	toolOnlyRounds int // exploredStalls counts consecutive tool-only rounds that examined NO new
+	toolOnlyRounds int
+	// exploredStalls counts consecutive tool-only rounds that examined NO new
 	// file (spinning) vs rounds that discovered fresh files (progress). The
 	// abort only fires on a stall — a model still discovering new files gets
 	// room to finish its thinking. lastExploredTarget remembers the newest
@@ -113,6 +114,10 @@ type Engine struct {
 	// length cannot signal progress — the newest entry can).
 	exploredStalls     int
 	lastExploredTarget string
+	// lastReasoning remembers the model's most recent reasoning text, so a
+	// tool-budget abort can explain WHAT the agent was stuck on rather than
+	// leaving the user with only a list of files.
+	lastReasoning string
 	// toolReminderSent guards the single "answer now" reminder injected when
 	// the tool-only budget is exhausted.
 	toolReminderSent bool
@@ -324,6 +329,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	// real path, so the first iteration always registers as "new".
 	e.exploredStalls = 0
 	e.lastExploredTarget = "\x00"
+	e.lastReasoning = ""
 	defer func() { e.progressHandler = nil }()
 	// Lifecycle hook on every exit path: fire on-turn-end when the turn
 	// produced an answer (or a hard abort message), on-turn-error otherwise.
@@ -416,7 +422,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		}
 		if e.toolOnlyRounds >= maxToolOnlyRounds && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute) {
 			e.state = StateBlocked
-			msg := "Turn aborted: the model kept calling tools without producing an answer after two warnings. " + e.exploredSummary()
+			// Hand the user something actionable, not just a file dump: what
+			// the agent was last trying to figure out, plus what it examined.
+			// The user can then rephrase, guide, or let it continue.
+			msg := "Turn aborted: the model kept calling tools without producing an answer after two warnings. "
+			if e.lastReasoning != "" {
+				msg += "\n\nWhat the agent was last working on: " + e.lastReasoning
+			}
+			msg += e.exploredSummary()
 			if onUpdate != nil {
 				onUpdate(e.state, msg)
 			}
@@ -549,6 +562,13 @@ Engine Mode Rules (%s):
 				e.state = StateFailed
 				return "", fmt.Errorf("LLM completion failed: %w", err)
 			}
+		}
+
+		// Remember the model's last reasoning so a tool-budget abort can tell
+		// the user WHAT the agent was stuck on ("search for more models…")
+		// instead of just dumping a file list.
+		if resp.Reasoning != "" {
+			e.lastReasoning = resp.Reasoning
 		}
 
 		// Thinking enforcement (§2.2)

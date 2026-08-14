@@ -392,6 +392,11 @@ func TestEngineToolBudget(t *testing.T) {
 	if !strings.Contains(res, "Turn aborted") {
 		t.Errorf("expected tool-budget abort message, got %q", res)
 	}
+	// The abort must say WHAT the agent was stuck on (its last reasoning),
+	// so the user can rephrase instead of staring at a file dump.
+	if !strings.Contains(res, "What the agent was last working on: exploring") {
+		t.Errorf("expected abort to include the agent's last reasoning, got %q", res)
+	}
 	if engine.State() != StateBlocked {
 		t.Errorf("expected StateBlocked, got %v", engine.State())
 	}
