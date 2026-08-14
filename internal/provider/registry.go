@@ -81,6 +81,12 @@ var builtinContextLimits = map[string]map[string]int{
 		"gemini-2.5-flash": 1_048_576,
 		"gemini-2.5-pro":   1_048_576,
 		"gemini-2.0-flash": 1_048_576,
+	}, "freebuff": {
+		// MiniMax M-series documented at 200K context; Gemini 2.5 Flash Lite
+		// shares the Gemini family's 1M window. mimo-v2.5 limits are
+		// unconfirmed — fall back to the 128k default.
+		"minimax/minimax-m3-20260211":  200_000,
+		"google/gemini-2.5-flash-lite": 1_048_576,
 	},
 }
 
@@ -213,6 +219,15 @@ var BuiltinProviders = []ProviderInfo{
 		// Ollama context depends on the local model file — no fixed limit;
 		// falls back to the 128k default unless configured by the user.
 	},
+	{
+		ID:             "freebuff",
+		Name:           "FreeBuff (Free)",
+		Protocol:       "openai-compatible",
+		APIKeyEnvVar:   "", // No env var: token auto-loaded from the FreeBuff CLI credentials file
+		DefaultBaseURL: FreeBuffDefaultBaseURL,
+		DefaultModels:  FreeBuffModels,
+		ContextLimits:  builtinContextLimits["freebuff"],
+	},
 }
 
 // DetectedProvider contains provider metadata and resolved API key.
@@ -291,6 +306,20 @@ func AutoDetect(cfg AppConfig) []DetectedProvider {
 		if p.ID == "ollama" {
 			// Healthcheck Ollama endpoint before auto-detecting it
 			if isEndpointAlive("http://localhost:11434/v1/models") {
+				detected = append(detected, DetectedProvider{
+					Info:   p,
+					APIKey: "",
+				})
+				seen[p.ID] = true
+			}
+		} else if p.ID == "freebuff" {
+			// FreeBuff serves through the local Freebuff2API proxy (its backend
+			// is not directly OpenAI-compatible, see freebuff.go). Detect only
+			// when BOTH the proxy is alive AND the FreeBuff CLI is logged in on
+			// this machine — so the provider never appears when port 8080 hosts
+			// some unrelated service or the user has no FreeBuff account. The
+			// token is only a presence signal; requests go to the proxy.
+			if LoadFreeBuffToken() != "" && isEndpointAlive(FreeBuffDefaultBaseURL+"/models") {
 				detected = append(detected, DetectedProvider{
 					Info:   p,
 					APIKey: "",
