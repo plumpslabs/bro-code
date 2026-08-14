@@ -857,3 +857,38 @@ func TestInteractiveTurnBudgetExtensionGate(t *testing.T) {
 		t.Errorf("expected maxIterations to be extended to at least 17, got %d", engine.maxIterations)
 	}
 }
+
+func TestRejectExtensionIsScopedPerTurn(t *testing.T) {
+	tools := tool.NewRegistry()
+	tools.Register(&tool.ReadFileTool{})
+	ctxMgr := bcontext.NewManager("test_reject_scope", nil, 128000)
+
+	adapter := &spinningToolAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	askCount := 0
+	engine.SetAskHandler(func(question string, options []string) (string, error) {
+		askCount++
+		return "Reject & Synthesize Now", nil
+	})
+
+	// Turn 1: hits limit, user rejects extension. Turn 1 synthesizes and completes.
+	engine.SetMaxIterations(2)
+	_, err := engine.RunTurn(context.Background(), "turn 1", nil)
+	if err != nil {
+		t.Fatalf("turn 1 failed: %v", err)
+	}
+	if askCount != 1 {
+		t.Fatalf("expected askCount = 1 after turn 1 reject, got %d", askCount)
+	}
+
+	// Turn 2: hits limit again. Ask handler MUST be called again!
+	engine.SetMaxIterations(2)
+	_, err = engine.RunTurn(context.Background(), "turn 2", nil)
+	if err != nil {
+		t.Fatalf("turn 2 failed: %v", err)
+	}
+	if askCount != 2 {
+		t.Fatalf("expected askCount = 2 after turn 2 (Reject must NOT permanently lock the session), got %d", askCount)
+	}
+}

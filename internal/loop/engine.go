@@ -79,8 +79,9 @@ type Engine struct {
 	context         *bcontext.Manager
 	model           string
 	mode            string // "BUILDER" or "PLANNER"
-	maxIterations   int
-	state           LoopState
+	maxIterations     int
+	baseMaxIterations int
+	state             LoopState
 	fallbacks       []Fallback
 	streamHandler   func(delta string)
 	progressHandler TurnOutputHandler
@@ -341,6 +342,7 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		model:             model,
 		mode:              "BUILDER",
 		maxIterations:     25,
+		baseMaxIterations: 25,
 		hardCapIterations: 100,
 		state:             StateThinking,
 		usage:             NewUsageTracker(),
@@ -357,6 +359,7 @@ func (e *Engine) SetMode(m string) {
 func (e *Engine) SetMaxIterations(n int) {
 	if n > 0 {
 		e.maxIterations = n
+		e.baseMaxIterations = n
 	}
 }
 
@@ -386,6 +389,13 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.exploredStalls = 0
 	e.lastExploredTarget = "\x00"
 	e.lastReasoning = ""
+	if !e.autoExtendSession {
+		if e.baseMaxIterations > 0 {
+			e.maxIterations = e.baseMaxIterations
+		} else {
+			e.maxIterations = 25
+		}
+	}
 	defer func() { e.progressHandler = nil }()
 	// Lifecycle hook on every exit path: fire on-turn-end when the turn
 	// produced an answer (or a hard abort message), on-turn-error otherwise.
