@@ -241,10 +241,12 @@ func TestViewLogRendersThroughViewport(t *testing.T) {
 }
 
 // TestViewHeightExactlyFillsTerminal pins the layout math that prevents both
-// history cropping and flicker: the log viewport plus the chrome below it
-// (activity slot, input, banner, help) must total EXACTLY the terminal height.
-// A one-line overflow made the renderer crop the first history line, and the
-// raw-log rendering re-flowed the whole screen every frame.
+// history cropping and flicker: when the log OVERFLOWS the terminal, the log
+// viewport plus the chrome below it (activity slot, input, banner, help) must
+// total EXACTLY the terminal height. A one-line overflow made the renderer
+// crop the first history line, and the raw-log rendering re-flowed the whole
+// screen every frame. (Short content takes the natural-growth path instead —
+// pinned by TestShortHistoryGrowsNaturallyNoBlankGap.)
 func TestViewHeightExactlyFillsTerminal(t *testing.T) {
 	for _, h := range []int{20, 30, 40} {
 		m := newTestApp()
@@ -253,13 +255,68 @@ func TestViewHeightExactlyFillsTerminal(t *testing.T) {
 		m.promptInput.SetWidth(m.width - 4)
 		m.logViewport.SetWidth(m.width)
 		m.updateLogHeight()
-		m.appendMessages("YOU:\nhalo bro")
-		m.appendMessages("BROCODE:\nhalo juga")
+		// Long history so the log overflows the fold and the viewport path is
+		// exercised (the exact-fill guarantee only applies there).
+		for i := 1; i <= 40; i++ {
+			m.appendMessages(fmt.Sprintf("YOU:\nprompt %d with some filler text to wrap lines", i))
+			m.appendMessages(fmt.Sprintf("BROCODE:\nanswer %d with filler text", i))
+		}
 
 		v := m.View()
 		n := strings.Count(v.Content, "\n") + 1
 		if n != h {
 			t.Errorf("height %d: View() produced %d lines (must equal terminal height so nothing is cropped)", h, n)
+		}
+	}
+}
+
+// TestShortHistoryGrowsNaturallyNoBlankGap pins the `-c` fix: a short history
+// (e.g. a freshly resumed session) must render NATURALLY — the chat grows from
+// the top with the input/footer right below it — instead of being drawn inside
+// a viewport that pads short content to its full height, which left a huge
+// blank gap ("1 layar kosong") between the chat and the input.
+func TestShortHistoryGrowsNaturallyNoBlankGap(t *testing.T) {
+	for _, h := range []int{20, 30, 40} {
+		m := newTestApp()
+		m.width = 120
+		m.height = h
+		m.promptInput.SetWidth(m.width - 4)
+		m.logViewport.SetWidth(m.width)
+		m.updateLogHeight()
+		// The exact `-c` shape: a resume banner plus a couple of short messages.
+		m.messages = []string{
+			"✅ Resumed session sess_123 (5 events total)",
+			"YOU:\nhalo bro",
+			"BROCODE:\nhalo juga, mau lanjut dari mana?",
+		}
+
+		v := m.View()
+		visible := ansiRegex.ReplaceAllString(v.Content, "")
+
+		// All history must be visible — nothing hidden above the fold.
+		for _, want := range []string{"halo bro", "halo juga", "Resumed session"} {
+			if !strings.Contains(visible, want) {
+				t.Fatalf("height %d: short history must render fully (natural growth), missing %q:\n%s", h, want, visible)
+			}
+		}
+
+		// The chrome must sit right below the chat: the input prompt must appear
+		// within a few lines of the last history line, NOT at the bottom of a
+		// full-height padded viewport (that was the giant blank gap).
+		lastLogIdx := strings.LastIndex(visible, "halo juga")
+		inputIdx := strings.Index(visible, "❯ ")
+		if inputIdx < 0 {
+			t.Fatalf("height %d: input prompt missing from view:\n%s", h, visible)
+		}
+		gap := strings.Count(visible[lastLogIdx:inputIdx], "\n")
+		if gap > 3 {
+			t.Errorf("height %d: %d blank lines between chat and input (should be ≤ 3, no padded blank gap)", h, gap)
+		}
+
+		// Total height must be LESS than the terminal — no padding to fill it.
+		n := strings.Count(visible, "\n") + 1
+		if n >= h {
+			t.Errorf("height %d: short content rendered %d lines — must not pad to terminal height", h, n)
 		}
 	}
 }

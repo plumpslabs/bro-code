@@ -606,11 +606,12 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 		}
 		sysPrompt += fmt.Sprintf(`
-Active engine mode: %s (%s).
-If the user asks about your mode (in any language), answer directly with the mode name and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.
+🔥 ACTIVE ENGINE MODE: %s (%s).
+CRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as PLANNER or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY. You are NOW operating strictly in %s mode.
+If the user asks about your mode (in any language), answer directly with the mode name (%s) and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.
 
 Engine Mode Rules (%s):
-`, currentMode, modeDesc, currentMode)
+`, currentMode, modeDesc, currentMode, currentMode, currentMode, currentMode)
 
 		if currentMode == "PLANNER" {
 			sysPrompt += `1. Focus on inspecting codebase, analyzing files, and proposing high-level step-by-step implementation plans.

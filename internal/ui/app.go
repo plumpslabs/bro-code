@@ -2096,6 +2096,12 @@ func (m *Model) View() tea.View {
 		// chrome can never drift.
 		chrome, chromeLines := m.buildLogChrome()
 
+		// buildLog always ends with "\n\n" (per-message separator), so the log
+		// occupies count+1 rows. This decides between the two rendering paths:
+		// natural growth when the content fits, a scrollable window when it
+		// overflows the terminal.
+		logLines := strings.Count(log, "\n") + 1
+
 		if m.width > 0 {
 			// The viewport must be sized before it can be rendered (it returns
 			// "" when width/height are 0). Ensure it tracks the terminal even
@@ -2133,14 +2139,26 @@ func (m *Model) View() tea.View {
 				m.renderedKey = key
 				m.renderedH = h
 			}
-			// Render the log THROUGH the viewport window, not as a raw unbounded
-			// string. The viewport clips the log to the available height and
-			// honours the scroll position, so: newest content always lands at the
-			// bottom (GotoBottom above), older history is reachable by scrolling
-			// up instead of being silently dropped by the renderer, and the total
-			// view height always equals the terminal (no flicker, input/footer
-			// stay pinned).
-			sb.WriteString(m.logViewport.View())
+			// Hybrid log rendering:
+			//  - Content FITS in the available space → render it naturally (raw
+			//    string, trailing newlines trimmed) so the chat GROWS like a
+			//    normal terminal and a short session never shows a giant blank
+			//    gap. The viewport pads short content to its full height, which
+			//    after `-c` with a short restored history looked like one empty
+			//    screen between the chat and the input.
+			//  - Content OVERFLOWS → render through the viewport window: it
+			//    clips the log to the available height, honours the scroll
+			//    position, lands newest content at the bottom (GotoBottom above)
+			//    and keeps older history reachable by scrolling up instead of
+			//    being silently dropped by the renderer.
+			// In both paths the chrome is appended below, so the input/footer
+			// stay pinned to the bottom of the terminal and the total height
+			// never exceeds it (no flicker, nothing cropped).
+			if logLines <= h {
+				sb.WriteString(strings.TrimRight(log, "\n"))
+			} else {
+				sb.WriteString(m.logViewport.View())
+			}
 		} else {
 			sb.WriteString(log)
 		}
