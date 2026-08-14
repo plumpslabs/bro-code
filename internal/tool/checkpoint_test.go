@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,6 +71,79 @@ func TestCheckpointCreateListRestore(t *testing.T) {
 	// Invalid name rejected.
 	if _, err := tool.Execute(ctx, `{"action":"create","name":"bad/name"}`); err == nil {
 		t.Error("invalid checkpoint name should error")
+	}
+}
+
+// TestCheckpointGitNative verifies that in a git repo the snapshot is
+// git-native: the manifest records a commit SHA, git history/branches are
+// untouched, and restore brings tracked files back exactly.
+func TestCheckpointGitNative(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q")
+	git("config", "user.email", "test@example.com")
+	git("config", "user.name", "test")
+
+	// Baseline commit, then an uncommitted tracked change + an untracked file.
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte("const a = 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "app.js")
+	git("commit", "-q", "-m", "base")
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte("const a = 2;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "newfile.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &CheckpointTool{}
+	out, err := tool.Execute(context.Background(), `{"action":"create","name":"snap"}`)
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if !strings.Contains(out, "git-native") || !strings.Contains(out, "sha") {
+		t.Errorf("expected git-native create output, got %q", out)
+	}
+
+	// The user's branches/stash must be untouched.
+	if branches := git("branch"); branches != "* master" && branches != "* main" {
+		t.Errorf("git-native checkpoint polluted branches: %q", branches)
+	}
+	if stash := git("stash", "list"); stash != "" {
+		t.Errorf("git-native checkpoint polluted stash: %q", stash)
+	}
+
+	// Corrupt the file, restore, verify exact tracked + untracked recovery.
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte("BROKEN\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "newfile.txt")); err != nil {
+		t.Fatal(err)
+	}
+	out, err = tool.Execute(context.Background(), `{"action":"restore","name":"snap"}`)
+	if err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "app.js"))
+	if string(data) != "const a = 2;\n" {
+		t.Errorf("git restore did not bring back tracked content: %q", string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "newfile.txt")); err != nil || string(data) != "untracked\n" {
+		t.Errorf("untracked file not restored: %q err=%v", string(data), err)
+	}
+	if !strings.Contains(out, "Restored") {
+		t.Errorf("unexpected restore output: %q", out)
 	}
 }
 

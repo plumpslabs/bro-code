@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -120,6 +121,42 @@ func (m *Manager) reapIdleOnce(now time.Time) {
 		}
 	}
 	m.mu.Unlock()
+}
+
+// InstallHints returns, for each supported language whose server binary is
+// missing, the official command to install it (empty map = all installed).
+// The platform-dependent clangd hint is resolved here so callers (UI, tools)
+// never need runtime.GOOS themselves.
+func (m *Manager) InstallHints() map[string]string {
+	hints := map[string]string{
+		"go":         "go install golang.org/x/tools/gopls@latest",
+		"typescript": "npm install -g typescript-language-server typescript",
+		"python":     "npm install -g pyright",
+		"rust":       "rustup component add rust-analyzer",
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		hints["c"] = "brew install llvm && echo 'add $(brew --prefix llvm)/bin to your PATH (clangd is keg-only)'"
+		hints["cpp"] = "brew install llvm && echo 'add $(brew --prefix llvm)/bin to your PATH (clangd is keg-only)'"
+	case "linux":
+		hints["c"] = "sudo apt-get install -y clangd"
+		hints["cpp"] = "sudo apt-get install -y clangd"
+	default:
+		hints["c"] = "see https://clangd.llvm.org/installation"
+		hints["cpp"] = "see https://clangd.llvm.org/installation"
+	}
+
+	out := make(map[string]string)
+	for _, s := range specs {
+		if !binaryExists(s.Command) {
+			if c, ok := hints[s.Language]; ok {
+				if _, dup := out[s.Language]; !dup {
+					out[s.Language] = c
+				}
+			}
+		}
+	}
+	return out
 }
 
 // AvailableServers returns the language names whose server binary is on
@@ -628,14 +665,10 @@ const scanMaxLines = 80
 // diagnostics after opening files. A var so tests can shorten it.
 var scanSettle = 3 * time.Second
 
-// ScanDiagnostics proactively scans a project for compiler/linter diagnostics:
-// errors, warnings and deprecated usages across source files — a full health
-// check without running a build. It opens at most scanMaxFiles supported files
-// (dependency/build dirs skipped), gives the servers one short settle window,
-// then aggregates everything they publish. Files whose language server is not
-// installed are skipped silently. Returns a compact report, or a clean line
-// when no issues were found.
-func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, error) {
+// collectSupportedFiles walks root and returns up to max files whose language
+// has an installed server, skipping dependency/build dirs. Shared by
+// ScanDiagnostics and WarmUp.
+func collectSupportedFiles(root string, max int) []string {
 	var files []string
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -647,7 +680,7 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 			}
 			return nil
 		}
-		if len(files) >= scanMaxFiles {
+		if len(files) >= max {
 			return fs.SkipAll
 		}
 		spec := specForPath(p)
@@ -657,6 +690,41 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 		files = append(files, p)
 		return nil
 	})
+	return files
+}
+
+// WarmUp spawns language servers for supported files under root in the
+// background, so the first lsp_* call of the session is instant instead of
+// paying spawn + initialize + (cache-warm) index on first use — the persistent
+// per-session gap. Servers the user never touches are shut down by the idle
+// reaper after idleTimeout, so unused warm-up costs nothing in the long run.
+// Never blocks; errors are ignored (lazy spawn still happens on first call).
+func (m *Manager) WarmUp(root string) {
+	files := collectSupportedFiles(root, 10)
+	seen := map[string]bool{}
+	for _, f := range files {
+		spec := specForPath(f)
+		if spec == nil || seen[spec.Language] {
+			continue
+		}
+		seen[spec.Language] = true
+		go func(path string) {
+			ctx, cancel := context.WithTimeout(m.ctx, 20*time.Second)
+			defer cancel()
+			_, _ = m.clientFor(ctx, path)
+		}(f)
+	}
+}
+
+// ScanDiagnostics proactively scans a project for compiler/linter diagnostics:
+// errors, warnings and deprecated usages across source files — a full health
+// check without running a build. It opens at most scanMaxFiles supported files
+// (dependency/build dirs skipped), gives the servers one short settle window,
+// then aggregates everything they publish. Files whose language server is not
+// installed are skipped silently. Returns a compact report, or a clean line
+// when no issues were found.
+func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, error) {
+	files := collectSupportedFiles(root, scanMaxFiles)
 	if len(files) == 0 {
 		return "No supported source files found (no language server available for this project).", nil
 	}

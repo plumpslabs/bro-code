@@ -173,9 +173,12 @@ func main() {
 		defer mcpMgr.Close()
 	}
 
-	// 7b. LSP code intelligence (lazy: language server spawned on first use)
+	// 7b. LSP code intelligence (lazy: language server spawned on first use,
+	// warmed in the background at startup so the first lsp_* call is instant;
+	// unused servers are reaped after the idle timeout)
 	lspMgr := lsp.NewManager()
 	lsp.RegisterTools(tools, lspMgr)
+	lspMgr.WarmUp(cwd)
 	defer lspMgr.Close()
 
 	// 7c. Sub-agents: isolated agent loops sharing the active adapter+model.

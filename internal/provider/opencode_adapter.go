@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/plumpslabs/bro-code/internal/tokens"
 )
 
 // ansiEscapeRe matches ANSI escape sequences (colors, cursor moves).
@@ -317,9 +319,9 @@ func buildCLIResponse(userPrompt, content, model string) (*CompletionResponse, e
 		Content:   content,
 		Reasoning: "Executed via local gateway (" + model + ")",
 		Usage: Usage{
-			PromptTokens:     len(userPrompt) / 4,
-			CompletionTokens: len(content) / 4,
-			TotalTokens:      (len(userPrompt) + len(content)) / 4,
+			PromptTokens:     tokens.EstimateTokens(userPrompt),
+			CompletionTokens: tokens.EstimateTokens(content),
+			TotalTokens:      tokens.EstimateTokens(userPrompt) + tokens.EstimateTokens(content),
 		},
 		FinishReason: "stop",
 	}, nil

@@ -109,14 +109,22 @@ func (t *CodeLocateTool) Execute(ctx context.Context, argsJSON string) (string, 
 	return CapOutput(t.Index.FormatLookup(name)), nil
 }
 
-// SearchCodeTool performs a BM25 relevance search over the codebase — ranks
-// files by how relevant they are to a natural-language query, beyond regex
-// string matching.
-type SearchCodeTool struct{}
+// SearchCodeTool performs a relevance search over the codebase — ranks files
+// against a natural-language query. BM25 first; when an embedding endpoint is
+// wired (SetEmbedder), the top candidates are re-ranked by vector cosine
+// similarity for true semantic matching.
+type SearchCodeTool struct {
+	embedder *search.Embedder
+}
+
+// SetEmbedder wires an OpenAI-compatible embeddings endpoint so search_code
+// re-ranks BM25 hits semantically (with a persistent per-file cache). Nil
+// keeps the tool BM25-only.
+func (t *SearchCodeTool) SetEmbedder(e *search.Embedder) { t.embedder = e }
 
 func (t *SearchCodeTool) Name() string { return "search_code" }
 func (t *SearchCodeTool) Description() string {
-	return "Semantic-ish code search: rank files by relevance to a query (BM25 over file contents). Unlike grep it matches meaning, not exact strings — use for 'where is X handled', 'which file does auth', vague concepts, or when grep returns nothing useful. Returns top file paths with a snippet around the match."
+	return "Semantic code search: rank files by relevance to a query. BM25 over file contents, re-ranked with embeddings when available. Unlike grep it matches meaning, not exact strings — use for 'where is X handled', 'which file does auth', vague concepts, or when grep returns nothing useful. Returns top file paths with a snippet around the match."
 }
 func (t *SearchCodeTool) Parameters() map[string]any {
 	return map[string]any{
@@ -155,7 +163,10 @@ func (t *SearchCodeTool) Execute(ctx context.Context, argsJSON string) (string, 
 		return "", err
 	}
 	idx := search.NewBM25(docs)
-	results := idx.Search(args.Query, args.Limit)
+	results := idx.Search(args.Query, 15)
+	if t.embedder != nil {
+		results = search.ReRank(ctx, args.Path, args.Query, results, t.embedder, args.Limit)
+	}
 	return CapOutput(search.FormatResults(results, args.Query)), nil
 }
 

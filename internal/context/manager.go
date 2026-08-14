@@ -8,6 +8,7 @@ import (
 
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/store"
+	"github.com/plumpslabs/bro-code/internal/tokens"
 )
 
 // CompactionSummary follows Section 3.1 5-heading structured format.
@@ -117,7 +118,7 @@ func (m *Manager) AppendUserMessage(content string) error {
 	}
 	m.messages = append(m.messages, msg)
 
-	tokens := estimateTokens(content)
+	tokens := EstimateTokens(content)
 	m.totalTokens += tokens
 
 	if m.store != nil {
@@ -141,9 +142,9 @@ func (m *Manager) AppendAssistantTurn(reasoning, content string, toolCalls []pro
 	}
 	m.messages = append(m.messages, msg)
 
-	tokens := estimateTokens(reasoning + content)
+	tokens := EstimateTokens(reasoning + content)
 	for _, tc := range toolCalls {
-		tokens += estimateTokens(tc.Name + tc.Arguments)
+		tokens += EstimateTokens(tc.Name + tc.Arguments)
 	}
 	m.totalTokens += tokens
 
@@ -163,7 +164,7 @@ func (m *Manager) ImportUserMessage(content string) {
 	defer m.mu.Unlock()
 
 	m.messages = append(m.messages, provider.Message{Role: "user", Content: content})
-	m.totalTokens += estimateTokens(content)
+	m.totalTokens += EstimateTokens(content)
 }
 
 // ImportAssistantTurn restores an assistant turn into memory (tokens counted)
@@ -173,7 +174,7 @@ func (m *Manager) ImportAssistantTurn(reasoning, content string, toolCalls []pro
 	defer m.mu.Unlock()
 
 	m.messages = append(m.messages, provider.Message{Role: "assistant", Content: content, Reasoning: reasoning, ToolCalls: toolCalls})
-	m.totalTokens += estimateTokens(reasoning + content)
+	m.totalTokens += EstimateTokens(reasoning + content)
 }
 
 // ImportToolResult restores a tool result into memory (tokens counted)
@@ -189,7 +190,7 @@ func (m *Manager) ImportToolResult(toolCallID, content string) {
 		Content:    content,
 		ToolCallID: toolCallID,
 	})
-	m.totalTokens += estimateTokens(content)
+	m.totalTokens += EstimateTokens(content)
 }
 
 // AppendToolResult adds a tool execution result to the context.
@@ -207,7 +208,7 @@ func (m *Manager) AppendToolResult(toolCallID, content string) error {
 	}
 	m.messages = append(m.messages, msg)
 
-	tokens := estimateTokens(content)
+	tokens := EstimateTokens(content)
 	m.totalTokens += tokens
 
 	if m.store != nil {
@@ -257,9 +258,9 @@ func (m *Manager) Compact(summary CompactionSummary) error {
 	m.compactCount++
 
 	// Recalculate tokens
-	newTokens := estimateTokens(summaryText)
+	newTokens := EstimateTokens(summaryText)
 	for _, msg := range tail {
-		newTokens += estimateTokens(msg.Content + msg.Reasoning)
+		newTokens += EstimateTokens(msg.Content + msg.Reasoning)
 	}
 	m.totalTokens = newTokens
 
@@ -287,48 +288,12 @@ func TruncateToolOutput(content string, maxChars int) string {
 
 // estimateTokens approximates LLM token counts more accurately than a flat
 // len/4. Rough per-token character densities: English prose ≈4 chars/token,
-// code ≈3.5, CJK/Asian text ≈1.2 (each character is often its own token).
-// The estimate is weighted per line so mixed content (code + prose + Asian
-// replies) lands closer to real tokenizer counts, keeping the compaction
-// threshold honest instead of firing too early or overflowing late.
-func estimateTokens(text string) int {
-	if text == "" {
-		return 0
-	}
-
-	lines := strings.Split(text, "\n")
-	total := 0
-	for _, line := range lines {
-		if line == "" {
-			total++
-			continue
-		}
-
-		ascii := 0
-		cjk := 0
-		for _, r := range line {
-			if r > 0x2E7F && r < 0x9FFF { // CJK unified ideographs & compat
-				cjk++
-			} else {
-				ascii++
-			}
-		}
-
-		trimmed := strings.TrimSpace(line)
-		isCode := strings.ContainsAny(trimmed, "{}();=\"'") || strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "func ") || strings.HasPrefix(trimmed, "const ")
-
-		charsPerToken := 4.0 // prose default
-		if isCode {
-			charsPerToken = 3.5 // code packs more tokens per char
-		}
-
-		lineTokens := float64(ascii)/charsPerToken + float64(cjk)*0.8 // CJK ≈ 1.25 chars/token
-		if lineTokens < 1 {
-			lineTokens = 1
-		}
-		total += int(lineTokens)
-	}
-	return total
+// EstimateTokens approximates LLM token counts cheaply and deterministically
+// (weighted per line: prose ≈4 chars/token, code ≈3.5, CJK ≈1.2). Kept here
+// as a thin wrapper over the leaf tokens package so existing callers and the
+// compaction thresholds stay unchanged.
+func EstimateTokens(text string) int {
+	return tokens.EstimateTokens(text)
 }
 
 // ExtractEventContent extracts clean human-readable content from event JSON payload string.

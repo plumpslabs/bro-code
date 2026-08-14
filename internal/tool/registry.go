@@ -20,6 +20,7 @@ import (
 	"github.com/hexops/gotextdiff/span"
 	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/search"
 )
 
 // Shared HTTP clients: reusing one Transport per purpose avoids allocating a
@@ -66,6 +67,17 @@ func NewRegistry() *Registry {
 	r.Register(&SearchCodeTool{})
 	r.Register(&MemoryTool{})
 	return r
+}
+
+// SetSearchEmbedder wires an OpenAI-compatible embeddings endpoint onto the
+// registered search_code tool (BM25 stays the fallback when it is nil).
+func (r *Registry) SetSearchEmbedder(e *search.Embedder) {
+	for _, t := range r.tools {
+		if sct, ok := t.(*SearchCodeTool); ok {
+			sct.SetEmbedder(e)
+			return
+		}
+	}
 }
 
 // SetRepoRoot anchors the out-of-repo escape check for cd/pushd gates.

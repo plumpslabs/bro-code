@@ -510,6 +510,44 @@ func TestIdleReaperShutsDownIdleServer(t *testing.T) {
 	}
 }
 
+// TestInstallHints covers the auto-install surface: hints exist for known
+// languages with a missing server, and the clangd hint is platform-
+// appropriate. Uses an impossible binary so the test is machine-independent.
+func TestInstallHints(t *testing.T) {
+	oldSpecs := specs
+	defer func() { specs = oldSpecs }()
+	specs = []ServerSpec{
+		{Language: "go", Command: "definitely-not-installed-gopls"},
+		{Language: "typescript", Command: "definitely-not-installed-tsserver"},
+		{Language: "c", Command: "definitely-not-installed-clangd"},
+	}
+
+	m := NewManager()
+	defer m.Close()
+
+	hints := m.InstallHints()
+	// go/typescript have known install commands.
+	for _, lang := range []string{"go", "typescript"} {
+		if _, ok := hints[lang]; !ok {
+			t.Errorf("expected install hint for %s (missing server should be listed)", lang)
+		}
+	}
+	// clangd hint must exist and be platform-appropriate.
+	if c, ok := hints["c"]; !ok || c == "" {
+		t.Errorf("expected platform clangd hint, got %q", c)
+	} else if c != "see https://clangd.llvm.org/installation" && !strings.Contains(c, "brew") && !strings.Contains(c, "apt") {
+		t.Errorf("unexpected clangd hint %q", c)
+	}
+	// No unknown language gets a hint.
+	for lang, c := range hints {
+		switch lang {
+		case "go", "typescript", "c":
+		default:
+			t.Errorf("unexpected hint for %s: %q", lang, c)
+		}
+	}
+}
+
 func TestServerCrashRespawnsOnNextCall(t *testing.T) {
 	fakeSpec(t, "go")
 	m := NewManager()

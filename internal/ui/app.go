@@ -496,6 +496,10 @@ func (m *Model) rebuildEngine() {
 	}
 	m.engine.SetMemoryStore(m.memStore)
 	m.tools.SetMemoryStore(m.memStore)
+	// Semantic search: wire an OpenAI-compatible embeddings endpoint when the
+	// active provider has one, so search_code re-ranks BM25 hits by vector
+	// similarity. Falls back to BM25-only on nil / bad keys / errors.
+	m.tools.SetSearchEmbedder(embedderFor(m.activeProvider))
 	// Native type-error review after edits: wired to the LSP manager so
 	// edited files get real diagnostics (not just regex) before done.
 	m.engine.SetDiagnosticsChecker(func(path string) string {
@@ -516,6 +520,17 @@ func (m *Model) rebuildEngine() {
 	// build; engine is rebuilt on model switches but hooks are cheap to reload.
 	m.engine.SetHooks(hooks.Load(cwd))
 	m.engine.SetScoutManager(m.scoutMgr)
+}
+
+// embedderFor returns an embeddings endpoint for the active provider, or nil
+// when it cannot support one (non-OpenAI-compatible protocol or no reachable
+// base URL). The standard text-embedding-3-small model name is tried; the
+// semantic re-rank degrades gracefully to BM25 when the gateway rejects it.
+func embedderFor(p provider.DetectedProvider) *search.Embedder {
+	if p.Info.Protocol != "openai-compatible" || p.Info.DefaultBaseURL == "" {
+		return nil
+	}
+	return search.NewEmbedder(p.Info.DefaultBaseURL, p.APIKey, "text-embedding-3-small")
 }
 
 // renderSkills builds the AVAILABLE SKILLS block for the system prompt from
@@ -963,7 +978,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.appendMessages("📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen")
+		m.appendMessages("📖 Commands:\n/sessions, /history - Switch or manage past sessions\n/new - Create a new clean session\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen")
 
 	case "/memory":
 		if m.memStore != nil {
@@ -996,6 +1011,39 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				return diagnoseResultMsg("❌ Diagnose failed: " + err.Error())
 			}
 			return diagnoseResultMsg(out)
+		}
+
+	case "/lsp-install":
+		if m.lspMgr == nil {
+			m.appendMessages("⚠️ LSP not initialized.")
+			return m, nil
+		}
+		lang := ""
+		if len(parts) > 1 {
+			lang = parts[1]
+		}
+		hints := m.lspMgr.InstallHints()
+		if lang != "" {
+			if _, ok := hints[lang]; !ok {
+				m.appendMessages("⚠️ No install needed for " + lang + " (already installed or unknown).")
+				return m, nil
+			}
+			hints = map[string]string{lang: hints[lang]}
+		}
+		if len(hints) == 0 {
+			m.appendMessages("✅ All language servers are installed.")
+			return m, nil
+		}
+		var sb strings.Builder
+		sb.WriteString("⬇️ Installing language servers...")
+		for l, c := range hints {
+			sb.WriteString(fmt.Sprintf("\n  %-10s %s", l, c))
+		}
+		m.appendMessages(sb.String())
+		m.status = "Installing language servers..."
+		lsp := m.lspMgr
+		return m, func() tea.Msg {
+			return diagnoseResultMsg(runLSPInstalls(lsp, lang))
 		}
 
 	case "/mcp":
@@ -1086,6 +1134,49 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// runLSPInstalls executes the install command(s) for missing language servers
+// (bounded 5 min each, so a slow package manager cannot hang the UI forever)
+// and returns a report for the chat.
+func runLSPInstalls(mgr *lsp.Manager, onlyLang string) string {
+	hints := mgr.InstallHints()
+	if onlyLang != "" {
+		if c, ok := hints[onlyLang]; ok {
+			hints = map[string]string{onlyLang: c}
+		} else {
+			return "⚠️ No install needed for " + onlyLang + "."
+		}
+	}
+	var sb strings.Builder
+	for lang, cmd := range hints {
+		sb.WriteString(fmt.Sprintf("\n⬇️ %s: %s\n", lang, cmd))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		c := exec.CommandContext(ctx, "sh", "-c", cmd)
+		out, err := c.CombinedOutput()
+		cancel()
+		if err != nil {
+			sb.WriteString("❌ " + lang + " install failed: " + err.Error() + "\n" + truncateString(string(out), 500))
+		} else {
+			sb.WriteString("✅ " + lang + " installed\n")
+		}
+	}
+	sb.WriteString("\n🧠 Available now: ")
+	if av := mgr.AvailableServers(); len(av) > 0 {
+		sb.WriteString(strings.Join(av, ", "))
+	} else {
+		sb.WriteString("none")
+	}
+	return sb.String()
+}
+
+// truncateString shortens s to n runes with an ellipsis.
+func truncateString(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 // lspStatus renders the code intelligence status: which language servers are
 // installed and can be used by the lsp_* tools.
 func (m *Model) lspStatus() string {
@@ -1110,7 +1201,13 @@ func (m *Model) lspStatus() string {
 			sb.WriteString(fmt.Sprintf("  ❌ %-12s %s (not installed)\n", lang, bin))
 		}
 	}
-	sb.WriteString("\nInstall e.g. gopls: go install golang.org/x/tools/gopls@latest\nInstall tsserver: npm i -g typescript-language-server typescript\nThe model falls back to grep/glob/read_file when a server is missing.")
+	if hints := m.lspMgr.InstallHints(); len(hints) > 0 {
+		sb.WriteString("\nRun /lsp-install to auto-install the missing servers, or install manually:")
+		for lang, cmd := range hints {
+			sb.WriteString(fmt.Sprintf("\n  %-10s %s", lang, cmd))
+		}
+	}
+	sb.WriteString("\nThe model falls back to grep/glob/read_file when a server is missing.")
 	if m.globalIndex != nil {
 		sb.WriteString(fmt.Sprintf("\n🗺️ code_locate: %d files indexed (persistent per-session symbol + reference graph, no server needed)\n", m.globalIndex.FileCount()))
 	}
