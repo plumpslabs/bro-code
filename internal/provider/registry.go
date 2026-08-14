@@ -60,9 +60,16 @@ var builtinContextLimits = map[string]map[string]int{
 		"deepseek-reasoner": 128_000,
 	},
 	"poolside": {
-		// Live inference.poolside.ai /v1/models reports context_length 262144
-		// for both Laguna models and requires the poolside/ prefix in the wire
-		// model ID (a bare "laguna-s-2.1" returns 404 model-not-found).
+		// VERIFIED HARD CAP (2026-08, live test with a padded request): the
+		// inference.poolside.ai API and the 9router gateway both reject inputs
+		// above 262,112 tokens for laguna-s-2.1 ("Input length ... exceeds the
+		// maximum allowed input length of 262112 tokens") — even though the
+		// model natively supports 1M per docs.poolside.ai. The /v1/models
+		// context_length field (262144) matches the real per-key deployment
+		// cap, so the API value wins over the native 1M claim: using 1M here
+		// would let the context grow past what the API accepts and break
+		// mid-turn. Requires the poolside/ prefix in the wire model ID (a bare
+		// "laguna-s-2.1" returns 404 model-not-found).
 		"poolside/laguna-s-2.1":  262_144,
 		"poolside/laguna-xs-2.1": 262_144,
 	},
