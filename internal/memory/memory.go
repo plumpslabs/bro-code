@@ -272,6 +272,42 @@ func (s *Store) List() string {
 	return strings.TrimSpace(sb.String())
 }
 
+// CaptureMinerFindings persists what a MINER turn actually examined plus the
+// model's own synthesized summary into project memory. It runs automatically
+// at the end of every MINER turn, so a MINER run leaves durable knowledge
+// even when the model never called the memory retain tool (its only other
+// path). Deterministic — no extra LLM call; only facts the turn touched are
+// recorded (examined files + the answer the model produced from them).
+func (s *Store) CaptureMinerFindings(answer string, files []string) error {
+	if s == nil {
+		return nil
+	}
+	changed := false
+	if len(files) > 0 {
+		list := files
+		if len(list) > 12 {
+			list = list[:12] // keep the memory file lean
+		}
+		if ok, err := s.Retain("Session Notes", "MINER explored: "+strings.Join(list, ", ")); err == nil && ok {
+			changed = true
+		}
+	}
+	ans := strings.TrimSpace(answer)
+	// Only persist substantial answers (a greeting or empty reply is noise).
+	if len(ans) >= 40 {
+		if len(ans) > 600 {
+			ans = ans[:600] + "…"
+		}
+		if ok, err := s.Retain("Notes", "MINER findings: "+ans); err == nil && ok {
+			changed = true
+		}
+	}
+	if changed {
+		return s.Save()
+	}
+	return nil
+}
+
 // MergeCompaction persists durable facts from a compaction summary into the
 // Decisions/Gotchas sections automatically (auto-extract on context loss).
 func (s *Store) MergeCompaction(goal string, decisions []string, state string) error {

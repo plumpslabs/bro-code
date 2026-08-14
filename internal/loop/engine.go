@@ -105,7 +105,14 @@ type Engine struct {
 	// called tools and never produced an answer. Once it exceeds
 	// maxToolOnlyRounds the loop stops so a tool-happy model cannot burn all
 	// 25 iterations without ever answering.
-	toolOnlyRounds int
+	toolOnlyRounds int // exploredStalls counts consecutive tool-only rounds that examined NO new
+	// file (spinning) vs rounds that discovered fresh files (progress). The
+	// abort only fires on a stall — a model still discovering new files gets
+	// room to finish its thinking. lastExploredTarget remembers the newest
+	// explored entry (the explored list is capped and trims from the front, so
+	// length cannot signal progress — the newest entry can).
+	exploredStalls     int
+	lastExploredTarget string
 	// toolReminderSent guards the single "answer now" reminder injected when
 	// the tool-only budget is exhausted.
 	toolReminderSent bool
@@ -185,8 +192,12 @@ const (
 	toolWarnRounds = 10
 	// toolFinalWarnRounds — second, firmer warning.
 	toolFinalWarnRounds = 12
-	// maxToolOnlyRounds — hard abort. Still well below the 25-iteration cap.
+	// maxToolOnlyRounds — abort once a spinning model stalls. Still well below
+	// the 25-iteration cap.
 	maxToolOnlyRounds = 14
+	// maxToolOnlyAbsolute — unconditional abort even for a model that keeps
+	// discovering new files (freedom is bounded, never infinite).
+	maxToolOnlyAbsolute = 18
 )
 
 // SetProjectContext injects a compact structural overview of the project into
@@ -309,6 +320,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	// serves the turn; "" when the primary does).
 	e.lastFallback = ""
 	e.lastFallbackReason = ""
+	// Reset progress/stall tracking for this turn. The sentinel can never be a
+	// real path, so the first iteration always registers as "new".
+	e.exploredStalls = 0
+	e.lastExploredTarget = "\x00"
 	defer func() { e.progressHandler = nil }()
 	// Lifecycle hook on every exit path: fire on-turn-end when the turn
 	// produced an answer (or a hard abort message), on-turn-error otherwise.
@@ -359,31 +374,47 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			return "", fmt.Errorf("reached max iterations (%d)", e.maxIterations)
 		}
 
+		// Progress detection: a tool-only round that examined NO new file is a
+		// stall; a model still discovering fresh files is genuinely thinking
+		// and gets room to finish instead of being cut mid-thought. The newest
+		// explored entry is the signal (the list is capped, so its length
+		// plateaus and cannot indicate progress).
+		newest := ""
+		if n := len(e.explored); n > 0 {
+			newest = e.explored[n-1]
+		}
+		if newest == e.lastExploredTarget {
+			e.exploredStalls++
+		} else {
+			e.exploredStalls = 0
+			e.lastExploredTarget = newest
+		}
+
 		// Tool-only budget: if the model keeps calling tools and never writes
 		// an answer, remind it at the threshold with what it has already
 		// explored, remind it again more firmly one round later, and only then
-		// abort. Legitimate deep exploration in big monorepos needs room, but
-		// a tool-happy model must still be cut off with an answer.
+		// abort. Freedom is adaptive: a model still discovering NEW files is
+		// allowed to keep going (up to the absolute cap), while a spinning
+		// model (no new files for several rounds) is cut off. The reminders
+		// never demand a fabricated answer — the model may honestly report
+		// what it knows and what context is still missing.
 		if e.toolOnlyRounds >= toolWarnRounds && !e.toolReminderSent {
 			e.toolReminderSent = true
-			// Specific, actionable: name the round count and the files already
-			// examined so a rabbit-hole model ("search for more models…") stops
-			// instead of re-exploring.
-			_ = e.context.AppendUserMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files — that is usually enough. STOP calling tools NOW and answer the user's question directly using what you have read; do not explore further."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
+			_ = e.context.AppendUserMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files. If you have enough context, answer the user's question NOW using what you have read — do not explore further. If you genuinely do NOT have enough context, stop anyway and say exactly what is missing instead of guessing."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Tool budget nearly exhausted — forcing model to answer")
+				onUpdate(e.state, "⚠️ Tool budget nearly exhausted — answer with what you have")
 			}
 			continue
 		}
 		if e.toolOnlyRounds >= toolFinalWarnRounds && !e.toolReminder2Sent {
 			e.toolReminder2Sent = true
-			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. Do NOT call any more tools. Write your complete answer to the user's question now, based on everything you have read." + e.exploredSummary())
+			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. Do NOT call any more tools. Write your answer now based on what you have read. If you cannot fully answer, give a partial answer with what you know and state clearly what context is still missing — never fabricate." + e.exploredSummary())
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Final warning — answer immediately or the turn will be stopped")
+				onUpdate(e.state, "⚠️ Final warning — answer now or the turn will be stopped")
 			}
 			continue
 		}
-		if e.toolOnlyRounds >= maxToolOnlyRounds {
+		if e.toolOnlyRounds >= maxToolOnlyRounds && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute) {
 			e.state = StateBlocked
 			msg := "Turn aborted: the model kept calling tools without producing an answer after two warnings. " + e.exploredSummary()
 			if onUpdate != nil {
@@ -720,6 +751,20 @@ Engine Mode Rules (%s):
 				}
 			}
 			e.usageFn(paths)
+		}
+
+		// MINER mode: persist what this turn actually examined plus the
+		// model's own synthesized summary into project memory, so a MINER run
+		// leaves durable knowledge even when the model never called the memory
+		// retain tool (its only other path). Deterministic, no extra LLM call.
+		if e.Mode() == "MINER" && e.mem != nil {
+			var explored []string
+			for _, ex := range e.explored {
+				if !strings.Contains(ex, " ") { // skip bash command strings
+					explored = append(explored, ex)
+				}
+			}
+			_ = e.mem.CaptureMinerFindings(resp.Content, explored)
 		}
 		e.explored = nil
 

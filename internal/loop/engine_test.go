@@ -337,7 +337,9 @@ func TestEngineLoopGuard(t *testing.T) {
 }
 
 // toolOnlyAdapter always returns tool calls (never an answer), simulating a
-// model that explores forever without producing a final response.
+// model that explores forever without producing a final response. It re-greps
+// the SAME path every round (no new file ever discovered) — the spinning
+// case the tool budget must cut.
 type toolOnlyAdapter struct {
 	calls int
 }
@@ -347,7 +349,23 @@ func (m *toolOnlyAdapter) Complete(ctx context.Context, req provider.CompletionR
 	return &provider.CompletionResponse{
 		Reasoning: "exploring",
 		ToolCalls: []provider.ToolCall{
-			{ID: "tc", Name: "grep", Arguments: fmt.Sprintf(`{"pattern":"filter%d"}`, m.calls)},
+			{ID: "tc", Name: "grep", Arguments: fmt.Sprintf(`{"path":".","pattern":"filter%d"}`, m.calls)},
+		},
+	}, nil
+}
+
+// progressingToolAdapter also never answers, but discovers a NEW file every
+// round — the legitimate deep-exploration case that deserves room to think.
+type progressingToolAdapter struct {
+	calls int
+}
+
+func (m *progressingToolAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	m.calls++
+	return &provider.CompletionResponse{
+		Reasoning: "exploring",
+		ToolCalls: []provider.ToolCall{
+			{ID: "tc", Name: "read_file", Arguments: fmt.Sprintf(`{"path":"file-%d.go"}`, m.calls)},
 		},
 	}, nil
 }
@@ -366,10 +384,10 @@ func TestEngineToolBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTurn failed: %v", err)
 	}
-	// Budget aborts after maxToolOnlyRounds adapter calls; the reminder rounds
-	// inject messages without calling the adapter.
+	// A SPINNING model (no new files) is cut at maxToolOnlyRounds; the
+	// reminder rounds inject messages without calling the adapter.
 	if adapter.calls != maxToolOnlyRounds {
-		t.Fatalf("tool budget cut off at %d completions, want %d", adapter.calls, maxToolOnlyRounds)
+		t.Fatalf("spinning model cut off at %d completions, want %d", adapter.calls, maxToolOnlyRounds)
 	}
 	if !strings.Contains(res, "Turn aborted") {
 		t.Errorf("expected tool-budget abort message, got %q", res)
@@ -390,6 +408,30 @@ func TestEngineToolBudget(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected early 'already examined' reminder in context before abort")
+	}
+}
+
+// TestEngineToolBudgetProgressing proves the adaptive budget: a model that
+// keeps discovering NEW files (genuine deep exploration) is NOT cut at
+// maxToolOnlyRounds — it gets room until the absolute cap, so an agent that
+// is still gathering context is never forced to answer mid-thought.
+func TestEngineToolBudgetProgressing(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &progressingToolAdapter{}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+
+	res, err := engine.RunTurn(context.Background(), "explore", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	// Progressing model runs past maxToolOnlyRounds up to the absolute cap.
+	if adapter.calls != maxToolOnlyAbsolute {
+		t.Fatalf("progressing model cut off at %d completions, want absolute cap %d", adapter.calls, maxToolOnlyAbsolute)
+	}
+	if !strings.Contains(res, "Turn aborted") {
+		t.Errorf("expected abort message, got %q", res)
 	}
 }
 

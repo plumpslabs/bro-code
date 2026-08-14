@@ -176,6 +176,53 @@ func TestCaptureSessionEmpty(t *testing.T) {
 	}
 }
 
+// TestCaptureMinerFindings proves a MINER turn leaves durable knowledge in
+// project memory even when the model never called the memory retain tool:
+// the files it examined and its synthesized summary are auto-persisted.
+func TestCaptureMinerFindings(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+
+	if err := s.CaptureMinerFindings(
+		"This CRM is an Express/Prisma monorepo with three React frontends and a vanilla widget. Backend port 3000, admin SPA port 4000, customer portal port 4001.",
+		[]string{"crm_sales_backend/app.js", "crm-react-vite-tailwind-modern/src/App.tsx", "crm-widget/src/index.js"},
+	); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+
+	list := s.List()
+	if !strings.Contains(list, "MINER explored: crm_sales_backend/app.js") {
+		t.Errorf("examined files not persisted:\n%s", list)
+	}
+	if !strings.Contains(list, "MINER findings: This CRM is an Express/Prisma monorepo") {
+		t.Errorf("model summary not persisted:\n%s", list)
+	}
+
+	// Warm start surfaces it for a future session.
+	s2 := NewStore(dir)
+	if ws := s2.WarmStart(); !strings.Contains(ws, "MINER findings") {
+		t.Errorf("warm start missing MINER capture:\n%s", ws)
+	}
+}
+
+// TestCaptureMinerFindingsSkipsNoise proves trivial turns (greeting, empty)
+// do not pollute the memory file.
+func TestCaptureMinerFindingsSkipsNoise(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+
+	if err := s.CaptureMinerFindings("Halo!", nil); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	list := s.List()
+	if strings.Contains(list, "MINER findings") {
+		t.Errorf("short/greeting answer must not be persisted:\n%s", list)
+	}
+	if strings.Contains(list, "MINER explored") {
+		t.Errorf("empty file list must not be persisted:\n%s", list)
+	}
+}
+
 func TestNilStore(t *testing.T) {
 	var s *Store
 	if s.WarmStart() != "" {
