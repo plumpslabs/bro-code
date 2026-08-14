@@ -207,6 +207,46 @@ func TestInterruptedTurnIsNotAnError(t *testing.T) {
 	}
 }
 
+// TestInterruptedPartialAnswerKept verifies that when a turn is interrupted
+// (ESC) after the model already streamed some text, that partial text stays in
+// the conversation history — labeled as partial — instead of vanishing. This
+// keeps the chat connected: an entry the user saw appear must not disappear.
+func TestInterruptedPartialAnswerKept(t *testing.T) {
+	m := newTestApp()
+
+	// The answer starts streaming.
+	m.streaming = true
+	m.pendingStream = "Mulai menjawab... dan terpotong di tengah kalimat"
+	m.status = "Thinking..."
+	m.cancelTurn = func() {}
+
+	// User presses ESC.
+	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape}); err != nil {
+		t.Fatalf("esc key update failed: %v", err)
+	}
+
+	// The in-flight turn returns "context canceled".
+	if _, err := m.Update(turnResultMsg{err: fmt.Errorf("http request failed: context canceled")}); err != nil {
+		t.Fatalf("turn result update failed: %v", err)
+	}
+
+	found := false
+	for _, msg := range m.messages {
+		if strings.Contains(msg, "Mulai menjawab... dan terpotong") {
+			found = true
+			if !strings.Contains(msg, "interrupted") {
+				t.Fatalf("partial answer kept but not labeled as partial: %q", msg)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("interrupted partial answer was dropped from history")
+	}
+	if m.pendingStream != "" {
+		t.Fatal("pendingStream not cleared after turn result")
+	}
+}
+
 // TestTurnQueueOneAtATime verifies a prompt sent while a turn is in flight is
 // queued (never run concurrently — that clobbers engine state and caused the
 // nil-handler panic) and auto-sends when the current turn finishes.

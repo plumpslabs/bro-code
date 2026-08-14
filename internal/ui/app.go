@@ -771,6 +771,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case turnResultMsg:
+		// Snapshot the partial stream BEFORE clearing it: an interrupted turn
+		// must leave a trace in history instead of vanishing (the user saw the
+		// text appear, so it must not silently disappear — that was a big
+		// source of "history tidak stabil" reports).
+		partial := m.pendingStream
 		m.streaming = false
 		m.pendingStream = ""
 		m.activity = nil
@@ -780,8 +785,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A user-initiated interrupt (ESC) aborts the context, which the
 			// adapter reports as "context canceled". That is not an error —
 			// the interruption notice was already shown when ESC was pressed.
+			// Keep whatever the model had already streamed so the conversation
+			// stays connected (labeled as partial, never confused with a
+			// complete answer).
 			if m.interrupted {
 				m.interrupted = false
+				if partial != "" {
+					m.appendMessages("BROCODE:\n💭 (interrupted — partial response)\n\n" + partial)
+				}
 			} else {
 				m.appendMessages("ERROR: " + msg.err.Error())
 				m.status = "Failed"
