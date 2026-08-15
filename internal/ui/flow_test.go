@@ -77,17 +77,18 @@ func TestTurnFlowKeepsHistoryAndSettlesStatus(t *testing.T) {
 		t.Fatal("progress steps leaked into conversation history")
 	}
 
-	// Render through the REAL View() path — this is what the user sees. After
-	// the turn completes the view must land at the END of the answer so long
-	// answers never look cut off below the fold (the prompt stays in the log,
-	// reachable by scrolling up — it is never deleted).
+	// Render through the REAL View() path — this is what the user sees. A long
+	// answer taller than the viewport now parks at the START of the answer
+	// (not the bottom), so the reader begins at its beginning and pages down —
+	// the answer no longer looks "cut off" with its start hidden above the
+	// fold. The prompt stays in the log, reachable by scrolling up.
 	v := m.View()
 	// Glamour interleaves ANSI codes mid-word, so strip them before asserting
 	// on the rendered text (same as the badge/FILES summary tests).
 	visible := ansiRegex.ReplaceAllString(v.Content, "")
-	lastAnswerLine := "line of the long answer with some detail and context"
-	if !contains(visible, lastAnswerLine) {
-		t.Fatalf("end of answer not visible in real View() output")
+	answerStart := "💭 analysis"
+	if !contains(visible, answerStart) {
+		t.Fatalf("start of long answer not visible after park-at-top: viewport YOffset=%d", m.logViewport.YOffset())
 	}
 	if contains(visible, "⚡ Completed") {
 		t.Fatalf("trailing 'Completed' progress leaked into visible history")
@@ -590,6 +591,329 @@ func TestSessionsDeleteWithConfirm(t *testing.T) {
 	list, _ := st.ListSessions()
 	if len(list) != 1 || list[0].ID != "test-sess" {
 		t.Fatalf("expected only recreated active session, got %+v", list)
+	}
+}
+
+// TestMouseModeDefaultsToScroll verifies the wheel-scroll mouse mode is the
+// default (so the mouse wheel works out of the box and long answers never feel
+// "stuck").
+func TestMouseModeDefaultsToScroll(t *testing.T) {
+	m := newTestApp()
+	if m.mouseMode != "SCROLL" {
+		t.Fatalf("expected SCROLL mouse mode by default, got %q", m.mouseMode)
+	}
+}
+
+// TestViewportParksAtTopOfLongAnswer verifies a long assistant answer parks
+// the viewport at the START of the answer (not the bottom), so its beginning
+// is readable immediately and pages down — the complaint that long answers
+// looked "cut off" until Ctrl+P.
+func TestViewportParksAtTopOfLongAnswer(t *testing.T) {
+	m := newTestApp()
+	m.width = 100
+	m.height = 30
+	m.messages = append(m.messages, "YOU:\nok")
+	m.messages = append(m.messages, "BROCODE:\n💭 analysis\n\n# Analisis Filter\n\n"+longAnswer(80))
+	if _, err := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30}); err != nil {
+		t.Fatalf("window size update failed: %v", err)
+	}
+
+	v := m.View()
+	visible := ansiRegex.ReplaceAllString(v.Content, "")
+	if !contains(visible, "💭 analysis") {
+		t.Fatalf("start of long answer not parked at top; viewport YOffset=%d", m.logViewport.YOffset())
+	}
+	if contains(visible, "last line of the long answer") {
+		t.Fatal("long answer parked at the bottom instead of the top (end visible, start hidden)")
+	}
+	if m.logViewport.AtBottom() {
+		t.Fatal("viewport must not be at the bottom when parking a long answer at its start")
+	}
+}
+
+// TestViewportParksAtBottomForShortAnswer verifies short answers still land at
+// the bottom (the whole answer visible, nothing to scroll).
+func TestViewportParksAtBottomForShortAnswer(t *testing.T) {
+	m := newTestApp()
+	m.width = 100
+	m.height = 30
+	m.messages = append(m.messages, "YOU:\nok")
+	m.messages = append(m.messages, "BROCODE:\njawaban singkat")
+	if _, err := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30}); err != nil {
+		t.Fatalf("window size update failed: %v", err)
+	}
+
+	v := m.View()
+	visible := ansiRegex.ReplaceAllString(v.Content, "")
+	if !contains(visible, "jawaban singkat") {
+		t.Fatalf("short answer not visible; viewport YOffset=%d", m.logViewport.YOffset())
+	}
+	if !m.logViewport.AtBottom() {
+		t.Fatal("short answer must land at the bottom of the viewport")
+	}
+}
+
+// TestViewportParksAtTopAnswerBehindFilesSummary verifies that when a turn
+// ends with a FILES change summary, the viewport still parks at the START of
+// the answer behind it (not the summary, not the bottom).
+func TestViewportParksAtTopAnswerBehindFilesSummary(t *testing.T) {
+	m := newTestApp()
+	m.width = 100
+	m.height = 30
+	m.messages = append(m.messages, "YOU:\nok")
+	m.messages = append(m.messages, "BROCODE:\n💭 analysis\n\n"+longAnswer(80))
+	m.messages = append(m.messages, "FILES:\n  modified: src/a.ts"+tool.FileChangesSep+"+1 -1")
+	if _, err := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30}); err != nil {
+		t.Fatalf("window size update failed: %v", err)
+	}
+
+	v := m.View()
+	visible := ansiRegex.ReplaceAllString(v.Content, "")
+	if !contains(visible, "💭 analysis") {
+		t.Fatalf("answer start not parked at top behind FILES summary; YOffset=%d", m.logViewport.YOffset())
+	}
+	if m.logViewport.AtBottom() {
+		t.Fatal("viewport must not be at the bottom when parking at the answer behind a FILES summary")
+	}
+}
+
+// TestPagerModeCtrlPEnterExit verifies ctrl+p opens the in-TUI pager over the
+// last assistant answer and q/Esc/Ctrl+P exit it, restoring the normal chat.
+func TestPagerModeCtrlPEnterExit(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 36
+	m.messages = append(m.messages, "BROCODE:\n"+longAnswer(5))
+	if _, err := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36}); err != nil {
+		t.Fatalf("window size update failed: %v", err)
+	}
+
+	// ctrl+p enters the pager.
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl}); err != nil {
+		t.Fatalf("ctrl+p update failed: %v", err)
+	}
+	if !m.pagerActive {
+		t.Fatal("expected pager active after ctrl+p")
+	}
+	if !contains(m.pagerContent, "JAWABAN TERAKHIR") {
+		t.Fatal("pager header missing from pager content")
+	}
+
+	// The pager renders the answer through the real View() path.
+	v := m.View()
+	visible := ansiRegex.ReplaceAllString(v.Content, "")
+	if !contains(visible, "line of the long answer") {
+		t.Fatal("answer not rendered inside the pager")
+	}
+
+	// q exits back to the normal chat view.
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"}); err != nil {
+		t.Fatalf("q update failed: %v", err)
+	}
+	if m.pagerActive {
+		t.Fatal("expected pager closed after q")
+	}
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl}); err != nil {
+		t.Fatalf("re-enter ctrl+p failed: %v", err)
+	}
+	if !m.pagerActive {
+		t.Fatal("expected pager re-entered after second ctrl+p")
+	}
+	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc}); err != nil {
+		t.Fatalf("esc update failed: %v", err)
+	}
+	if m.pagerActive {
+		t.Fatal("expected pager closed after esc")
+	}
+}
+
+// TestPagerScrollKeysDoNotCrash sanity-checks pager navigation keys page the
+// viewport instead of leaking into input history handling.
+func TestPagerScrollKeysDoNotCrash(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 36
+	m.messages = append(m.messages, "BROCODE:\n"+longAnswer(200))
+	if _, err := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36}); err != nil {
+		t.Fatalf("window size update failed: %v", err)
+	}
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl}); err != nil {
+		t.Fatalf("ctrl+p failed: %v", err)
+	}
+	for _, k := range []tea.KeyPressMsg{
+		{Code: tea.KeyPgDown}, {Code: tea.KeyPgUp},
+		{Code: tea.KeyHome}, {Code: tea.KeyEnd},
+		{Code: 'u', Mod: tea.ModCtrl}, {Code: 'd', Mod: tea.ModCtrl},
+	} {
+		if _, err := m.Update(k); err != nil {
+			t.Fatalf("pager key %v failed: %v", k, err)
+		}
+	}
+	if !m.pagerActive {
+		t.Fatal("pager unexpectedly closed during navigation")
+	}
+}
+
+// TestQueueDoesNotPolluteHistory verifies a prompt sent while a turn runs is
+// queued WITHOUT appending a notification row to the conversation history —
+// the queue lives in the activity slot above the input instead.
+func TestQueueDoesNotPolluteHistory(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 36
+	before := len(m.messages)
+	m.turnRunning = true
+	m.promptInput.SetValue("prompt kedua saat turn jalan")
+	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); err != nil {
+		t.Fatalf("enter failed: %v", err)
+	}
+	if len(m.pendingQueue) != 1 {
+		t.Fatalf("expected 1 queued prompt, got %d", len(m.pendingQueue))
+	}
+	if m.pendingQueue[0] != "prompt kedua saat turn jalan" {
+		t.Fatalf("queued prompt mismatch: %q", m.pendingQueue[0])
+	}
+	if len(m.messages) != before {
+		t.Fatalf("queue must not add history rows: before=%d after=%d", before, len(m.messages))
+	}
+	for _, msg := range m.messages {
+		if contains(msg, "queued") || contains(msg, "Previous turn") {
+			t.Fatalf("queue notification leaked into history: %q", msg)
+		}
+	}
+}
+
+// TestQueueBlockRendersAboveInput verifies queued prompts render live in the
+// chrome above the input (not in the chat log) with a count and one row each.
+func TestQueueBlockRendersAboveInput(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 36
+	m.turnRunning = true
+	m.pendingQueue = []string{"prompt satu", "prompt dua panjang dengan banyak kata sehingga harus dirapikan ke satu baris preview"}
+	m.status = "Queued..."
+	if _, err := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36}); err != nil {
+		t.Fatalf("window size update failed: %v", err)
+	}
+	v := m.View()
+	visible := ansiRegex.ReplaceAllString(v.Content, "")
+	if !contains(visible, "ANTRIAN (2)") {
+		t.Fatal("queue block header missing from View()")
+	}
+	if !contains(visible, "prompt satu") {
+		t.Fatal("first queued row missing from View()")
+	}
+	// Long prompt flattened to one line (no newline in the row).
+	if contains(visible, "banyak kata sehingga harus\n") {
+		t.Fatal("queued prompt preview must be a single line")
+	}
+}
+
+// TestQueueManageAltK verifies Alt+K enters queue management and e/d edit or
+// delete the selected queued prompt, Esc/Alt+K exit.
+func TestQueueManageAltK(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 36
+	m.turnRunning = true
+	m.pendingQueue = []string{"satu", "dua", "tiga"}
+
+	altK := func() {
+		if _, err := m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModAlt}); err != nil {
+			t.Fatalf("alt+k failed: %v", err)
+		}
+	}
+	altK()
+	if !m.queueMode {
+		t.Fatal("alt+k did not enter queue mode")
+	}
+	if m.queueSel != 0 {
+		t.Fatalf("expected selection at 0, got %d", m.queueSel)
+	}
+
+	// ↓ moves the selection.
+	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyDown}); err != nil {
+		t.Fatalf("down failed: %v", err)
+	}
+	if m.queueSel != 1 {
+		t.Fatalf("expected selection at 1 after down, got %d", m.queueSel)
+	}
+
+	// d deletes the selected prompt ("dua").
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"}); err != nil {
+		t.Fatalf("d failed: %v", err)
+	}
+	if len(m.pendingQueue) != 2 || m.pendingQueue[0] != "satu" || m.pendingQueue[1] != "tiga" {
+		t.Fatalf("d must delete the selected item, got %v", m.pendingQueue)
+	}
+	if !m.queueMode {
+		t.Fatal("queue mode must stay active while items remain")
+	}
+
+	// e loads the selected prompt into the input and removes it from the queue.
+	m.queueSel = 0
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"}); err != nil {
+		t.Fatalf("e failed: %v", err)
+	}
+	if len(m.pendingQueue) != 1 || m.pendingQueue[0] != "tiga" {
+		t.Fatalf("e must remove the edited item, got %v", m.pendingQueue)
+	}
+	if m.promptInput.Value() != "satu" {
+		t.Fatalf("e must load the prompt into the input, got %q", m.promptInput.Value())
+	}
+	if m.queueMode {
+		t.Fatal("e must exit queue mode so the prompt can be edited")
+	}
+
+	// Alt+K again, then Esc exits.
+	altK()
+	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc}); err != nil {
+		t.Fatalf("esc failed: %v", err)
+	}
+	if m.queueMode {
+		t.Fatal("esc did not exit queue mode")
+	}
+
+	// Deleting the last item auto-exits queue mode.
+	altK()
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"}); err != nil {
+		t.Fatalf("d failed: %v", err)
+	}
+	if len(m.pendingQueue) != 0 {
+		t.Fatalf("expected empty queue, got %v", m.pendingQueue)
+	}
+	if m.queueMode {
+		t.Fatal("queue mode must auto-exit when the queue empties")
+	}
+}
+
+// TestQueueDrainStartsNextTurn verifies a completed turn drains the queue into
+// the next startTurn and clamps the queue selection.
+func TestQueueDrainStartsNextTurn(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 36
+	m.pendingQueue = []string{"q1", "q2"}
+	m.queueSel = 1
+	before := len(m.messages)
+
+	// The returned Cmd is the next turn's runner (not an error) — startTurn
+	// fires the drained prompt, so Update returns a real tea.Cmd here.
+	m.Update(turnResultMsg{content: "jawaban"})
+	if len(m.pendingQueue) != 1 || m.pendingQueue[0] != "q2" {
+		t.Fatalf("queue must drain the first item, got %v", m.pendingQueue)
+	}
+	if m.queueSel != 0 {
+		t.Fatalf("queue selection must clamp after drain, got %d", m.queueSel)
+	}
+	if len(m.messages) != before+2 { // 1 BROCODE answer + 1 YOU (drained prompt)
+		t.Fatalf("expected answer + drained prompt appended, got %d -> %d messages", before, len(m.messages))
+	}
+	if !contains(m.messages[len(m.messages)-2], "jawaban") {
+		t.Fatalf("drained turn answer missing from history")
+	}
+	if !contains(m.messages[len(m.messages)-1], "q1") {
+		t.Fatalf("drained prompt must enter history as a YOU row")
 	}
 }
 

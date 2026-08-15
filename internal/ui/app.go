@@ -212,6 +212,13 @@ type Model struct {
 	turnRunning  bool
 	pendingQueue []string
 
+	// queueSel is the highlighted index into pendingQueue while queueMode is
+	// active (Alt+K): the queued prompts are shown in the activity slot above
+	// the input — never in the conversation history — and e/d edit or delete
+	// the selected one.
+	queueMode bool
+	queueSel  int
+
 	// quitting is set when the user quits (ctrl+c) so in-flight turn
 	// goroutines stop sending to the (already exiting) program — prevents a
 	// blocked Send from leaking the turn goroutine forever.
@@ -302,8 +309,16 @@ type Model struct {
 	filesExpanded bool
 
 	// mouseMode toggles between "SELECT" (native mouse text selection) and
-	// "SCROLL" (mouse wheel viewport scrolling) via ctrl+m.
+	// "SCROLL" (mouse wheel viewport scrolling) via ctrl+m. Defaults to SCROLL
+	// so the wheel works out of the box.
 	mouseMode string
+
+	// pagerActive is the in-TUI full-answer pager (ctrl+p). While active the
+	// log viewport is locked to the last assistant answer and keys scroll it
+	// directly; q/Esc/Ctrl+P exit back to the normal chat view.
+	pagerActive  bool
+	pagerContent string
+	pagerWidth   int
 
 	// Connect Modal State (multi-step wizard)
 	connectStep         int // 0=provider pick, 1=name, 2=API key, 3=base URL, 4=models
@@ -559,7 +574,7 @@ func NewApp(
 		scoutMgr:            scoutMgr,
 		mode:                initialMode,
 		budgetUSD:           budgetUSD,
-		mouseMode:           "SELECT",
+		mouseMode:           "SCROLL",
 		status:              "Ready",
 		messages:            msgs,
 		promptInput:         ti,
@@ -957,12 +972,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.pendingQueue) > 0 {
 			next := m.pendingQueue[0]
 			m.pendingQueue = m.pendingQueue[1:]
+			// The first item just ran; shift the queue selection onto the new
+			// head (or clamp) so Alt+K management stays on a valid row.
+			if m.queueSel > 0 {
+				m.queueSel--
+			}
+			if len(m.pendingQueue) == 0 {
+				m.queueMode = false
+				m.queueSel = 0
+			}
 			return m.startTurn(next)
+		}
+		// Queue fully drained — leave queue management mode if the last item
+		// was deleted by the user rather than drained.
+		if m.queueMode {
+			m.queueMode = false
+			m.queueSel = 0
 		}
 		return m, nil
 
 	case streamChunkMsg:
 		if !m.streaming {
+			// A new answer is starting — drop out of the pager so the stream
+			// renders into the normal chat view.
+			if m.pagerActive {
+				m.exitPager()
+			}
 			m.streaming = true
 			m.pendingStream = ""
 			m.status = "Streaming..."
@@ -1030,6 +1065,94 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// In-TUI pager mode: every key scrolls the last answer directly instead
+		// of reaching the input/history handlers. q/Esc/Ctrl+P exit.
+		if m.pagerActive {
+			switch keyStr {
+			case "q", "esc", "ctrl+p":
+				m.exitPager()
+				return m, nil
+			case "pgup":
+				m.logViewport.PageUp()
+				return m, nil
+			case "pgdown":
+				m.logViewport.PageDown()
+				return m, nil
+			case "home":
+				m.logViewport.GotoTop()
+				return m, nil
+			case "end":
+				m.logViewport.GotoBottom()
+				return m, nil
+			case "up":
+				m.logViewport.ScrollUp(1)
+				return m, nil
+			case "down":
+				m.logViewport.ScrollDown(1)
+				return m, nil
+			case "ctrl+u":
+				m.logViewport.HalfPageUp()
+				return m, nil
+			case "ctrl+d":
+				m.logViewport.HalfPageDown()
+				return m, nil
+			}
+		}
+
+		// Queue management mode (Alt+K): while active, keys manage the queued
+		// prompts instead of typing into the input. ↑/↓ move the selection,
+		// e loads the selected prompt into the input for editing (removing it
+		// from the queue), d deletes it, Esc/Alt+K exit.
+		if m.queueMode {
+			if len(m.pendingQueue) == 0 {
+				m.queueMode = false
+				m.queueSel = 0
+			} else {
+				switch keyStr {
+				case "esc", "alt+k":
+					m.queueMode = false
+					return m, nil
+				case "enter":
+					// Swallow Enter while managing the queue so the input can't
+					// accidentally send mid-management; Esc/Alt+K exit instead.
+					return m, nil
+				case "up":
+					if m.queueSel > 0 {
+						m.queueSel--
+					}
+					return m, nil
+				case "down":
+					if m.queueSel < len(m.pendingQueue)-1 {
+						m.queueSel++
+					}
+					return m, nil
+				case "e":
+					// Edit the selected queued prompt: load it into the input
+					// (replacing whatever was typed) and drop it from the queue
+					// so it can't auto-send mid-edit. The user presses Enter
+					// when done — it re-queues or runs then.
+					if m.queueSel >= 0 && m.queueSel < len(m.pendingQueue) {
+						m.promptInput.SetValue(m.pendingQueue[m.queueSel])
+						m.pendingQueue = append(m.pendingQueue[:m.queueSel], m.pendingQueue[m.queueSel+1:]...)
+					}
+					m.queueMode = false
+					m.queueSel = 0
+					return m, nil
+				case "d":
+					if m.queueSel >= 0 && m.queueSel < len(m.pendingQueue) {
+						m.pendingQueue = append(m.pendingQueue[:m.queueSel], m.pendingQueue[m.queueSel+1:]...)
+					}
+					if len(m.pendingQueue) == 0 {
+						m.queueMode = false
+						m.queueSel = 0
+					} else if m.queueSel >= len(m.pendingQueue) {
+						m.queueSel = len(m.pendingQueue) - 1
+					}
+					return m, nil
+				}
+			}
+		}
+
 		switch keyStr {
 		case "ctrl+f":
 			// Toggle the FILES change summary at the end of the last answer
@@ -1065,19 +1188,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "ctrl+p":
-			// Open full conversation log in system pager (`less -R`)
+			// In-TUI pager for the last assistant answer (no subprocess): the
+			// viewport locks to the answer, keys scroll it, q/Esc/Ctrl+P exit.
 			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug {
 				contentWidth := m.width - 4
 				if contentWidth < 20 {
 					contentWidth = 80
 				}
-				fullLog := m.buildLog(contentWidth)
-				cmd := exec.Command("less", "-R")
-				cmd.Stdin = strings.NewReader(fullLog)
-				cmd.Stdout = os.Stdout
-				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-					return statusUpdateMsg("Ready")
-				})
+				m.pagerContent = m.buildPagerContent(contentWidth)
+				m.pagerWidth = contentWidth
+				m.pagerActive = true
+				m.logViewport.SetContent(m.pagerContent)
+				m.logViewport.GotoTop()
+			}
+			return m, nil
+
+		case "alt+k":
+			// Toggle queue management mode (see the intercept above for the
+			// keys it handles). Only useful while prompts are queued.
+			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug && len(m.pendingQueue) > 0 {
+				m.queueMode = !m.queueMode
+				if m.queueMode && m.queueSel >= len(m.pendingQueue) {
+					m.queueSel = len(m.pendingQueue) - 1
+				}
 			}
 			return m, nil
 
@@ -1228,7 +1361,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// crash the CLI progress goroutine (nil-handler panic).
 			if m.turnRunning {
 				m.pendingQueue = append(m.pendingQueue, userQuery)
-				m.appendMessages("⏳ Previous turn still running — message queued and will send automatically when it finishes.")
+				// The queue is rendered live in the activity slot above the
+				// input (see buildLogChrome) — never as a history row, so a
+				// queued prompt can't pollute the conversation below the first
+				// user prompt.
+				m.queueSel = len(m.pendingQueue) - 1
 				m.status = "Queued..."
 				return m, nil
 			}
@@ -2127,6 +2264,8 @@ func (m *Model) View() tea.View {
 		content = m.renderConnectModal()
 	} else if m.showDebug {
 		content = m.renderDebugModal()
+	} else if m.pagerActive {
+		content = m.renderPager()
 	} else {
 		var sb strings.Builder
 
@@ -2190,13 +2329,8 @@ func (m *Model) View() tea.View {
 				}
 			} else if key := m.logKey(); key != m.renderedKey || vpHeight != m.renderedH {
 				m.logViewport.SetContent(log)
-				// Land on the newest content: after a turn completes, the answer
-				// (and any FILES summary) was appended, so the reader must end up at
-				// the END of the answer. Parking at the user's prompt instead left
-				// long answers cut off below the fold and made earlier history look
-				// like it vanished (it was only scrolled above the parked view).
 				if key != m.renderedKey || m.renderedH == 0 {
-					m.logViewport.GotoBottom()
+					m.parkLogAfterNewContent(log, vpHeight, contentWidth)
 				}
 				// Height-only change (the live activity slot grew/shrunk): content
 				// is identical, so preserve the reading position — the viewport's
@@ -2251,6 +2385,17 @@ func clipToTerminalBounds(content string, maxH int) string {
 	return strings.Join(lines, "\n")
 }
 
+// truncatePrompt flattens a queued prompt onto one line (newlines and runs of
+// whitespace collapse to single spaces) and cuts it to a readable preview width
+// for the queue rows rendered above the input.
+func truncatePrompt(s string) string {
+	one := strings.Join(strings.Fields(s), " ")
+	if len(one) > 70 {
+		one = one[:70] + "…"
+	}
+	return one
+}
+
 // buildLog renders the message history + live streaming block. The history
 // part is cached (renderedHistory) and rebuilt only when the messages change,
 // so every streamed chunk re-renders just the cheap streaming box instead of
@@ -2278,6 +2423,115 @@ func (m *Model) buildLog(contentWidth int) string {
 		out.WriteString(bar.Render(label+"\n"+m.pendingStream) + "\n\n")
 	}
 	return out.String()
+}
+
+// parkLogAfterNewContent repositions the viewport after new content was
+// appended to the log. A short newest content (or a short whole log) lands at
+// the bottom so everything is visible. When a long assistant answer — taller
+// than the viewport — is the newest content (trailing FILES/PROCESS summaries
+// allowed), it parks at the START of that answer instead, so the reader begins
+// at its top and pages down. Previously the answer's beginning hid above the
+// fold and looked "cut off" until Ctrl+P opened a pager.
+func (m *Model) parkLogAfterNewContent(log string, vpHeight, contentWidth int) {
+	if len(m.messages) == 0 || strings.Count(log, "\n")+1 <= vpHeight {
+		m.logViewport.GotoBottom()
+		return
+	}
+	// Walk back from the newest message, skipping trailing FILES/PROCESS
+	// summaries, to find the assistant answer this turn produced. If anything
+	// else (a user prompt) is the newest content, land at the bottom.
+	ansIdx := -1
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := m.messages[i]
+		if strings.HasPrefix(msg, "BROCODE") || strings.HasPrefix(msg, "🤖 ") {
+			ansIdx = i
+			break
+		}
+		if strings.HasPrefix(msg, "FILES:") || strings.HasPrefix(msg, "PROCESS:") {
+			continue
+		}
+		break
+	}
+	if ansIdx < 0 {
+		m.logViewport.GotoBottom()
+		return
+	}
+	tail := formatMessage(m.messages[ansIdx], contentWidth, m.filesExpanded)
+	if lipgloss.Height(tail) <= vpHeight {
+		m.logViewport.GotoBottom()
+		return
+	}
+	// Offset the viewport so the answer's first line sits at the top: the
+	// y-offset is the number of lines that precede it in the rendered log
+	// (count newlines before the tail block's last occurrence). Clamp so the
+	// viewport never scrolls past the end of the content.
+	idx := strings.LastIndex(log, tail)
+	offset := strings.Count(log[:idx], "\n")
+	if max := strings.Count(log, "\n") + 1 - vpHeight; offset > max {
+		offset = max
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	m.logViewport.SetYOffset(offset)
+}
+
+// buildPagerContent renders the in-TUI pager view: a header bar naming the
+// navigation keys above the last assistant answer.
+func (m *Model) buildPagerContent(contentWidth int) string {
+	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).
+		Render("── JAWABAN TERAKHIR ── PgUp/PgDn/Home/End/↑/↓ scroll · q/Esc/Ctrl+P keluar") + "\n\n"
+	ans := m.lastAssistantAnswer()
+	if strings.TrimSpace(ans) == "" {
+		return header + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(tidak ada jawaban asisten untuk ditampilkan)")
+	}
+	return header + formatMessage("BROCODE:\n"+ans, contentWidth, false)
+}
+
+// exitPager closes the in-TUI pager and forces the next frame to re-render the
+// normal chat log, landing back on the newest content.
+func (m *Model) exitPager() {
+	m.pagerActive = false
+	m.pagerContent = ""
+	m.renderedLog = ""
+	m.renderedKey = ""
+	m.renderedH = 0
+}
+
+// renderPager renders the in-TUI pager: the viewport sized to the terminal
+// minus chrome, holding the last answer, with the pager bar replacing the
+// input. Rebuilds the answer content if the terminal width changed so wrapping
+// stays correct.
+func (m *Model) renderPager() string {
+	var sb strings.Builder
+	if m.width > 0 {
+		if m.logViewport.Width() != m.width {
+			m.logViewport.SetWidth(m.width)
+		}
+		chrome, chromeLines := m.buildLogChrome()
+		avail := m.height - chromeLines
+		if avail < 3 {
+			avail = 3
+		}
+		if m.logViewport.Height() != avail {
+			m.logViewport.SetHeight(avail)
+		}
+		contentWidth := m.width - 4
+		if contentWidth < 20 {
+			contentWidth = 80
+		}
+		if m.pagerContent == "" || m.pagerWidth != contentWidth {
+			m.pagerContent = m.buildPagerContent(contentWidth)
+			m.pagerWidth = contentWidth
+			m.logViewport.SetContent(m.pagerContent)
+			m.logViewport.GotoTop()
+		}
+		sb.WriteString(m.logViewport.View())
+		sb.WriteString(chrome)
+	} else {
+		sb.WriteString(clipToTerminalBounds(m.pagerContent, getTerminalHeight()-4))
+	}
+	return sb.String()
 }
 
 // lastAssistantReasoning returns the reasoning text of the most recent
@@ -2350,9 +2604,36 @@ func (m *Model) buildLogChrome() (string, int) {
 		sb.WriteString("\n\n")
 	}
 
+	// Queued prompts: shown live above the input, never as history rows. In
+	// queue mode (Alt+K) the selected row is highlighted and a hint names the
+	// management keys (e edit · d delete · ↑/↓ select · Esc exit).
+	if len(m.pendingQueue) > 0 {
+		qHead := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true).Render(fmt.Sprintf("⏳ ANTRIAN (%d)", len(m.pendingQueue)))
+		if m.queueMode {
+			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · e edit · d delete · ↑/↓ pilih · Esc keluar")
+		} else {
+			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · Alt+K kelola")
+		}
+		sb.WriteString(qHead + "\n")
+		for i, q := range m.pendingQueue {
+			row := "  " + fmt.Sprintf("%d", i+1) + " · " + truncatePrompt(q)
+			if m.queueMode && i == m.queueSel {
+				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true).Render("▸ "+row) + "\n")
+			} else {
+				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(row) + "\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+
 	// Input area: while a critical file action (create/delete) awaits
-	// approval, the chat input is temporarily replaced by the confirm bar.
-	if m.showFileConfirm {
+	// approval, the chat input is temporarily replaced by the confirm bar. In
+	// pager mode the input gives way to a hint bar naming the pager keys.
+	if m.pagerActive {
+		pagerBar := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).
+			Render("── PAGER: JAWABAN TERAKHIR · PgUp/PgDn/Home/End/↑/↓ · q/Esc/Ctrl+P keluar ──")
+		sb.WriteString(pagerBar + "\n\n")
+	} else if m.showFileConfirm {
 		sb.WriteString(m.renderFileConfirmBar() + "\n\n")
 	} else {
 		// Input Box (Borderless & Minimalist, multi-line textarea that grows)
@@ -2413,11 +2694,17 @@ func (m *Model) buildLogChrome() (string, int) {
 	footerBanner := fmt.Sprintf(" BROCODE🔥 | Mode: %s | Provider: %s | Model: %s | Session: %s | %s%s ",
 		modeBadgeStyle.Render(m.mode+" (Shift+Tab)"), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
 
-	helpStr := " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+M mouse · /help "
+	helpStr := " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+P pager · Ctrl+Y copy · Ctrl+M mouse · /help "
 	if m.width >= 120 {
-		helpStr = " ENTER send · Alt+Enter newline · Tab/Shift+Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+M mouse mode · /sessions · /models · /lsp · /help "
+		helpStr = " ENTER send · Alt+Enter newline · Tab/Shift+Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+P pager · Ctrl+Y copy · Ctrl+M mouse mode · /sessions · /models · /lsp · /help "
 	} else if m.width >= 90 {
-		helpStr = " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · Ctrl+Y copy · Ctrl+M mouse · /sessions · /models · /help "
+		helpStr = " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · Ctrl+P pager · Ctrl+Y copy · Ctrl+M mouse · /sessions · /models · /help "
+	}
+	// When prompts are queued, advertise the queue-management key. Only on wide
+	// terminals so the hint never pushes the help bar onto two wrapped lines;
+	// the queue block itself already shows "Alt+K kelola" on narrow screens.
+	if len(m.pendingQueue) > 0 && m.width >= 120 {
+		helpStr += " · Alt+K queue "
 	}
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	if m.width > 0 {

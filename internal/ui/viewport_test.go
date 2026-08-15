@@ -353,22 +353,32 @@ func TestViewNeverCutsNewestAtBoundary(t *testing.T) {
 	}
 }
 
-// TestMouseScrollModeEnablesWheelEvents pins that the Ctrl+M SCROLL toggle
-// actually enables mouse events in the view. Previously View() always forced
-// MouseModeNone, so the SCROLL mode did nothing and the mouse wheel could
-// never scroll the log.
+// TestMouseScrollModeEnablesWheelEvents pins that mouse events are enabled in
+// the view. Previously View() always forced MouseModeNone, so the wheel could
+// never scroll the log. SCROLL is now the default (wheel works out of the
+// box); Ctrl+M toggles to SELECT (native selection, no mouse capture) and
+// back.
 func TestMouseScrollModeEnablesWheelEvents(t *testing.T) {
 	m := newTestApp()
 	m.width = 120
 	m.height = 30
 
-	// Default: SELECT — native terminal selection, no mouse capture.
+	// Default: SCROLL — wheel scrolling works out of the box.
 	v := m.View()
+	if v.MouseMode != tea.MouseModeCellMotion {
+		t.Errorf("default SCROLL mode must enable MouseModeCellMotion (wheel events), got %v", v.MouseMode)
+	}
+
+	// Toggle to SELECT (ctrl+m): native selection, no mouse capture.
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'm', Mod: tea.ModCtrl}); err != nil {
+		t.Fatalf("ctrl+m update failed: %v", err)
+	}
+	v = m.View()
 	if v.MouseMode != tea.MouseModeNone {
 		t.Errorf("SELECT mode must use MouseModeNone, got %v", v.MouseMode)
 	}
 
-	// Toggle to SCROLL (ctrl+m).
+	// Toggle back to SCROLL (ctrl+m).
 	if _, err := m.Update(tea.KeyPressMsg{Code: 'm', Mod: tea.ModCtrl}); err != nil {
 		t.Fatalf("ctrl+m update failed: %v", err)
 	}
