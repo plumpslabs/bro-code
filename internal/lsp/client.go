@@ -54,6 +54,7 @@ type Client struct {
 	mu       sync.Mutex
 	closed   bool
 	lastUsed time.Time                        // set on every clientFor — drives idle reaping
+	lastDiag time.Time                        // last publishDiagnostics arrival — drives scan settle
 	versions map[string]int                   // path → document version
 	pushed   map[string][]protocol.Diagnostic // URI → last published diagnostics
 }
@@ -323,6 +324,7 @@ func (m *Manager) clientFor(ctx context.Context, path string) (*Client, error) {
 			if err := jsonrpc2.DefaultCodec.Unmarshal(req.Params(), &p); err == nil {
 				c.mu.Lock()
 				c.pushed[p.URI.String()] = p.Diagnostics
+				c.lastDiag = time.Now()
 				c.mu.Unlock()
 			}
 		}
@@ -588,10 +590,10 @@ func (m *Manager) Diagnostics(ctx context.Context, path string) (string, error) 
 	}
 
 	// Give the server time to publish diagnostics after the open/change.
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-time.After(1500 * time.Millisecond):
+	// A cold server must index the module before it can analyze, so wait
+	// until it goes quiet instead of a fixed short window.
+	if err := m.waitForDiagnostics(ctx, diagSettle); err != nil {
+		return "", err
 	}
 
 	u := uri.File(filepath.Clean(path)).String()
@@ -661,9 +663,69 @@ const scanMaxFiles = 60
 // scanMaxLines bounds the rendered output of one scan.
 const scanMaxLines = 80
 
-// scanSettle is how long ScanDiagnostics waits for servers to publish
-// diagnostics after opening files. A var so tests can shorten it.
-var scanSettle = 3 * time.Second
+// scanSettle caps how long ScanDiagnostics waits for servers to publish
+// diagnostics after opening files. A fresh server (cold gopls on a real
+// module) has to index the module before it can analyze, which easily takes
+// >3s — a fixed short window would miss everything. The wait is adaptive: it
+// returns as soon as every client goes quiet for scanQuietAfter and never
+// exceeds scanSettle. A var so tests can shorten it.
+var scanSettle = 15 * time.Second
+
+// diagSettle caps the wait in Diagnostics (single file).
+const diagSettle = 8 * time.Second
+
+// scanPollInterval is how often the settle loop re-checks client activity.
+const scanPollInterval = 200 * time.Millisecond
+
+// scanMinWait is the minimum settle time before the quiet check may fire, so
+// even a fast clean server gets a beat to push its (empty) diagnostics.
+const scanMinWait = 800 * time.Millisecond
+
+// scanQuietAfter is how long with no new publishDiagnostics before a server
+// is treated as done. Cold gopls publishes in waves while indexing; the first
+// quiet gap after any event means the module load finished.
+const scanQuietAfter = 2 * time.Second
+
+// diagLastActivity returns the newest publishDiagnostics arrival across all
+// live clients, or the zero time if none has ever pushed.
+func (m *Manager) diagLastActivity() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var last time.Time
+	for _, c := range m.clients {
+		c.mu.Lock()
+		if c.lastDiag.After(last) {
+			last = c.lastDiag
+		}
+		c.mu.Unlock()
+	}
+	return last
+}
+
+// waitForDiagnostics blocks until servers go quiet publishing diagnostics (a
+// quiet gap after the first event) or settle elapses. A cold server — which
+// must index before it can analyze — is given the time it needs instead of
+// a fixed short window; a warm one returns as soon as it is done.
+func (m *Manager) waitForDiagnostics(ctx context.Context, settle time.Duration) error {
+	start := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(scanPollInterval):
+		}
+		if time.Since(start) < scanMinWait {
+			continue
+		}
+		last := m.diagLastActivity()
+		if !last.IsZero() && time.Since(last) >= scanQuietAfter {
+			return nil
+		}
+		if time.Since(start) >= settle {
+			return nil
+		}
+	}
+}
 
 // collectSupportedFiles walks root and returns up to max files whose language
 // has an installed server, skipping dependency/build dirs. Shared by
@@ -749,10 +811,8 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 	}
 
 	// One settle window for all servers to publish diagnostics.
-	select {
-	case <-ctx.Done():
+	if err := m.waitForDiagnostics(ctx, scanSettle); err != nil {
 		return "", ctx.Err()
-	case <-time.After(scanSettle):
 	}
 
 	order := make([]string, 0, len(opened))
