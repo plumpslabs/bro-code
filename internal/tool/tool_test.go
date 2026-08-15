@@ -93,6 +93,59 @@ func TestReadFileTruncationGuidance(t *testing.T) {
 	}
 }
 
+// TestReadFileShrinkwrap verifies the opt-in AST shrinkwrap mode returns a
+// structural overview of a large file (signatures/types retained, bodies
+// stripped) with a notice — the anti-bloat path for big-file understanding.
+func TestReadFileShrinkwrap(t *testing.T) {
+	tmpDir := t.TempDir()
+	big := filepath.Join(tmpDir, "svc.go")
+	var sb strings.Builder
+	sb.WriteString("package svc\n\ntype Service struct{}\n\n")
+	for i := 1; i <= 60; i++ {
+		sb.WriteString("func (s *Service) Method" + fmt.Sprintf("%d", i) + "(in string) string {\n")
+		sb.WriteString("    x := in + \"processed\"\n")
+		sb.WriteString("    y := len(x)\n")
+		sb.WriteString("    return fmt.Sprintf(\"%s:%d\", x, y)\n")
+		sb.WriteString("}\n\n")
+	}
+	if err := os.WriteFile(big, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &ReadFileTool{}
+	out, err := rt.Execute(context.Background(), `{"path":"`+big+`","shrinkwrap":true}`)
+	if err != nil {
+		t.Fatalf("shrinkwrap read failed: %v", err)
+	}
+	if !strings.Contains(out, "AST shrinkwrap view") {
+		t.Fatalf("expected shrinkwrap notice, got: %.200s", out)
+	}
+	if !strings.Contains(out, "type Service struct") {
+		t.Errorf("expected type retained in shrinkwrap output")
+	}
+	if !strings.Contains(out, "func (s *Service) Method1") {
+		t.Errorf("expected function signature retained in shrinkwrap output")
+	}
+	if strings.Contains(out, "processed") {
+		t.Errorf("function BODIES must be stripped in shrinkwrap output")
+	}
+	// A small file with shrinkwrap:true stays intact (no notice, no stripping).
+	small := filepath.Join(tmpDir, "small.go")
+	if err := os.WriteFile(small, []byte("package main\n\nfunc main() { println(\"hi\") }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	smallOut, err := rt.Execute(context.Background(), `{"path":"`+small+`","shrinkwrap":true}`)
+	if err != nil {
+		t.Fatalf("small shrinkwrap read failed: %v", err)
+	}
+	if strings.Contains(smallOut, "AST shrinkwrap view") {
+		t.Errorf("small files should stay intact with shrinkwrap:true, got notice")
+	}
+	if !strings.Contains(smallOut, "println") {
+		t.Errorf("small file body must be preserved")
+	}
+}
+
 func TestWriteEditBlockedForSensitive(t *testing.T) {
 	tmpDir := t.TempDir()
 	envPath := filepath.Join(tmpDir, ".env")
@@ -213,6 +266,8 @@ func TestReadOnlyExecutionPolicy(t *testing.T) {
 		{"write_file", `{"path":"` + tmpDir + `/new.txt","content":"x"}`},
 		{"edit_file", `{"path":"` + target + `","target":"hi","replacement":"bye"}`},
 		{"delete_file", `{"path":"` + target + `"}`},
+		{"lsp_fix", `{"path":"` + target + `"}`},
+		{"lsp_rename", `{"path":"` + target + `","line":1,"col":1,"newName":"x"}`},
 	} {
 		if _, err := reg.Execute(context.Background(), tc.name, tc.args); err == nil || !strings.Contains(err.Error(), "read-only") {
 			t.Errorf("expected %q blocked in read-only mode, got err=%v", tc.name, err)

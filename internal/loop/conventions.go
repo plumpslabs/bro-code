@@ -407,7 +407,7 @@ func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 	// Native type errors via LSP (when wired) — catches what regex can't.
 	if e.diagFn != nil {
 		for _, p := range e.editedFiles {
-			if out := e.diagFn(p); out != "" && out != "no diagnostics" {
+			if out := e.diagFn(p); out != "" && !strings.HasPrefix(out, "No diagnostics") {
 				issues = append(issues, conventionIssue{
 					Path:    p,
 					Kind:    "type-error",

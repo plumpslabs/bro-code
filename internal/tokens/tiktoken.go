@@ -1,0 +1,122 @@
+// Package tokens provides LLM token counting.
+//
+// It prefers an exact BPE tokenizer (tiktoken-go with bundled offline
+// vocabularies, so NO runtime network is required) for the common encodings
+// (cl100k_base for GPT-3.5/4 legacy, o200k_base for GPT-4o/o1). When the real
+// tokenizer cannot initialize (unsupported model, missing vocab, sandbox),
+// EstimateTokens provides a deterministic char-count heuristic fallback so a
+// tokenizer failure never breaks context-budget decisions.
+package tokens
+
+import (
+	"sync"
+
+	"github.com/pkoukk/tiktoken-go"
+	tiktoken_loader "github.com/pkoukk/tiktoken-go-loader"
+)
+
+// modelEncoding maps a model name to its tiktoken encoding name. Order matters:
+// more-specific entries (full names) are checked before family prefixes.
+var modelEncoding = map[string]string{
+	"gpt-4o":        tiktoken.MODEL_O200K_BASE,
+	"gpt-4o-mini":   tiktoken.MODEL_O200K_BASE,
+	"o1":            tiktoken.MODEL_O200K_BASE,
+	"gpt-4.5":       tiktoken.MODEL_O200K_BASE,
+	"gpt-4.1":       tiktoken.MODEL_O200K_BASE,
+	"gpt-3.5-turbo": tiktoken.MODEL_CL100K_BASE,
+	"gpt-4":         tiktoken.MODEL_CL100K_BASE,
+}
+
+const (
+	modelO200KBase = "o200k_base"
+)
+
+// encodingForModel resolves a model name to a tiktoken encoding name, preferring
+// the bundled tiktoken-go model table and falling back to prefix matching so
+// suffixed model variants (e.g. "gpt-4o-2024-11-20") resolve correctly.
+func encodingForModel(model string) string {
+	if model == "" {
+		return tiktoken.MODEL_CL100K_BASE
+	}
+	if enc, ok := tiktoken.MODEL_TO_ENCODING[model]; ok {
+		return enc
+	}
+	if enc, ok := modelEncoding[model]; ok {
+		return enc
+	}
+	for prefix, enc := range modelEncoding {
+		if len(model) >= len(prefix) && model[:len(prefix)] == prefix {
+			return enc
+		}
+	}
+	// Prefix family fallbacks.
+	if len(model) >= 4 && model[:4] == "gpt-" && len(model) > 6 && model[5:7] == "4o" {
+		return modelO200KBase
+	}
+	return tiktoken.MODEL_CL100K_BASE
+}
+
+// cache holds lazily-built *Tiktoken encoders keyed by encoding name. The
+// offline loader is installed once; encoders are built on demand and reused.
+var (
+	cache   = map[string]*tiktoken.Tiktoken{}
+	failed  = map[string]bool{}
+	once    sync.Once
+	cacheMu sync.Mutex
+)
+
+func loadOfflineOnce() {
+	once.Do(func() {
+		tiktoken.SetBpeLoader(tiktoken_loader.NewOfflineLoader())
+	})
+}
+
+// realEncoding returns the tiktoken encoder for the given model's encoding.
+// Returns ok=false on any failure so the caller falls back to the heuristic.
+func realEncoding(model string) (*tiktoken.Tiktoken, bool) {
+	enc := encodingForModel(model)
+
+	cacheMu.Lock()
+	if t, ok := cache[enc]; ok {
+		cacheMu.Unlock()
+		return t, true
+	}
+	if failed[enc] {
+		cacheMu.Unlock()
+		return nil, false
+	}
+	cacheMu.Unlock()
+
+	loadOfflineOnce()
+	tk, err := tiktoken.GetEncoding(enc)
+	if err != nil || tk == nil {
+		cacheMu.Lock()
+		failed[enc] = true
+		cacheMu.Unlock()
+		return nil, false
+	}
+	cacheMu.Lock()
+	cache[enc] = tk
+	cacheMu.Unlock()
+	return tk, true
+}
+
+// CountTokens returns the exact BPE token count for text using the encoding
+// appropriate to model. Falls back to the heuristic EstimateTokens when the
+// real tokenizer is unavailable — token counting must never fail.
+func CountTokens(text, model string) int {
+	if text == "" {
+		return 0
+	}
+	tk, ok := realEncoding(model)
+	if !ok {
+		return EstimateTokens(text)
+	}
+	return len(tk.Encode(text, nil, nil))
+}
+
+// CountTokensDefault is the model-agnostic convenience: uses the broadest
+// default encoding and falls back to the heuristic on any error.
+func CountTokensDefault(text string) int {
+	return CountTokens(text, "")
+}

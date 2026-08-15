@@ -22,6 +22,19 @@ func (sr *SymbolRAG) IndexSymbol(symbol, filePath string) {
 	}
 }
 
+// RemoveFile drops every symbol that pointed at the given file — used when a
+// file changes (or is deleted) so the RAG never resolves a stale symbol.
+func (sr *SymbolRAG) RemoveFile(filePath string) {
+	if filePath == "" {
+		return
+	}
+	for sym, f := range sr.symbols {
+		if f == filePath {
+			delete(sr.symbols, sym)
+		}
+	}
+}
+
 // Resolve Symbol looks up exact or partial symbol matches.
 func (sr *SymbolRAG) Resolve(symbol string) (string, bool) {
 	symbol = strings.ToLower(strings.TrimSpace(symbol))

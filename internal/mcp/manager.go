@@ -25,16 +25,34 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/plumpslabs/bro-code/internal/provider"
 )
 
-// ServerConfig is a single MCP server definition: the command to spawn plus
-// its arguments and environment overrides.
+// ServerConfig is a single MCP server definition. A server is either spawned
+// as a stdio subprocess (Command set) or reached over the network as a
+// Streamable HTTP / SSE endpoint (URL set). Environment overrides apply to
+// stdio servers; Headers apply to HTTP/SSE servers.
 type ServerConfig struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	Env     map[string]string `json:"env,omitempty"`
+	Type    string            `json:"type,omitempty"`    // "stdio" (default), "http"/"streamable-http", "sse"
+	Command string            `json:"command,omitempty"` // stdio: executable to spawn
+	Args    []string          `json:"args,omitempty"`    // stdio: command arguments
+	URL     string            `json:"url,omitempty"`     // http/sse: endpoint
+	Env     map[string]string `json:"env,omitempty"`     // stdio: extra env vars
+	Headers map[string]string `json:"headers,omitempty"` // http/sse: static request headers
+}
+
+// Transport returns the wire transport for this server config.
+func (c ServerConfig) Transport() string {
+	switch c.Type {
+	case "http", "streamable-http", "sse":
+		return c.Type
+	}
+	if c.URL != "" {
+		return "http"
+	}
+	return "stdio"
 }
 
 // Client is the minimal MCP client surface BroCode needs. *client.Client
@@ -69,7 +87,7 @@ func NewManager() *Manager {
 		configs:   make(map[string]ServerConfig),
 		clients:   make(map[string]Client),
 		errors:    make(map[string]string),
-		newClient: stdioClientFactory,
+		newClient: defaultClientFactory,
 	}
 }
 
@@ -80,14 +98,28 @@ func (m *Manager) SetClientFactory(f ClientFactory) {
 	}
 }
 
-// stdioClientFactory spawns the server command as a subprocess with
-// stdin/stdout pipes (the standard MCP stdio transport).
-func stdioClientFactory(cfg ServerConfig) (Client, error) {
-	env := os.Environ()
-	for k, v := range cfg.Env {
-		env = append(env, k+"="+v)
+// defaultClientFactory picks the transport for a server config: streamable
+// HTTP (preferred remote transport, 2025-03-26 spec) or SSE when URL is set
+// with the matching type, otherwise the standard stdio subprocess.
+func defaultClientFactory(cfg ServerConfig) (Client, error) {
+	switch cfg.Transport() {
+	case "http", "streamable-http":
+		opts := []transport.StreamableHTTPCOption{
+			transport.WithHTTPTimeout(30 * time.Second),
+		}
+		if len(cfg.Headers) > 0 {
+			opts = append(opts, transport.WithHTTPHeaders(cfg.Headers))
+		}
+		return client.NewStreamableHttpClient(cfg.URL, opts...)
+	case "sse":
+		return client.NewSSEMCPClient(cfg.URL)
+	default: // stdio
+		env := os.Environ()
+		for k, v := range cfg.Env {
+			env = append(env, k+"="+v)
+		}
+		return client.NewStdioMCPClient(cfg.Command, env, cfg.Args...)
 	}
-	return client.NewStdioMCPClient(cfg.Command, env, cfg.Args...)
 }
 
 // AddServer registers a server config under the given name (later adds
@@ -203,11 +235,14 @@ type mcpServersFile struct {
 }
 
 // opencodeConfig mirrors the "mcp" block of opencode.jsonc, whose command is
-// an array (["npx", "-y", "pkg"]) and env key is "environment".
+// an array (["npx", "-y", "pkg"]) and env key is "environment". Remote servers
+// use "type":"http"/"sse" with a "url".
 type opencodeConfig struct {
 	MCP map[string]struct {
 		Type        string            `json:"type"`
 		Command     json.RawMessage   `json:"command"`
+		URL         string            `json:"url,omitempty"`
+		Headers     map[string]string `json:"headers,omitempty"`
 		Environment map[string]string `json:"environment,omitempty"`
 		Env         map[string]string `json:"env,omitempty"`
 	} `json:"mcp"`
@@ -249,7 +284,9 @@ func (m *Manager) loadFile(path string) {
 		return
 	}
 	for name, cfg := range f.Servers {
-		if strings.TrimSpace(cfg.Command) == "" {
+		// Accept either a stdio server (command) or a remote HTTP/SSE server
+		// (url). Skip only when neither is configured.
+		if strings.TrimSpace(cfg.Command) == "" && strings.TrimSpace(cfg.URL) == "" {
 			continue
 		}
 		m.AddServer(name, cfg)
@@ -268,18 +305,25 @@ func (m *Manager) loadOpenCodeConfig() {
 		return
 	}
 	for name, s := range cfg.MCP {
-		if s.Type != "" && s.Type != "stdio" {
-			continue // only stdio transport is supported
+		switch s.Type {
+		case "", "stdio":
+			cmd, args := parseCommand(s.Command)
+			if cmd == "" {
+				continue
+			}
+			env := s.Environment
+			if env == nil {
+				env = s.Env
+			}
+			m.AddServer(name, ServerConfig{Command: cmd, Args: args, Env: env})
+		case "http", "streamable-http", "sse":
+			if s.URL == "" {
+				continue
+			}
+			m.AddServer(name, ServerConfig{Type: s.Type, URL: s.URL, Headers: s.Headers})
+		default:
+			// Unknown transport: skip gracefully.
 		}
-		cmd, args := parseCommand(s.Command)
-		if cmd == "" {
-			continue
-		}
-		env := s.Environment
-		if env == nil {
-			env = s.Env
-		}
-		m.AddServer(name, ServerConfig{Command: cmd, Args: args, Env: env})
 	}
 }
 

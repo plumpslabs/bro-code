@@ -21,6 +21,7 @@ import (
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/loop"
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
@@ -30,6 +31,14 @@ type Runner struct {
 	Adapter provider.ProviderAdapter
 	Model   string
 	Tools   *tool.Registry // the main registry; sub-agents get a safe subset
+	// BudgetUSD, when > 0, caps each sub-agent turn's estimated provider spend
+	// (hard stop → graceful synthesis). Runaway sub-agents can no longer burn
+	// tokens to the 10-minute wall-clock cap with no cost limit.
+	BudgetUSD float64
+	// Store, when non-nil, persists each sub-agent's isolated conversation to
+	// SQLite so delegated work is auditable after the fact. Nil keeps the
+	// previous behavior (fresh context, nothing persisted).
+	Store *store.Store
 }
 
 // SubAgent is a single delegated task.
@@ -46,13 +55,18 @@ func (r *Runner) runOne(ctx context.Context, id, task string, onUpdate loop.Turn
 	}
 
 	// Fresh, isolated context: the sub-agent cannot see the main conversation
-	// history (only its own task) and persists nothing to the session store.
-	ctxMgr := bcontext.NewManager("sub_"+id, nil, 128000)
+	// history (only its own task). Persists to the shared store only when one
+	// is wired (production audit trail); nil keeps the sub-conversation
+	// ephemeral (default, and always the case in tests).
+	ctxMgr := bcontext.NewManager("sub_"+id, r.Store, 128000)
 
 	subTools := r.Tools.SubRegistry()
 
 	eng := loop.NewEngine(r.Adapter, subTools, ctxMgr, r.Model)
 	eng.SetMode("BUILDER")
+	if r.BudgetUSD > 0 {
+		eng.SetBudgetUSD(r.BudgetUSD)
+	}
 
 	// One turn with a focused directive. The loop guard, tool budget and
 	// verification ladder all apply inside the sub-loop as well.
@@ -65,7 +79,9 @@ func (r *Runner) Run(ctx context.Context, task string) (string, error) {
 }
 
 // RunMany executes the given tasks — concurrently when parallel is true,
-// sequentially otherwise — and returns one report per task.
+// sequentially otherwise — and returns one report per task. Completed agents
+// stream a one-line progress update through onUpdate (may be nil) so the caller
+// sees results arrive incrementally instead of waiting for the whole batch.
 func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, onUpdate loop.TurnOutputHandler) ([]string, error) {
 	if len(agents) == 0 {
 		return nil, fmt.Errorf("no sub-agent tasks provided")
@@ -80,6 +96,13 @@ func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, 
 			id = fmt.Sprintf("%d", i+1)
 		}
 		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, onUpdate)
+		if onUpdate != nil {
+			status := "DONE"
+			if errs[i] != nil {
+				status = "FAILED"
+			}
+			onUpdate(loop.StateObserving, fmt.Sprintf("🤖 Sub-agent %s %s", id, status))
+		}
 	}
 
 	if parallel && len(agents) > 1 {
@@ -142,6 +165,7 @@ type ScoutJob struct {
 	Done   bool
 	Result string
 	Err    error
+	cancel context.CancelFunc // cancels this scout's goroutine (abort)
 }
 
 // ScoutManager owns the background scout jobs for a session.
@@ -164,6 +188,12 @@ func NewScoutManager(r *Runner) *ScoutManager {
 // Start launches a background scout. Returns the job id immediately; the job
 // runs in its own goroutine and its result is picked up by Drain.
 func (sm *ScoutManager) Start(ctx context.Context, task string) (string, error) {
+	return sm.StartWithProgress(ctx, task, nil)
+}
+
+// StartWithProgress launches a background scout, forwarding its progress lines
+// to onProgress (may be nil). Returns the job id immediately.
+func (sm *ScoutManager) StartWithProgress(ctx context.Context, task string, onProgress func(string)) (string, error) {
 	if sm == nil || sm.Runner == nil || sm.Runner.Adapter == nil {
 		return "", fmt.Errorf("scout runner is not configured")
 	}
@@ -176,11 +206,18 @@ func (sm *ScoutManager) Start(ctx context.Context, task string) (string, error) 
 	// 10-minute hard cap so a hung scout cannot leak a goroutine forever, and
 	// a concurrency semaphore so a scout batch never hammers the provider.
 	tctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	sm.mu.Lock()
+	job.cancel = cancel
+	sm.mu.Unlock()
 	go func() {
 		defer cancel()
 		sm.sem <- struct{}{}
 		defer func() { <-sm.sem }()
-		result, err := sm.Runner.runOne(tctx, id, task, nil)
+		var upd loop.TurnOutputHandler
+		if onProgress != nil {
+			upd = func(st loop.LoopState, info string) { onProgress(info) }
+		}
+		result, err := sm.Runner.runOne(tctx, id, task, upd)
 		sm.mu.Lock()
 		job.Done = true
 		job.Result = result
@@ -188,6 +225,34 @@ func (sm *ScoutManager) Start(ctx context.Context, task string) (string, error) 
 		sm.mu.Unlock()
 	}()
 	return id, nil
+}
+
+// Cancel aborts a single running scout by its job id. Already-completed jobs
+// are untouched.
+func (sm *ScoutManager) Cancel(id string) {
+	if sm == nil {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if j, ok := sm.jobs[id]; ok && j.cancel != nil {
+		j.cancel()
+	}
+}
+
+// CancelAll aborts every running scout. Used when the session is interrupted
+// or the program exits so background goroutines are not left dangling.
+func (sm *ScoutManager) CancelAll() {
+	if sm == nil {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for _, j := range sm.jobs {
+		if j.cancel != nil {
+			j.cancel()
+		}
+	}
 }
 
 // Pending returns the number of scouts still running.

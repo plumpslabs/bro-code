@@ -17,6 +17,11 @@ type OpenAIAdapter struct {
 	BaseURL string
 	APIKey  string
 	Client  *http.Client
+
+	// StreamIdleTimeout bounds a gap with no SSE chunk before the stream is
+	// treated as stalled. Overridable in tests; defaults to
+	// DefaultStreamIdleTimeout.
+	StreamIdleTimeout time.Duration
 }
 
 // NewOpenAIAdapter creates a new adapter for OpenAI-compatible APIs.
@@ -25,9 +30,10 @@ func NewOpenAIAdapter(baseURL, apiKey string) *OpenAIAdapter {
 		baseURL = "https://api.openai.com/v1"
 	}
 	return &OpenAIAdapter{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		APIKey:  apiKey,
-		Client:  &http.Client{Timeout: 120 * time.Second},
+		BaseURL:           strings.TrimRight(baseURL, "/"),
+		APIKey:            apiKey,
+		Client:            NewStreamingHTTPClient(),
+		StreamIdleTimeout: DefaultStreamIdleTimeout,
 	}
 }
 
@@ -172,7 +178,7 @@ func (a *OpenAIAdapter) doPost(ctx context.Context, apiReq *openAIChatRequest) (
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
-		return nil, fmt.Errorf("API error HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	return resp, nil
 }
@@ -183,7 +189,13 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*C
 		return nil, err
 	}
 
-	resp, err := a.doPost(ctx, apiReq)
+	// Non-streaming responses have no idle signal to measure, so a total
+	// wall-clock deadline is the only safe bound (the streaming client has no
+	// Timeout of its own by design).
+	reqCtx, cancel := context.WithTimeout(ctx, TotalTimeout)
+	defer cancel()
+
+	resp, err := a.doPost(reqCtx, apiReq)
 	if err != nil {
 		return nil, err
 	}
@@ -232,14 +244,23 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*C
 }
 
 // StreamComplete implements StreamingAdapter: content deltas are forwarded via
-// onDelta while tool-call fragments accumulate across SSE chunks.
+// onDelta while tool-call fragments accumulate across SSE chunks. The stream is
+// bounded by the idle watchdog, NOT a total deadline — long generations that
+// keep emitting chunks are never cut off.
 func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionRequest, onDelta func(string)) (*CompletionResponse, error) {
 	apiReq, err := buildOpenAIRequest(req, true)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := a.doPost(ctx, apiReq)
+	// The request runs on a cancelable context so the idle watchdog can abort
+	// an in-flight body read the moment the provider stalls.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	mark, stopWatchdog, idleFired := IdleWatchdog(streamCtx, cancelStream, a.StreamIdleTimeout)
+	defer stopWatchdog()
+
+	resp, err := a.doPost(streamCtx, apiReq)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +272,7 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
+		mark() // activity resets the idle clock
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
 			continue
@@ -304,6 +326,14 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 	}
 
 	if err := scanner.Err(); err != nil {
+		// Distinguish a user cancel (propagate as-is — never retry) from an
+		// idle watchdog abort (retryable stall) and a raw read failure.
+		if idleFired() {
+			return nil, fmt.Errorf("%w (no data for %s)", ErrStreamIdle, a.StreamIdleTimeout)
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("stream read failed: %w", err)
 	}
 
@@ -311,10 +341,10 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 	// cut mid-generation — provider timeout, session expiry, or a free-tier
 	// duration/queue limit hit while the answer was still streaming (exactly
 	// what free gateways like FreeBuff do). Returning the partial text as a
-	// complete answer would silently serve a half response, so surface an
-	// error instead and let the engine fall back to another provider.
+	// complete answer would silently serve a half response, so surface a
+	// retryable error instead and let the engine retry/fall back.
 	if !sawDone && res.FinishReason == "" {
-		return nil, fmt.Errorf("stream ended unexpectedly (no [DONE] or finish_reason — provider session/duration limit likely reached)")
+		return nil, StreamTruncated()
 	}
 	return res, nil
 }

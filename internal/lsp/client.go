@@ -927,3 +927,263 @@ func formatHover(contents protocol.HoverContents) string {
 	}
 	return ""
 }
+
+// CodeAction applies the first auto-applicable code action the server offers
+// for the file's current diagnostics — e.g. auto-import, organize imports, or
+// a quick-fix rewrite — preferring the server's "preferred" action. The
+// resulting edits are written to disk and recorded for the turn's diff,
+// undo snapshots and verification. Returns a summary of what was applied, or
+// the available action titles when none carried an auto-applyable edit.
+func (m *Manager) CodeAction(ctx context.Context, path string) (string, error) {
+	c, err := m.clientFor(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	text, err := textAt(path)
+	if err != nil {
+		return "", err
+	}
+	if err := c.ensureOpen(ctx, path, text); err != nil {
+		return "", err
+	}
+	// Wait for diagnostics so the context carries the current issues the
+	// server will offer fixes for.
+	if err := m.waitForDiagnostics(ctx, diagSettle); err != nil {
+		return "", err
+	}
+
+	u := uri.File(filepath.Clean(path)).String()
+	c.mu.Lock()
+	diags := append([]protocol.Diagnostic(nil), c.pushed[u]...)
+	c.mu.Unlock()
+
+	clean := filepath.Clean(path)
+	params := protocol.CodeActionParams{
+		TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(clean)},
+		Range: protocol.Range{
+			Start: protocol.Position{Line: 0, Character: 0},
+			End:   protocol.Position{Line: uint32(strings.Count(text, "\n")), Character: 0},
+		},
+		Context: protocol.CodeActionContext{Diagnostics: diags},
+	}
+
+	var actions []protocol.CodeAction
+	if _, err := c.conn.Call(ctx, "textDocument/codeAction", params, &actions); err != nil {
+		return "", err
+	}
+	var editable []protocol.CodeAction
+	for _, a := range actions {
+		if a.Edit != nil {
+			editable = append(editable, a)
+		}
+	}
+	if len(editable) == 0 {
+		if len(actions) == 0 {
+			return "No code actions offered by the language server for this file.", nil
+		}
+		var titles []string
+		for _, a := range actions {
+			if a.Title != "" {
+				titles = append(titles, a.Title)
+			}
+		}
+		return "Server offered actions without auto-applyable edits (commands only): " + strings.Join(titles, "; ") + ". Fix manually instead.", nil
+	}
+
+	// Prefer the server's preferred action (e.g. organize imports), else the
+	// first edit-bearing action.
+	chosen := editable[0]
+	for _, a := range editable {
+		if a.IsPreferred != nil && *a.IsPreferred {
+			chosen = a
+			break
+		}
+	}
+	applied, err := applyWorkspaceEdit(chosen.Edit)
+	if err != nil {
+		return "", fmt.Errorf("applying code action %q: %w", chosen.Title, err)
+	}
+	return fmt.Sprintf("Code action %q applied.\n%s", chosen.Title, applied), nil
+}
+
+// Rename renames the symbol under the cursor across the whole project using
+// the server's semantic rename, applying the resulting edits to disk. The
+// verification ladder catches anything the rename missed. Returns a per-file
+// summary of what changed.
+func (m *Manager) Rename(ctx context.Context, path string, line, col int, newName string) (string, error) {
+	c, err := m.clientFor(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	text, err := textAt(path)
+	if err != nil {
+		return "", err
+	}
+	if err := c.ensureOpen(ctx, path, text); err != nil {
+		return "", err
+	}
+
+	params := protocol.RenameParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(filepath.Clean(path))},
+			Position:     positionFor(line, col),
+		},
+		NewName: newName,
+	}
+	var we protocol.WorkspaceEdit
+	if _, err := c.conn.Call(ctx, "textDocument/rename", params, &we); err != nil {
+		return "", err
+	}
+	applied, err := applyWorkspaceEdit(&we)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Renamed %q across the project.\n%s", newName, applied), nil
+}
+
+// Symbols searches the whole workspace for symbols matching a name using
+// workspace/symbol — semantic lookup that does not need a cursor position
+// (unlike definition/references). path anchors the language server to use.
+func (m *Manager) Symbols(ctx context.Context, path, query string) (string, error) {
+	c, err := m.clientFor(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	params := protocol.WorkspaceSymbolParams{Query: query}
+	var syms protocol.WorkspaceSymbolSlice
+	if _, err := c.conn.Call(ctx, "workspace/symbol", params, &syms); err != nil {
+		return "", err
+	}
+	if len(syms) == 0 {
+		return "No symbols found.", nil
+	}
+	return formatSymbols(syms), nil
+}
+
+// Outline returns the hierarchical symbol tree of a file (functions, types,
+// methods, fields) via documentSymbol — a semantic map of a file's shape.
+func (m *Manager) Outline(ctx context.Context, path string) (string, error) {
+	c, err := m.clientFor(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	text, err := textAt(path)
+	if err != nil {
+		return "", err
+	}
+	if err := c.ensureOpen(ctx, path, text); err != nil {
+		return "", err
+	}
+	params := protocol.DocumentSymbolParams{
+		TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(filepath.Clean(path))},
+	}
+	var syms []protocol.DocumentSymbol
+	if _, err := c.conn.Call(ctx, "textDocument/documentSymbol", params, &syms); err != nil {
+		return "", err
+	}
+	if len(syms) == 0 {
+		return "No symbols found in file.", nil
+	}
+	return formatDocumentSymbols(syms), nil
+}
+
+// formatSymbols renders workspace symbol results as readable rows.
+func formatSymbols(syms []protocol.WorkspaceSymbol) string {
+	var out []string
+	for _, s := range syms {
+		loc := "?"
+		switch l := s.Location.(type) {
+		case *protocol.Location:
+			loc = fmt.Sprintf("%s:%d:%d", l.URI.FsPath(), l.Range.Start.Line+1, l.Range.Start.Character+1)
+		case *protocol.LocationUriOnly:
+			loc = l.URI.FsPath()
+		}
+		container := ""
+		if s.ContainerName != nil && *s.ContainerName != "" {
+			container = *s.ContainerName + " → "
+		}
+		out = append(out, fmt.Sprintf("%s%s (%s) — %s", container, s.Name, symbolKindLabel(s.Kind), loc))
+	}
+	if len(out) > maxLocations {
+		out = append(out[:maxLocations], fmt.Sprintf("... and %d more symbols", len(out)-maxLocations))
+	}
+	return strings.Join(out, "\n")
+}
+
+// formatDocumentSymbols renders a file's hierarchical symbol tree with
+// indentation, capped like the other format helpers.
+func formatDocumentSymbols(syms []protocol.DocumentSymbol) string {
+	var out []string
+	var walk func(syms []protocol.DocumentSymbol, depth int)
+	walk = func(syms []protocol.DocumentSymbol, depth int) {
+		for _, s := range syms {
+			out = append(out, fmt.Sprintf("%s%s %s — line %d",
+				strings.Repeat("  ", depth), symbolKindLabel(s.Kind), s.Name, s.Range.Start.Line+1))
+			walk(s.Children, depth+1)
+		}
+	}
+	walk(syms, 0)
+	if len(out) > maxLocations {
+		out = append(out[:maxLocations], fmt.Sprintf("... and %d more symbols", len(out)-maxLocations))
+	}
+	return strings.Join(out, "\n")
+}
+
+// symbolKindLabel renders an LSP symbol kind as a short human label.
+func symbolKindLabel(k protocol.SymbolKind) string {
+	switch k {
+	case protocol.SymbolKindFile:
+		return "file"
+	case protocol.SymbolKindModule:
+		return "module"
+	case protocol.SymbolKindNamespace:
+		return "namespace"
+	case protocol.SymbolKindPackage:
+		return "package"
+	case protocol.SymbolKindClass:
+		return "class"
+	case protocol.SymbolKindMethod:
+		return "method"
+	case protocol.SymbolKindProperty:
+		return "property"
+	case protocol.SymbolKindField:
+		return "field"
+	case protocol.SymbolKindConstructor:
+		return "constructor"
+	case protocol.SymbolKindEnum:
+		return "enum"
+	case protocol.SymbolKindInterface:
+		return "interface"
+	case protocol.SymbolKindFunction:
+		return "function"
+	case protocol.SymbolKindVariable:
+		return "variable"
+	case protocol.SymbolKindConstant:
+		return "constant"
+	case protocol.SymbolKindString:
+		return "string"
+	case protocol.SymbolKindNumber:
+		return "number"
+	case protocol.SymbolKindBoolean:
+		return "boolean"
+	case protocol.SymbolKindArray:
+		return "array"
+	case protocol.SymbolKindObject:
+		return "object"
+	case protocol.SymbolKindKey:
+		return "key"
+	case protocol.SymbolKindNull:
+		return "null"
+	case protocol.SymbolKindEnumMember:
+		return "enum-member"
+	case protocol.SymbolKindStruct:
+		return "struct"
+	case protocol.SymbolKindEvent:
+		return "event"
+	case protocol.SymbolKindOperator:
+		return "operator"
+	case protocol.SymbolKindTypeParameter:
+		return "type-param"
+	}
+	return "symbol"
+}

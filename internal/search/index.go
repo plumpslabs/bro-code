@@ -26,6 +26,7 @@ type GlobalIndex struct {
 	byName  map[string][]IndexedSymbol
 	files   []string
 	imports map[string]map[string]bool // file -> referenced module names (last path segments)
+	rag     *SymbolRAG
 }
 
 // BuildGlobalIndex walks root (skipping heavy/vendor dirs) and indexes every
@@ -34,6 +35,7 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 	g := &GlobalIndex{
 		byName:  map[string][]IndexedSymbol{},
 		imports: map[string]map[string]bool{},
+		rag:     NewSymbolRAG(),
 	}
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -60,6 +62,7 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 		syms, _ := ExtractSymbols(path)
 		for _, s := range syms {
 			g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: path, Line: s.Line})
+			g.rag.IndexSymbol(s.Name, path)
 		}
 		if refs := extractImportNames(path); len(refs) > 0 {
 			g.imports[path] = refs
@@ -69,6 +72,58 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 	})
 	sort.Strings(g.files)
 	return g
+}
+
+// RefreshFile re-indexes a single changed file so the session-wide index stays
+// current after edits — the index is no longer frozen at session start. Stale
+// symbol entries for the file are dropped, then fresh symbols are indexed.
+func (g *GlobalIndex) RefreshFile(path string) {
+	if g == nil {
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	g.rag.RemoveFile(abs)
+	for name, occs := range g.byName {
+		kept := occs[:0]
+		for _, o := range occs {
+			if o.File != abs {
+				kept = append(kept, o)
+			}
+		}
+		if len(kept) == 0 {
+			delete(g.byName, name)
+		} else {
+			g.byName[name] = kept
+		}
+	}
+	syms, err := ExtractSymbols(abs)
+	if err != nil {
+		return
+	}
+	for _, s := range syms {
+		g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: abs, Line: s.Line})
+		g.rag.IndexSymbol(s.Name, abs)
+	}
+}
+
+// ResolveSymbol returns the file that defines the given symbol using the
+// instant (<5ms) symbol index, or "" when unknown.
+func (g *GlobalIndex) ResolveSymbol(name string) (string, bool) {
+	if g == nil || g.rag == nil {
+		return "", false
+	}
+	return g.rag.Resolve(name)
+}
+
+// SymbolCount reports how many unique symbols the RAG index knows about.
+func (g *GlobalIndex) SymbolCount() int {
+	if g == nil || g.rag == nil {
+		return 0
+	}
+	return len(g.rag.symbols)
 }
 
 // Lookup returns every indexed occurrence of a symbol name (definitions and

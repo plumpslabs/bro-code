@@ -40,6 +40,10 @@ type AppConfig struct {
 	DefaultProvider string                          `json:"default_provider,omitempty"`
 	DefaultModel    string                          `json:"default_model,omitempty"`
 	Providers       map[string]CustomProviderConfig `json:"providers,omitempty"`
+	// FallbackPolicy controls automatic model routing when the primary fails:
+	// "auto" (default), "confirm" (ask before cross-vendor fallback), or
+	// "primary_only" (never fall back).
+	FallbackPolicy string `json:"fallback_policy,omitempty"`
 }
 
 // GlobalConfigPath returns the user's global config file path (machine-written

@@ -56,6 +56,7 @@ type Manager struct {
 	totalTokens  int
 	maxWindow    int
 	compactCount int
+	model        string // active model name; enables exact BPE token counting
 }
 
 // NewManager creates a context manager connected to SQLite store.
@@ -68,6 +69,15 @@ func NewManager(sessionID string, st *store.Store, maxTokens int) *Manager {
 		store:     st,
 		maxWindow: maxTokens,
 	}
+}
+
+// SetModel records the active model name so token estimation can use the
+// exact BPE tokenizer for that model's encoding (falls back to the heuristic
+// char-count estimator when the model is unset or the tokenizer is unavailable).
+func (m *Manager) SetModel(model string) {
+	m.mu.Lock()
+	m.model = model
+	m.mu.Unlock()
 }
 
 // SessionID returns active session ID.
@@ -118,7 +128,7 @@ func (m *Manager) AppendUserMessage(content string) error {
 	}
 	m.messages = append(m.messages, msg)
 
-	tokens := EstimateTokens(content)
+	tokens := m.estimateTokens(content)
 	m.totalTokens += tokens
 
 	if m.store != nil {
@@ -146,9 +156,9 @@ func (m *Manager) AppendAssistantTurn(mode, model, reasoning, content string, to
 	}
 	m.messages = append(m.messages, msg)
 
-	tokens := EstimateTokens(reasoning + content)
+	tokens := m.estimateTokens(reasoning + content)
 	for _, tc := range toolCalls {
-		tokens += EstimateTokens(tc.Name + tc.Arguments)
+		tokens += m.estimateTokens(tc.Name + tc.Arguments)
 	}
 	m.totalTokens += tokens
 
@@ -168,7 +178,7 @@ func (m *Manager) ImportUserMessage(content string) {
 	defer m.mu.Unlock()
 
 	m.messages = append(m.messages, provider.Message{Role: "user", Content: content})
-	m.totalTokens += EstimateTokens(content)
+	m.totalTokens += m.estimateTokens(content)
 }
 
 // ImportAssistantTurn restores an assistant turn into memory (tokens counted)
@@ -180,7 +190,7 @@ func (m *Manager) ImportAssistantTurn(mode, model, reasoning, content string, to
 	defer m.mu.Unlock()
 
 	m.messages = append(m.messages, provider.Message{Role: "assistant", Content: content, Reasoning: reasoning, ToolCalls: toolCalls, Mode: mode, Model: model})
-	m.totalTokens += EstimateTokens(reasoning + content)
+	m.totalTokens += m.estimateTokens(reasoning + content)
 }
 
 // ImportToolResult restores a tool result into memory (tokens counted)
@@ -196,7 +206,7 @@ func (m *Manager) ImportToolResult(toolCallID, content string) {
 		Content:    content,
 		ToolCallID: toolCallID,
 	})
-	m.totalTokens += EstimateTokens(content)
+	m.totalTokens += m.estimateTokens(content)
 }
 
 // maxToolResultContextChars caps how much of each tool result is kept in the
@@ -222,7 +232,7 @@ func (m *Manager) AppendToolResult(toolCallID, content string) error {
 	}
 	m.messages = append(m.messages, msg)
 
-	tokens := EstimateTokens(content)
+	tokens := m.estimateTokens(content)
 	m.totalTokens += tokens
 
 	if m.store != nil {
@@ -285,9 +295,9 @@ func (m *Manager) Compact(summary CompactionSummary) error {
 	m.compactCount++
 
 	// Recalculate tokens
-	newTokens := EstimateTokens(summaryText)
+	newTokens := m.estimateTokens(summaryText)
 	for _, msg := range tail {
-		newTokens += EstimateTokens(msg.Content + msg.Reasoning)
+		newTokens += m.estimateTokens(msg.Content + msg.Reasoning)
 	}
 	m.totalTokens = newTokens
 
@@ -313,12 +323,25 @@ func TruncateToolOutput(content string, maxChars int) string {
 	return content[:maxChars] + "\n\n[output truncated for context prevention]"
 }
 
-// estimateTokens approximates LLM token counts more accurately than a flat
-// len/4. Rough per-token character densities: English prose ≈4 chars/token,
+// estimateTokens (method) counts tokens for the active model using the exact
+// BPE tokenizer when a model is set (Manager.SetModel) and the tokenizer is
+// available; otherwise it falls back to the heuristic char-count estimator.
+// This keeps context-budget and compaction thresholds accurate for the model
+// actually serving the turn. Callers must hold m.mu (it reads m.model directly
+// and must not re-lock the non-reentrant mutex).
+func (m *Manager) estimateTokens(text string) int {
+	if m.model != "" {
+		if n := tokens.CountTokens(text, m.model); n > 0 {
+			return n
+		}
+	}
+	return tokens.EstimateTokens(text)
+}
+
 // EstimateTokens approximates LLM token counts cheaply and deterministically
 // (weighted per line: prose ≈4 chars/token, code ≈3.5, CJK ≈1.2). Kept here
-// as a thin wrapper over the leaf tokens package so existing callers and the
-// compaction thresholds stay unchanged.
+// as a thin wrapper over the leaf tokens package so existing external callers
+// and the compaction thresholds stay unchanged.
 func EstimateTokens(text string) int {
 	return tokens.EstimateTokens(text)
 }

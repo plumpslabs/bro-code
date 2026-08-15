@@ -81,12 +81,16 @@ func TestLoadOpenCodeConfigShape(t *testing.T) {
 	m := NewManager()
 	m.loadOpenCodeConfig()
 	names := m.ServerNames()
-	if len(names) != 1 || names[0] != "git" {
-		t.Fatalf("expected only stdio 'git' server (sse skipped), got %v", names)
+	if len(names) != 2 {
+		t.Fatalf("expected both stdio 'git' and sse 'http-only' servers, got %v", names)
 	}
 	cfg := m.configs["git"]
 	if cfg.Command != "npx" || len(cfg.Args) != 2 || cfg.Env["TOKEN"] != "abc" {
 		t.Fatalf("opencode config not parsed correctly: %+v", cfg)
+	}
+	sse := m.configs["http-only"]
+	if sse.Transport() != "sse" || sse.URL != "https://example.com" {
+		t.Fatalf("sse server not parsed correctly: %+v", sse)
 	}
 }
 
@@ -148,6 +152,39 @@ func TestLoadDefaultsNoOpenCode(t *testing.T) {
 		if n == "git" {
 			t.Errorf("opencode MCP block must be skipped when BROCODE_NO_OPENCODE=1")
 		}
+	}
+}
+
+func TestLoadFileHTTPTransport(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp.json")
+	data := `{
+		"mcpServers": {
+			"remote": {
+				"type": "http",
+				"url": "https://mcp.example.com/sse",
+				"headers": {"Authorization": "Bearer x"}
+			},
+			"legacy": {"url": "https://legacy.example.com/mcp"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager()
+	m.loadFile(path)
+	names := m.ServerNames()
+	if len(names) != 2 {
+		t.Fatalf("expected 2 http servers, got %v", names)
+	}
+	cfg := m.configs["remote"]
+	if cfg.Transport() != "http" || cfg.URL != "https://mcp.example.com/sse" || cfg.Headers["Authorization"] != "Bearer x" {
+		t.Fatalf("http server not parsed: %+v", cfg)
+	}
+	legacy := m.configs["legacy"]
+	if legacy.Transport() != "http" || legacy.URL != "https://legacy.example.com/mcp" {
+		t.Fatalf("url-only server should default to http: %+v", legacy)
 	}
 }
 

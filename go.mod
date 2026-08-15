@@ -10,9 +10,12 @@ require (
 	github.com/charmbracelet/glamour v0.8.0
 	github.com/hexops/gotextdiff v1.0.3
 	github.com/mark3labs/mcp-go v0.58.0
+	github.com/pkoukk/tiktoken-go v0.1.8
+	github.com/pkoukk/tiktoken-go-loader v0.0.2
 	go.lsp.dev/jsonrpc2 v1.0.1
 	go.lsp.dev/protocol v1.0.1
 	go.lsp.dev/uri v1.0.1
+	golang.org/x/term v0.39.0
 	modernc.org/sqlite v1.56.0
 )
 
@@ -54,7 +57,6 @@ require (
 	golang.org/x/net v0.27.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.39.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	modernc.org/libc v1.74.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

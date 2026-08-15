@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 // AnthropicAdapter implements ProviderAdapter for Anthropic API.
@@ -27,7 +26,7 @@ func NewAnthropicAdapter(baseURL, apiKey string) *AnthropicAdapter {
 	return &AnthropicAdapter{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
-		Client:  &http.Client{Timeout: 120 * time.Second},
+		Client:  NewStreamingHTTPClient(),
 	}
 }
 
@@ -200,8 +199,13 @@ func (a *AnthropicAdapter) Complete(ctx context.Context, req CompletionRequest) 
 		return nil, fmt.Errorf("failed to marshal anthropic request: %w", err)
 	}
 
+	// The streaming client has no total timeout by design; non-streaming
+	// Anthropic responses still need a wall-clock bound.
+	reqCtx, cancel := context.WithTimeout(ctx, TotalTimeout)
+	defer cancel()
+
 	endpoint := a.BaseURL + "/v1/messages"
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http request: %w", err)
 	}
@@ -222,7 +226,7 @@ func (a *AnthropicAdapter) Complete(ctx context.Context, req CompletionRequest) 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Anthropic API error HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var apiResp anthropicResponse

@@ -122,3 +122,56 @@ svc.findAll();
 		t.Errorf("unknown symbol should report not found: %q", idx.FormatLookup("NoSuchSymbolXYZ"))
 	}
 }
+
+// TestGlobalIndexResolveSymbolAndRefresh proves the SymbolRAG integration:
+// instant symbol→file resolution works after build, and RefreshFile re-indexes
+// a changed file so code_locate stays current after edits (index is no longer
+// frozen at session start).
+func TestGlobalIndexResolveSymbolAndRefresh(t *testing.T) {
+	dir := t.TempDir()
+	svc := filepath.Join(dir, "svc.go")
+	write := func(path, content string) {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(svc, "package svc\n\nfunc DoThing() {}\n")
+
+	idx := BuildGlobalIndex(dir)
+
+	// SymbolRAG fast-path resolves the symbol to its file.
+	file, ok := idx.ResolveSymbol("DoThing")
+	if !ok || !strings.Contains(file, "svc.go") {
+		t.Fatalf("ResolveSymbol(DoThing) = %q, %v — want svc.go, true", file, ok)
+	}
+	if idx.SymbolCount() == 0 {
+		t.Fatal("expected symbol count > 0 after build")
+	}
+
+	// RefreshFile drops the stale symbol and picks up the new one.
+	write(svc, "package svc\n\nfunc RenamedThing() {}\n")
+	idx.RefreshFile(svc)
+
+	if _, ok := idx.ResolveSymbol("DoThing"); ok {
+		t.Error("stale symbol DoThing must be removed after RefreshFile")
+	}
+	if _, ok := idx.ResolveSymbol("RenamedThing"); !ok {
+		t.Error("new symbol RenamedThing must be indexed after RefreshFile")
+	}
+	if len(idx.Lookup("DoThing")) > 0 {
+		t.Error("Lookup must not return stale DoThing occurrences after RefreshFile")
+	}
+	if len(idx.Lookup("RenamedThing")) == 0 {
+		t.Error("Lookup must return RenamedThing after RefreshFile")
+	}
+
+	// Nil receiver is safe.
+	var nilIdx *GlobalIndex
+	if _, ok := nilIdx.ResolveSymbol("x"); ok {
+		t.Error("nil index ResolveSymbol must report not-ok")
+	}
+	nilIdx.RefreshFile(svc) // must not panic
+	if nilIdx.SymbolCount() != 0 {
+		t.Error("nil index SymbolCount must be 0")
+	}
+}

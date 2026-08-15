@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/plumpslabs/bro-code/internal/loop"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
@@ -18,6 +19,9 @@ type fakeAdapter struct {
 	mu            sync.Mutex
 	callCount     int
 	maxToolRounds int
+	// reportUsage makes every completion report heavy token usage so cost
+	// budgets trip deterministically in tests.
+	reportUsage bool
 }
 
 // Complete inspects the incoming messages and either issues a tool call or
@@ -46,9 +50,15 @@ func (f *fakeAdapter) Complete(ctx context.Context, req provider.CompletionReque
 		}
 	}
 
+	usage := provider.Usage{}
+	if f.reportUsage {
+		usage = provider.Usage{PromptTokens: 200000, CompletionTokens: 200000, TotalTokens: 400000}
+	}
+
 	// Round 1: call the bash tool (safe command) to prove tool execution works.
 	if round == 1 {
 		return &provider.CompletionResponse{
+			Usage: usage,
 			ToolCalls: []provider.ToolCall{
 				{ID: "call_1", Name: "bash", Arguments: `{"command":"echo sub-ok"}`},
 			},
@@ -56,6 +66,7 @@ func (f *fakeAdapter) Complete(ctx context.Context, req provider.CompletionReque
 	}
 	// Round 2: answer, echoing the task and the tool result we saw.
 	return &provider.CompletionResponse{
+		Usage:   usage,
 		Content: fmt.Sprintf("SUBAGENT ANSWER for task %q | userMsgs=%d", task, userMsgs),
 	}, nil
 }
@@ -67,7 +78,9 @@ func (f *fakeAdapter) StreamComplete(ctx context.Context, req provider.Completio
 }
 
 // blockingAdapter tracks the max number of concurrent in-flight completions,
-// so the scout concurrency cap can be verified deterministically.
+// so the scout concurrency cap can be verified deterministically. It blocks
+// until the gate channel is closed/released, and respects context cancellation
+// so cancel tests can actually abort a running scout.
 type blockingAdapter struct {
 	mu   sync.Mutex
 	cur  int
@@ -82,7 +95,14 @@ func (b *blockingAdapter) Complete(ctx context.Context, req provider.CompletionR
 		b.max = b.cur
 	}
 	b.mu.Unlock()
-	<-b.gate
+	select {
+	case <-b.gate:
+	case <-ctx.Done():
+		b.mu.Lock()
+		b.cur--
+		b.mu.Unlock()
+		return nil, ctx.Err()
+	}
 	b.mu.Lock()
 	b.cur--
 	b.mu.Unlock()
@@ -378,5 +398,136 @@ func TestSubAgentToolTimeout(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Execute did not return after context cancellation")
+	}
+}
+
+// TestRunManyStreamsProgress verifies completed sub-agents emit an incremental
+// DONE/FAILED progress line instead of the caller waiting for the whole batch.
+func TestRunManyStreamsProgress(t *testing.T) {
+	f := &fakeAdapter{}
+	tools := tool.NewRegistry()
+	r := &Runner{Adapter: f, Model: "test-model", Tools: tools}
+
+	var mu sync.Mutex
+	var updates []string
+	onUpdate := func(st loop.LoopState, info string) {
+		mu.Lock()
+		updates = append(updates, info)
+		mu.Unlock()
+	}
+
+	reports, err := r.RunMany(context.Background(), []SubAgent{
+		{ID: "a", Task: "task alpha"},
+		{ID: "b", Task: "task beta"},
+	}, true, onUpdate)
+	if err != nil {
+		t.Fatalf("RunMany: %v", err)
+	}
+	if len(reports) != 2 {
+		t.Fatalf("reports = %d, want 2", len(reports))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(updates) < 2 {
+		t.Fatalf("expected >=2 progress updates, got %d: %v", len(updates), updates)
+	}
+	var doneCount int
+	for _, u := range updates {
+		if strings.Contains(u, "Sub-agent") && (strings.Contains(u, "DONE") || strings.Contains(u, "FAILED")) {
+			doneCount++
+		}
+	}
+	if doneCount < 2 {
+		t.Errorf("expected >=2 completion progress lines, got %d of %v", doneCount, updates)
+	}
+}
+
+// TestScoutCancelAbortsJob verifies Cancel() stops a running scout via its
+// context, and CancelAll() aborts every in-flight scout.
+func TestScoutCancelAbortsJob(t *testing.T) {
+	gate := make(chan struct{})
+	adapter := &blockingAdapter{gate: gate}
+	tools := tool.NewRegistry()
+	r := &Runner{Adapter: adapter, Model: "test-model", Tools: tools}
+	sm := NewScoutManager(r)
+
+	id, err := sm.Start(context.Background(), "cancel me")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Wait until the scout is blocked inside the adapter.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && adapter.maxConcurrent() < 1 {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sm.Cancel(id)
+
+	// The job must become done (with an error from the cancelled context).
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && sm.Pending() > 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := sm.Pending(); n != 0 {
+		t.Fatalf("%d scouts still pending after cancel", n)
+	}
+	close(gate) // release in case the cancel raced
+
+	reports := sm.Drain()
+	if len(reports) != 1 {
+		t.Fatalf("expected 1 report, got %d", len(reports))
+	}
+	if !strings.Contains(reports[0], "FAILED") {
+		t.Errorf("cancelled scout should report FAILED, got %q", reports[0])
+	}
+}
+
+// TestScoutCancelAll verifies CancelAll aborts every in-flight scout even when
+// none of their contexts would otherwise be cancelled.
+func TestScoutCancelAll(t *testing.T) {
+	gate := make(chan struct{})
+	adapter := &blockingAdapter{gate: gate}
+	tools := tool.NewRegistry()
+	r := &Runner{Adapter: adapter, Model: "test-model", Tools: tools}
+	sm := NewScoutManager(r)
+
+	for i := 0; i < 4; i++ {
+		if _, err := sm.Start(context.Background(), fmt.Sprintf("job %d", i)); err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && adapter.maxConcurrent() < 3 {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sm.CancelAll()
+	close(gate)
+
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && sm.Pending() > 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := sm.Pending(); n != 0 {
+		t.Fatalf("%d scouts still pending after CancelAll", n)
+	}
+}
+
+// TestSubAgentBudgetCap verifies a Runner.BudgetUSD > 0 is wired onto the
+// sub-agent engine so a runaway sub-agent is stopped by the cost budget.
+func TestSubAgentBudgetCap(t *testing.T) {
+	// usageAdapter reports heavy token usage on every completion, so a tiny
+	// budget trips the engine's hard cost-stop after the first completion.
+	usageAdapter := &fakeAdapter{reportUsage: true}
+	tools := tool.NewRegistry()
+	r := &Runner{Adapter: usageAdapter, Model: "test-model", Tools: tools, BudgetUSD: 0.0000001}
+
+	out, err := r.Run(context.Background(), "expensive task")
+	if err != nil {
+		t.Fatalf("Run with budget cap: %v", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Error("expected a graceful synthesized answer even under a tiny budget")
 	}
 }

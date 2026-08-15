@@ -333,3 +333,78 @@ func TestReviewLayer2CappedPerTurn(t *testing.T) {
 		t.Errorf("round 2 must skip Layer 2 (budget), got %q", out2)
 	}
 }
+
+func TestReviewDiagFnFlagsRealDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "app.go", "package main\n")
+
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	engine := NewEngine(&captureAdapter{}, tools, ctxMgr, "test-model")
+	engine.SetReviewLLM(false)
+	engine.SetDiagnosticsChecker(func(path string) string {
+		if path != p {
+			t.Errorf("diagFn called with %q, want %q", path, p)
+		}
+		return "warning 2:3  use fmt.Fprintf instead of WriteString"
+	})
+
+	engine.editedFiles = []string{p}
+	out := engine.reviewEditedFiles(context.Background())
+	if !strings.Contains(out, "fmt.Fprintf") {
+		t.Errorf("review should surface LSP diagnostics, got %q", out)
+	}
+}
+
+func TestReviewDiagFnSkipsCleanFiles(t *testing.T) {
+	// A clean file must NOT be reported: the diagnostics checker returns
+	// "No diagnostics reported for <path>." and that is not an issue.
+	dir := t.TempDir()
+	p := writeFile(t, dir, "app.go", "package main\n")
+
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+	engine := NewEngine(&captureAdapter{}, tools, ctxMgr, "test-model")
+	engine.SetReviewLLM(false)
+	engine.SetDiagnosticsChecker(func(path string) string {
+		return "No diagnostics reported for " + path + "."
+	})
+
+	engine.editedFiles = []string{p}
+	if out := engine.reviewEditedFiles(context.Background()); out != "" {
+		t.Errorf("clean LSP file must not be flagged, got %q", out)
+	}
+}
+
+func TestLocalizeVerifyFailure(t *testing.T) {
+	t.Run("nil checker → empty", func(t *testing.T) {
+		engine := NewEngine(&captureAdapter{}, tool.NewRegistry(), bcontext.NewManager("s", nil, 128000), "m")
+		engine.editedFiles = []string{"/tmp/a.go"}
+		if got := engine.localizeVerifyFailure(); got != "" {
+			t.Errorf("localizeVerifyFailure = %q, want empty", got)
+		}
+	})
+
+	t.Run("surfaces real diagnostics", func(t *testing.T) {
+		engine := NewEngine(&captureAdapter{}, tool.NewRegistry(), bcontext.NewManager("s", nil, 128000), "m")
+		engine.SetDiagnosticsChecker(func(path string) string {
+			return "error 1:1  undeclared name: baz"
+		})
+		engine.editedFiles = []string{"/tmp/a.go", "/tmp/b.go"}
+		got := engine.localizeVerifyFailure()
+		if !strings.Contains(got, "/tmp/a.go") || !strings.Contains(got, "undeclared name") {
+			t.Errorf("localizeVerifyFailure = %q, want file + diagnostic", got)
+		}
+	})
+
+	t.Run("skips clean files", func(t *testing.T) {
+		engine := NewEngine(&captureAdapter{}, tool.NewRegistry(), bcontext.NewManager("s", nil, 128000), "m")
+		engine.SetDiagnosticsChecker(func(path string) string {
+			return "No diagnostics reported for " + path + "."
+		})
+		engine.editedFiles = []string{"/tmp/a.go"}
+		if got := engine.localizeVerifyFailure(); got != "" {
+			t.Errorf("localizeVerifyFailure = %q, want empty for clean file", got)
+		}
+	})
+}

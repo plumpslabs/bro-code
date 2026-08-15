@@ -15,6 +15,8 @@ import (
 
 	"go.lsp.dev/protocol"
 	"go.lsp.dev/uri"
+
+	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
 // ---------------- Unit tests (pure functions) ----------------
@@ -179,6 +181,77 @@ func runFakeServer() {
 					"contents": map[string]any{"kind": "markdown", "value": "**hover docs**"},
 				})
 			}
+		case "textDocument/codeAction":
+			doc, _ := params["textDocument"].(map[string]any)
+			uri, _ := doc["uri"].(string)
+			// One preferred action that rewrites the first five characters.
+			if hasID {
+				reply(writer, id, []map[string]any{{
+					"title":       "Fix first word",
+					"isPreferred": true,
+					"kind":        "quickfix",
+					"edit": map[string]any{
+						"changes": map[string]any{
+							uri: []map[string]any{{
+								"range": map[string]any{
+									"start": map[string]any{"line": 0, "character": 0},
+									"end":   map[string]any{"line": 0, "character": 5},
+								},
+								"newText": "PACKA",
+							}},
+						},
+					},
+				}})
+			}
+		case "textDocument/rename":
+			doc, _ := params["textDocument"].(map[string]any)
+			uri, _ := doc["uri"].(string)
+			newName, _ := params["newName"].(string)
+			if hasID {
+				// Rename the identifier "foo" (line 0, chars 5-8).
+				reply(writer, id, map[string]any{
+					"changes": map[string]any{
+						uri: []map[string]any{{
+							"range": map[string]any{
+								"start": map[string]any{"line": 0, "character": 5},
+								"end":   map[string]any{"line": 0, "character": 8},
+							},
+							"newText": newName,
+						}},
+					},
+				})
+			}
+		case "workspace/symbol":
+			if hasID {
+				reply(writer, id, []map[string]any{{
+					"name":          "Foo",
+					"kind":          12,
+					"containerName": "pkg",
+					"location": map[string]any{
+						"uri": uri.File("/workspace/main.go").String(),
+						"range": map[string]any{
+							"start": map[string]any{"line": 1, "character": 0},
+							"end":   map[string]any{"line": 1, "character": 3},
+						},
+					},
+				}})
+			}
+		case "textDocument/documentSymbol":
+			if hasID {
+				reply(writer, id, []map[string]any{{
+					"name": "Foo",
+					"kind": 12,
+					"range": map[string]any{
+						"start": map[string]any{"line": 1, "character": 0},
+						"end":   map[string]any{"line": 1, "character": 3},
+					},
+					"selectionRange": map[string]any{
+						"start": map[string]any{"line": 1, "character": 0},
+						"end":   map[string]any{"line": 1, "character": 3},
+					},
+					"children": []map[string]any{},
+				}})
+			}
 		case "textDocument/didOpen", "textDocument/didChange":
 			doc, _ := params["textDocument"].(map[string]any)
 			uri, _ := doc["uri"].(string)
@@ -278,9 +351,13 @@ func notify(w *bufio.Writer, method string, params any) {
 
 // ---------------- Integration test against the fake server ----------------
 
-// fakeSpec replaces the built-in specs with a self re-executing binary.
+// fakeSpec replaces the built-in specs with a self re-executing binary and
+// restores the original specs after the test (specs is package-global, so
+// without the restore later tests would silently use the fake server).
 func fakeSpec(t *testing.T, lang string) {
 	t.Helper()
+	old := specs
+	t.Cleanup(func() { specs = old })
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -657,5 +734,120 @@ func TestLSPManagerCloseIdempotent(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close blocked")
+	}
+}
+
+// ---------------- CodeAction / Rename / Symbols / Outline ----------------
+
+func TestLSPCodeActionAppliesEdit(t *testing.T) {
+	fakeSpec(t, "go")
+	m := NewManager()
+	defer m.Close()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tool.ResetChanges()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := m.CodeAction(ctx, src)
+	if err != nil {
+		t.Fatalf("CodeAction: %v", err)
+	}
+	if !strings.Contains(out, "Fix first word") {
+		t.Errorf("CodeAction output = %q, want applied action title", out)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "PACKA") {
+		t.Errorf("file after CodeAction = %q, want PACKA applied", data)
+	}
+	// The edit must be recorded for the turn's diff/undo/verification.
+	changes := tool.PeekChanges()
+	if len(changes) != 1 || changes[0].Path != src || changes[0].Action != "modified" {
+		t.Errorf("RecordChange = %+v, want one modified change for %s", changes, src)
+	}
+}
+
+func TestLSPRename(t *testing.T) {
+	fakeSpec(t, "go")
+	m := NewManager()
+	defer m.Close()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte("func foo() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tool.ResetChanges()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := m.Rename(ctx, src, 1, 6, "bar")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if !strings.Contains(out, "Renamed \"bar\"") {
+		t.Errorf("Rename output = %q, want rename summary", out)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "func bar() {}\n" {
+		t.Errorf("file after Rename = %q, want %q", data, "func bar() {}\n")
+	}
+}
+
+func TestLSPSymbols(t *testing.T) {
+	fakeSpec(t, "go")
+	m := NewManager()
+	defer m.Close()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := m.Symbols(ctx, src, "Foo")
+	if err != nil {
+		t.Fatalf("Symbols: %v", err)
+	}
+	for _, want := range []string{"Foo", "pkg →", "function", "main.go:2:1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Symbols output = %q, missing %q", out, want)
+		}
+	}
+}
+
+func TestLSPOutline(t *testing.T) {
+	fakeSpec(t, "go")
+	m := NewManager()
+	defer m.Close()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := m.Outline(ctx, src)
+	if err != nil {
+		t.Fatalf("Outline: %v", err)
+	}
+	for _, want := range []string{"function Foo", "line 2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Outline output = %q, missing %q", out, want)
+		}
 	}
 }

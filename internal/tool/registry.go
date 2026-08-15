@@ -19,6 +19,7 @@ import (
 	"github.com/hexops/gotextdiff"
 	"github.com/hexops/gotextdiff/myers"
 	"github.com/hexops/gotextdiff/span"
+	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/search"
@@ -179,7 +180,9 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 	// Read-only mode policy (executor-level enforcement): mutating tools and
 	// bash are hard-blocked before any sandbox/gate logic. This backstops the
 	// engine-loop guards so even a path that bypasses them cannot mutate.
-	if r.readOnly && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file") {
+	// lsp_fix/lsp_rename write to disk through the LSP client, so they are
+	// blocked here too — read-only mode must be airtight.
+	if r.readOnly && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" || tc.Name == "lsp_fix" || tc.Name == "lsp_rename") {
 		return false, fmt.Sprintf("⚠️ [READ-ONLY MODE]: Tool '%s' is disabled in read-only mode (PLANNER/MINER). Switch to BUILDER (Shift+Tab) to modify code.", tc.Name), nil
 	}
 	if r.readOnlyBash && tc.Name == "bash" {
@@ -355,7 +358,8 @@ func (r *Registry) Definitions() []provider.ToolDefinition {
 func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (string, error) {
 	// Executor-level read-only enforcement: catches direct Execute calls that
 	// never pass through GateAction (sub-agents and other non-loop callers).
-	if r.readOnly && (name == "write_file" || name == "edit_file" || name == "delete_file") {
+	// lsp_fix/lsp_rename mutate files, so they are read-only-blocked too.
+	if r.readOnly && (name == "write_file" || name == "edit_file" || name == "delete_file" || name == "lsp_fix" || name == "lsp_rename") {
 		return "", fmt.Errorf("tool '%s' is disabled in read-only mode (PLANNER/MINER): switch to BUILDER to modify code", name)
 	}
 	if r.readOnlyBash && name == "bash" {
@@ -412,8 +416,10 @@ func (r *Registry) SubRegistry() *Registry {
 // ReadFileTool
 type ReadFileTool struct{}
 
-func (t *ReadFileTool) Name() string        { return "read_file" }
-func (t *ReadFileTool) Description() string { return "Read file contents with optional line range" }
+func (t *ReadFileTool) Name() string { return "read_file" }
+func (t *ReadFileTool) Description() string {
+	return "Read file contents with optional line range or AST shrinkwrap mode"
+}
 func (t *ReadFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -421,15 +427,17 @@ func (t *ReadFileTool) Parameters() map[string]any {
 			"path":       map[string]any{"type": "string", "description": "Relative or absolute file path"},
 			"start_line": map[string]any{"type": "integer", "description": "1-based start line (optional)"},
 			"end_line":   map[string]any{"type": "integer", "description": "1-based end line (optional)"},
+			"shrinkwrap": map[string]any{"type": "boolean", "description": "When true, returns an AST-compressed view of a large file: signatures, types, imports and docstrings retained, bodies stripped (~70% token reduction). Use to understand a big file's structure in one read instead of many range reads."},
 		},
 		"required": []string{"path"},
 	}
 }
 func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
-		Path      string `json:"path"`
-		StartLine int    `json:"start_line"`
-		EndLine   int    `json:"end_line"`
+		Path       string `json:"path"`
+		StartLine  int    `json:"start_line"`
+		EndLine    int    `json:"end_line"`
+		Shrinkwrap bool   `json:"shrinkwrap"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
@@ -465,6 +473,17 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 			return "", fmt.Errorf("start_line out of bounds")
 		}
 		return strings.Join(lines[start:end], "\n"), nil
+	}
+
+	// Explicit AST shrinkwrap: an optional whole-file structural overview for
+	// large files. The model opts in (shrinkwrap:true) instead of falling back
+	// to many range reads when it only needs signatures, types and structure.
+	if args.Shrinkwrap {
+		compressed := bcontext.ShrinkwrapAST(string(data), args.Path)
+		if len(lines) > 150 {
+			return CapOutput(fmt.Sprintf("%s\n\n[AST shrinkwrap view of %d lines — function bodies omitted. Use read_file with start_line/end_line for specific bodies.]", compressed, len(lines))), nil
+		}
+		return CapOutput(compressed), nil
 	}
 
 	// Window is 250 lines (not 100): a larger first read means a big file needs

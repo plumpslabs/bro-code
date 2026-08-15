@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -658,7 +659,7 @@ func (m *Model) buildFallbacks() []loop.Fallback {
 		if model == "" {
 			model = "deepseek-v4-flash-free"
 		}
-		fbs = append(fbs, loop.Fallback{Adapter: a, Model: model})
+		fbs = append(fbs, loop.Fallback{ID: d.Info.ID, Protocol: d.Info.Protocol, Adapter: a, Model: model})
 	}
 	return fbs
 }
@@ -720,6 +721,13 @@ func (m *Model) rebuildEngine() {
 		m.usage.Record(paths)
 		m.usage.Save()
 	})
+	// Keep the session symbol index fresh after edits so code_locate answers
+	// stay current instead of reflecting only session-start state.
+	m.engine.SetOnFileEdited(func(path string) {
+		if m.globalIndex != nil {
+			m.globalIndex.RefreshFile(path)
+		}
+	})
 	// Available skills (.agents/skills, .brocode/skills, global) are listed in
 	// the system prompt so the model knows what it can load and use — the
 	// general, tool-agnostic standard (never .opencode/ config in the repo).
@@ -750,6 +758,11 @@ func (m *Model) rebuildEngine() {
 	for _, fb := range m.buildFallbacks() {
 		m.engine.AddFallback(fb)
 	}
+	// Adaptive routing identity + policy: health tracking keys off the active
+	// provider ID, cross-vendor confirmation compares protocols, and the
+	// routing policy comes from config (auto / confirm / primary_only).
+	m.engine.SetPrimaryIdentity(m.activeProvider.Info.ID, m.activeProvider.Info.Protocol)
+	m.engine.SetFallbackPolicy(m.cfg.FallbackPolicy)
 	// User-defined lifecycle hooks (.brocode/hooks.json) fire at turn
 	// start/end/error and around tool calls. Loaded lazily on first engine
 	// build; engine is rebuilt on model switches but hooks are cheap to reload.
@@ -949,6 +962,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if reason != "" && len(reason) < 300 {
 					msg += "\nReason: " + reason
 				}
+				// Adaptive routing status: the circuit breaker's cooldown means
+				// the primary is temporarily skipped (it will be retried
+				// automatically), and the running fallback count shows whether
+				// this is a one-off blip or a persistent condition.
+				if cd := m.engine.PrimaryCooldownRemaining(); cd > 0 {
+					msg += fmt.Sprintf("\nPrimary is cooling down (%s) — will be retried automatically.", cd.Round(time.Second))
+				}
+				if n := m.engine.FallbackCount(); n > 1 {
+					msg += fmt.Sprintf("\nFallbacks so far this session: %d turn(s).", n)
+				}
 				m.appendMessages(msg)
 			}
 			m.status = "Ready"
@@ -960,6 +983,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// with ctrl+f. Appended even on error/interrupt so partial edits are
 		// never silently lost.
 		if ch := tool.TakeChanges(); len(ch) > 0 {
+			// Persist the change list to the session event log so a future
+			// /resume or audit can reconstruct what a turn touched (the changes
+			// are otherwise ephemeral — in-memory only between turns).
+			if st := m.context.Store(); st != nil {
+				if payload, err := json.Marshal(ch); err == nil {
+					_, _ = st.AppendEvent(m.context.SessionID(), "file_changes", string(payload), 0)
+				}
+			}
 			if files := tool.FileChangesMessage(ch); files != "" {
 				m.filesExpanded = false
 				m.appendMessages(files)
@@ -1224,6 +1255,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancelTurn()
 				m.cancelTurn = nil
 			}
+			if m.scoutMgr != nil {
+				m.scoutMgr.CancelAll()
+			}
 			return m, tea.Quit
 
 		case "tab", "shift+tab":
@@ -1294,6 +1328,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cancelTurn != nil {
 					m.cancelTurn()
 					m.cancelTurn = nil
+				}
+				// Background scouts inherit the turn context, so cancelling the
+				// turn above already aborts their goroutines; CancelAll is the
+				// explicit backstop for scouts whose context outlived the turn.
+				if m.scoutMgr != nil {
+					m.scoutMgr.CancelAll()
 				}
 				m.interrupted = true
 				m.activity = nil

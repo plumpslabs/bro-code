@@ -152,6 +152,12 @@ func TestFuzzyLoopBreakMixedFamiliesResets(t *testing.T) {
 // never propose what it cannot see.
 func TestToolsForModeStructuralPruning(t *testing.T) {
 	e, _ := newEngineWith(&scriptedAdapter{})
+	// The engine's bare test registry has no LSP tools; register stubs so the
+	// pruning rules (which mirror real registration in cmd/brocode) are
+	// exercised for the disk-mutating LSP tools too.
+	for _, name := range []string{"lsp_fix", "lsp_rename"} {
+		e.tools.Register(&stubTool{name: name})
+	}
 
 	names := func(defs []provider.ToolDefinition) map[string]bool {
 		m := map[string]bool{}
@@ -162,14 +168,14 @@ func TestToolsForModeStructuralPruning(t *testing.T) {
 	}
 
 	builder := names(e.toolsForMode("BUILDER"))
-	for _, mut := range []string{"write_file", "edit_file", "delete_file", "bash"} {
+	for _, mut := range []string{"write_file", "edit_file", "delete_file", "bash", "lsp_fix", "lsp_rename"} {
 		if !builder[mut] {
 			t.Errorf("BUILDER must expose %q, it was pruned", mut)
 		}
 	}
 
 	miner := names(e.toolsForMode("MINER"))
-	for _, mut := range []string{"write_file", "edit_file", "delete_file"} {
+	for _, mut := range []string{"write_file", "edit_file", "delete_file", "lsp_fix", "lsp_rename"} {
 		if miner[mut] {
 			t.Errorf("MINER must not expose %q", mut)
 		}
@@ -182,7 +188,7 @@ func TestToolsForModeStructuralPruning(t *testing.T) {
 	}
 
 	planner := names(e.toolsForMode("PLANNER"))
-	for _, mut := range []string{"write_file", "edit_file", "delete_file", "bash"} {
+	for _, mut := range []string{"write_file", "edit_file", "delete_file", "bash", "lsp_fix", "lsp_rename"} {
 		if planner[mut] {
 			t.Errorf("PLANNER must not expose %q", mut)
 		}
@@ -190,4 +196,18 @@ func TestToolsForModeStructuralPruning(t *testing.T) {
 	if !planner["read_file"] {
 		t.Error("PLANNER must keep read_file")
 	}
+}
+
+// stubTool is a minimal Tool implementation used to register tools that real
+// engines would wire up (e.g. the LSP tools) so mode-pruning tests can assert
+// they are exposed/pruned correctly.
+type stubTool struct {
+	name string
+}
+
+func (s *stubTool) Name() string               { return s.name }
+func (s *stubTool) Description() string        { return "stub " + s.name }
+func (s *stubTool) Parameters() map[string]any { return map[string]any{} }
+func (s *stubTool) Execute(_ context.Context, _ string) (string, error) {
+	return "", nil
 }

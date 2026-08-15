@@ -172,7 +172,7 @@ func (r *Runner) runCase(ctx context.Context, c Case) Result {
 	res.Answer = answer
 	res.Iterations = iterations
 	res.Tokens = ctxMgr.TotalTokens()
-	res.CostUSD = provider.EstimateCostUSD(r.Model, ctxMgr.TotalTokens(), tokens.EstimateTokens(answer))
+	res.CostUSD = provider.EstimateCostUSD(r.Model, ctxMgr.TotalTokens(), tokens.CountTokens(answer, r.Model))
 
 	// Verification script (optional; empty verify = pass by completing).
 	if strings.TrimSpace(c.Verify) == "" {

@@ -59,9 +59,30 @@ type AgentTurn struct {
 // Fallback is an alternative adapter+model pair tried when the primary
 // provider fails (automatic model routing).
 type Fallback struct {
-	Adapter provider.ProviderAdapter
-	Model   string
+	// ID is a stable provider identity (e.g. "groq", "opencode") used for
+	// health tracking in the adaptive router.
+	ID string
+	// Protocol is the wire protocol ("anthropic" / "openai-compatible"), used
+	// by the "confirm" fallback policy to ask only when the fallback is a
+	// different vendor than the primary.
+	Protocol string
+	Adapter  provider.ProviderAdapter
+	Model    string
 }
+
+// FallbackPolicy controls automatic model routing when the primary provider
+// fails mid-turn.
+const (
+	// FallbackAuto (default): retry the primary once on transient errors, then
+	// route to the next healthy fallback, skipping providers in cooldown.
+	FallbackAuto = "auto"
+	// FallbackConfirm asks the user before serving a fallback from a DIFFERENT
+	// vendor than the primary; same-vendor fallbacks route automatically.
+	FallbackConfirm = "confirm"
+	// FallbackPrimaryOnly never falls back — a primary failure ends the turn
+	// with an error.
+	FallbackPrimaryOnly = "primary_only"
+)
 
 // ScoutDrainer delivers completed background research findings. Implemented by
 // *subagent.ScoutManager; defined here as an interface to avoid an import
@@ -93,6 +114,16 @@ type Engine struct {
 	fallbacks       []Fallback
 	streamHandler   func(delta string)
 	progressHandler TurnOutputHandler
+	// Adaptive routing state: primaryID/primaryProtocol identify the active
+	// provider for health tracking and cross-vendor confirmation; health is the
+	// per-provider circuit breaker; fallbackPolicy is the user's routing
+	// preference (auto / confirm / primary_only); fallbackCount counts how many
+	// turns a fallback had to serve (surfaced in the UI banner).
+	primaryID       string
+	primaryProtocol string
+	health          *providerHealth
+	fallbackPolicy  string
+	fallbackCount   int
 	// lastFallback records the fallback model actually used in the most recent
 	// turn ("" when the primary provider served the turn). The UI surfaces it
 	// persistently in the history so a turn answered by a fallback provider is
@@ -158,6 +189,10 @@ type Engine struct {
 	// searched, edited) so the UI can persist cross-session usage counts — the
 	// "the more BroCode is used, the smarter it gets" layer.
 	usageFn func(paths []string)
+	// onFileEdited, when set, is called after a write/edit tool succeeds with
+	// the edited file path — lets the UI refresh the session-wide symbol index
+	// so code_locate stays current instead of serving a stale session-start view.
+	onFileEdited func(path string)
 	// editedFiles tracks the paths the model wrote or edited this turn so the
 	// convention checker can review them before the turn is declared done.
 	editedFiles []string
@@ -345,11 +380,36 @@ func (e *Engine) SetUsageRecorder(fn func(paths []string)) {
 	e.usageFn = fn
 }
 
+// SetOnFileEdited wires a callback invoked whenever a write/edit tool succeeds,
+// so the host can keep session-scoped caches (e.g. the symbol index) fresh.
+func (e *Engine) SetOnFileEdited(fn func(path string)) {
+	e.onFileEdited = fn
+}
+
 // SetDiagnosticsChecker wires a native type-error checker (the UI provides
 // one backed by the LSP manager). It runs on edited files after the
 // convention review, catching type errors without waiting for a full build.
 func (e *Engine) SetDiagnosticsChecker(fn func(path string) string) {
 	e.diagFn = fn
+}
+
+// localizeVerifyFailure enriches a CLI verification failure with LSP
+// diagnostics from the edited files, so the repair loop sees a structured
+// file:line view alongside the raw build output — errors the CLI buries in a
+// wall of text become actionable. Best-effort: no checker wired (or a clean
+// file) means no localization, never a new failure.
+func (e *Engine) localizeVerifyFailure() string {
+	if e.diagFn == nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, p := range e.editedFiles {
+		if out := e.diagFn(p); out != "" && !strings.HasPrefix(out, "No diagnostics") {
+			sb.WriteString("• " + p + "\n")
+			sb.WriteString(out + "\n")
+		}
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
 }
 
 // SetReviewLLM toggles the senior-level LLM code review (Layer 2) that runs
@@ -380,6 +440,39 @@ func (e *Engine) AddFallback(fb Fallback) {
 	e.fallbacks = append(e.fallbacks, fb)
 }
 
+// SetPrimaryIdentity tells the router which provider is the active primary and
+// its wire protocol, so health tracking keys correctly and the "confirm"
+// policy can distinguish cross-vendor fallbacks.
+func (e *Engine) SetPrimaryIdentity(id, protocol string) {
+	e.primaryID = id
+	e.primaryProtocol = protocol
+}
+
+// SetFallbackPolicy sets the routing policy (FallbackAuto / FallbackConfirm /
+// FallbackPrimaryOnly). The default is FallbackAuto.
+func (e *Engine) SetFallbackPolicy(policy string) {
+	if policy == "" {
+		policy = FallbackAuto
+	}
+	e.fallbackPolicy = policy
+}
+
+// FallbackCount returns how many turns a fallback provider has served.
+func (e *Engine) FallbackCount() int {
+	return e.fallbackCount
+}
+
+// PrimaryCooldownRemaining reports how long the primary provider is currently
+// cooling down from recent failures (0 when healthy). While positive, the
+// router skips the primary and goes straight to a healthy fallback.
+func (e *Engine) PrimaryCooldownRemaining() time.Duration {
+	if e.health == nil {
+		return 0
+	}
+	_, rem := e.health.inCooldown(e.primaryID)
+	return rem
+}
+
 // SetStreamHandler wires a callback receiving content deltas while the model
 // streams its answer. Nil disables streaming (adapters fall back to Complete).
 func (e *Engine) SetStreamHandler(fn func(delta string)) {
@@ -393,6 +486,9 @@ func (e *Engine) SetAskHandler(fn func(question string, options []string) (strin
 
 // NewEngine creates an agent loop engine instance.
 func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *bcontext.Manager, model string) *Engine {
+	if ctxMgr != nil {
+		ctxMgr.SetModel(model)
+	}
 	return &Engine{
 		adapter:           adapter,
 		tools:             tools,
@@ -405,6 +501,8 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		state:             StateThinking,
 		usage:             NewUsageTracker(),
 		reviewLLMEnabled:  true,
+		health:            newProviderHealth(),
+		fallbackPolicy:    FallbackAuto,
 	}
 }
 
@@ -675,6 +773,12 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		}
 		sysPrompt := e.sysPromptCached
 
+		// Deliver any scout findings that finished since the last iteration —
+		// a scout started mid-turn reaches the model at the NEXT reasoning step
+		// instead of only at the next turn's start. (Turn start also drains, so
+		// findings parked while the loop was idle still arrive.)
+		e.drainScouts(onUpdate)
+
 		adaptiveCap := CalculateAdaptiveToolBudget(e.context.LastUserPrompt(), e.Mode())
 		if e.toolOnlyRounds >= adaptiveCap && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute) {
 			if onUpdate != nil {
@@ -734,12 +838,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 
 		// Auto-compact context if token count exceeds threshold
 		if e.context.NeedsCompaction() {
-			summary := bcontext.CompactionSummary{
-				Goal:           "Continue active conversation",
-				FilesTouched:   []string{"codebase"},
-				DecisionsMade:  []string{"Compacted older context turns to preserve memory window"},
-				OpenQuestions:  []string{"Proceed with user request"},
-				LastKnownState: "Context compacted successfully",
+			// Prefer a model-written summary (preserves real context); fall back
+			// to a deterministic placeholder on any failure so compaction never
+			// blocks the turn.
+			summary, ok := e.modelCompactionSummary(ctx)
+			if !ok {
+				summary = bcontext.CompactionSummary{
+					Goal:           "Continue active conversation",
+					FilesTouched:   []string{"codebase"},
+					DecisionsMade:  []string{"Compacted older context turns to preserve memory window"},
+					OpenQuestions:  []string{"Proceed with user request"},
+					LastKnownState: "Context compacted successfully",
+				}
 			}
 			_ = e.context.Compact(summary)
 			// Auto-extract: durable session context is merged into project
@@ -764,28 +874,13 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			onUpdate(e.state, "Thinking & analyzing request...")
 		}
 
-		resp, err := e.complete(ctx, req)
+		resp, fbModel, err := e.completeTurn(ctx, req, onUpdate)
 		if err != nil {
-			// Automatic model routing: try each fallback provider in order.
-			// Remember WHY the primary failed so the UI can surface it.
-			primaryErr := err
-			for _, fb := range e.fallbacks {
-				fbReq := req
-				fbReq.Model = fb.Model
-				resp, err = e.completeWith(ctx, fb.Adapter, fbReq)
-				if err == nil {
-					e.lastFallback = fb.Model
-					e.lastFallbackReason = primaryErr.Error()
-					if onUpdate != nil {
-						onUpdate(e.state, fmt.Sprintf("⚠️ Primary provider failed — using fallback model %s", fb.Model))
-					}
-					break
-				}
-			}
-			if resp == nil {
-				e.state = StateFailed
-				return "", fmt.Errorf("LLM completion failed: %w", err)
-			}
+			e.state = StateFailed
+			return "", err
+		}
+		if fbModel != "" {
+			e.lastFallback = fbModel
 		}
 
 		// Remember the model's last reasoning so a tool-budget abort can tell
@@ -1042,6 +1137,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" {
 						if p := extractToolPath(pending[i].tc.Arguments); p != "" {
 							e.editedFiles = append(e.editedFiles, p)
+							// Keep the session symbol index current after real edits.
+							if e.onFileEdited != nil && err == nil {
+								e.onFileEdited(p)
+							}
 						}
 					}
 
@@ -1121,7 +1220,11 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 					return msg, nil
 				}
-				_ = e.context.AppendUserMessage("Level 1 verification check failed:\n" + vetErr + "\nPlease fix the issues.")
+				msg := "Level 1 verification check failed:\n" + vetErr + "\nPlease fix the issues."
+				if localized := e.localizeVerifyFailure(); localized != "" {
+					msg += "\n\nLSP-localized view of the failing files (from the language server):\n" + localized
+				}
+				_ = e.context.AppendUserMessage(msg)
 				continue
 			}
 			// Verification passed after a previous failure: the repair
@@ -1311,7 +1414,7 @@ Engine Mode Rules (%s):
 5. REUSE FIRST: before writing new code, use code_locate and search_code to check whether the symbol/function already exists — reimplementing existing code wastes tokens and creates duplicates. Report what you reused.
 6. TYPE SAFETY & PERFORMANCE: treat type errors as blockers — fix them after the auto-verification (build/typecheck) flags them. Avoid N+1 queries, SELECT *, missing WHERE on updates/deletes, string-built SQL (injection), quadratic loops, and unbounded fetches.
 7. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony, no new abstractions. Extract a helper only at 3+ uses; keep a file under ~300 LOC; inline one-off logic. Over-engineering is a review finding.
-8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools are selective: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth, and run lsp_scan at most once per task.
+8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth and run lsp_scan at most once per task; but lsp_rename is the right tool for project-wide symbol renames, lsp_fix auto-applies quick-fixes (imports, organize), and lsp_symbols/lsp_outline find symbols by name without guessing a cursor position. LSP diagnostics also run automatically on your edited files after verification.
 9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.
 10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.`
 	}
@@ -1320,12 +1423,13 @@ Engine Mode Rules (%s):
 
 // toolsForMode returns the tool surface exposed to the model for the current
 // mode. Structural pruning: read-only modes (PLANNER, MINER) simply DO NOT
-// receive the mutating tools — write_file/edit_file/delete_file are never
-// offered, so the model cannot propose them, cannot waste rounds on guard
-// messages, and pays fewer schema tokens per request. PLANNER additionally
-// drops bash entirely. BUILDER gets the full surface. The runtime mode guards
-// stay as a backstop (MCP/subagent tools bypass this filter), but the LLM is
-// never tempted by tools its mode forbids.
+// receive the mutating tools — write_file/edit_file/delete_file (and the LSP
+// tools that write to disk, lsp_fix/lsp_rename) are never offered, so the
+// model cannot propose them, cannot waste rounds on guard messages, and pays
+// fewer schema tokens per request. PLANNER additionally drops bash entirely.
+// BUILDER gets the full surface. The runtime mode guards stay as a backstop
+// (MCP/subagent tools bypass this filter), but the LLM is never tempted by
+// tools its mode forbids.
 func (e *Engine) toolsForMode(mode string) []provider.ToolDefinition {
 	defs := e.tools.Definitions()
 	if mode == "BUILDER" {
@@ -1335,6 +1439,8 @@ func (e *Engine) toolsForMode(mode string) []provider.ToolDefinition {
 		"write_file":  true,
 		"edit_file":   true,
 		"delete_file": true,
+		"lsp_fix":     true,
+		"lsp_rename":  true,
 	}
 	if mode == "PLANNER" {
 		exclude["bash"] = true
@@ -1542,6 +1648,109 @@ func (e *Engine) complete(ctx context.Context, req provider.CompletionRequest) (
 	return e.completeWith(ctx, e.adapter, req)
 }
 
+// modelCompactionSummary asks the active model to write the structured 5-part
+// compaction summary from the messages that are about to be dropped. Returns
+// ok=false on any failure (network, bad JSON, empty) so the caller falls back
+// to the deterministic boilerplate summary — compaction must never break a turn.
+func (e *Engine) modelCompactionSummary(ctx context.Context) (bcontext.CompactionSummary, bool) {
+	msgs := e.context.Messages()
+	if len(msgs) == 0 {
+		return bcontext.CompactionSummary{}, false
+	}
+
+	// Compact() keeps the last 4 messages; summarize exactly what gets dropped.
+	keep := 4
+	if len(msgs) <= keep {
+		keep = 0
+	}
+	drop := msgs[:len(msgs)-keep]
+
+	transcript := compactionTranscript(drop)
+	if strings.TrimSpace(transcript) == "" {
+		return bcontext.CompactionSummary{}, false
+	}
+
+	prompt := "You are summarizing an ongoing software-agent conversation for context compaction. " +
+		"Below is the transcript that is about to be compacted away. Produce a concise structured summary " +
+		"that captures everything a continuing agent still needs to know. " +
+		"Respond with ONLY a JSON object (no markdown fences, no prose) using EXACTLY this schema:\n" +
+		"{\"goal\": string, \"files_touched\": [string], \"decisions_made\": [string], " +
+		"\"open_questions\": [string], \"last_known_state\": string}\n\n" +
+		"TRANSCRIPT TO COMPACT:\n" + transcript
+
+	summCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+
+	resp, err := e.adapter.Complete(summCtx, provider.CompletionRequest{
+		Model:       e.model,
+		Messages:    []provider.Message{{Role: "user", Content: prompt}},
+		Temperature: 0.2,
+	})
+	if err != nil {
+		return bcontext.CompactionSummary{}, false
+	}
+	if resp == nil || strings.TrimSpace(resp.Content) == "" {
+		return bcontext.CompactionSummary{}, false
+	}
+
+	summary, ok := parseCompactionJSON(resp.Content)
+	if !ok {
+		return bcontext.CompactionSummary{}, false
+	}
+	if strings.TrimSpace(summary.Goal) == "" && strings.TrimSpace(summary.LastKnownState) == "" {
+		return bcontext.CompactionSummary{}, false
+	}
+	return summary, true
+}
+
+// compactionTranscript renders the to-be-dropped messages as a bounded text
+// transcript so a summarizing model sees real context without re-bloating the
+// window we are trying to shrink.
+func compactionTranscript(msgs []provider.Message) string {
+	var sb strings.Builder
+	const maxTranscriptChars = 60000
+	for _, m := range msgs {
+		role := m.Role
+		if m.ToolCallID != "" {
+			role = "tool_result"
+		}
+		part := role + ": "
+		if m.Content != "" {
+			part += m.Content
+		}
+		if len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				part += fmt.Sprintf("\n  [tool_call %s(%s)]", tc.Name, tc.Arguments)
+			}
+		}
+		if sb.Len()+len(part) > maxTranscriptChars {
+			sb.WriteString("\n...[transcript truncated for compaction]...")
+			break
+		}
+		sb.WriteString(part)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// parseCompactionJSON extracts a CompactionSummary from a model reply, tolerating
+// surrounding markdown fences and stray prose before/after the JSON object.
+func parseCompactionJSON(raw string) (bcontext.CompactionSummary, bool) {
+	start := strings.IndexByte(raw, '{')
+	if start < 0 {
+		return bcontext.CompactionSummary{}, false
+	}
+	end := strings.LastIndexByte(raw, '}')
+	if end < start {
+		return bcontext.CompactionSummary{}, false
+	}
+	var summary bcontext.CompactionSummary
+	if err := json.Unmarshal([]byte(raw[start:end+1]), &summary); err != nil {
+		return bcontext.CompactionSummary{}, false
+	}
+	return summary, true
+}
+
 func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
 	// Snapshot the live handlers ONCE. Progressing adapters (e.g. the opencode
 	// CLI) forward output from their own goroutines that can outlive this call:
@@ -1579,6 +1788,120 @@ func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, r
 		e.costUSD += provider.EstimateCostUSD(req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 	return resp, nil
+}
+
+// completeTurn runs a completion through the adaptive router. It returns the
+// response, plus the fallback model that served it ("" when the primary
+// answered). Routing policy (see FallbackPolicy): retry the primary once on
+// transient errors, skip providers in cooldown, and honor the user's
+// fallback policy. Every non-2xx/network outcome feeds the circuit breaker so
+// a chronically failing provider is skipped on later turns instead of burning
+// a full timeout each time.
+func (e *Engine) completeTurn(ctx context.Context, req provider.CompletionRequest, onUpdate TurnOutputHandler) (*provider.CompletionResponse, string, error) {
+	// Fast path: the primary is cooling down from a recent failure — don't
+	// burn a full timeout on it again; go straight to the first healthy
+	// fallback. The cooldown is a hint, not a hard block: if nothing is
+	// available we still try the primary as a last resort.
+	if cd, _ := e.health.inCooldown(e.primaryID); cd {
+		if resp, fb, fbErr := e.tryFallbacks(ctx, req, onUpdate); resp != nil {
+			return resp, fb, nil
+		} else if fbErr != nil {
+			return nil, "", fbErr
+		}
+		// fall through → try the primary anyway
+	}
+
+	resp, err := e.complete(ctx, req)
+	if err == nil {
+		e.health.recordSuccess(e.primaryID)
+		return resp, "", nil
+	}
+
+	primaryErr := err
+	e.health.recordFailure(e.primaryID)
+	if e.fallbackPolicy == FallbackPrimaryOnly {
+		return nil, "", primaryErr
+	}
+
+	// A transient primary failure (stream stall, timeout, 429/5xx) deserves
+	// ONE retry on the same provider before switching models. Permanent errors
+	// (auth, invalid model, user ESC) are never retried.
+	if provider.IsRetryable(err) {
+		if resp, err := e.complete(ctx, req); err == nil {
+			e.health.recordSuccess(e.primaryID)
+			return resp, "", nil
+		}
+	}
+
+	// Primary still failing — route to the next healthy fallback.
+	e.lastFallbackReason = primaryErr.Error()
+	if resp, fb, fbErr := e.tryFallbacks(ctx, req, onUpdate); resp != nil {
+		return resp, fb, nil
+	} else if fbErr != nil {
+		return nil, "", fbErr
+	}
+	return nil, "", primaryErr
+}
+
+// tryFallbacks routes the completion to the first healthy fallback in
+// registration order, skipping providers currently in cooldown. Returns the
+// response plus the fallback model on success. fbErr is non-nil only when a
+// fallback was SELECTED but failed; (nil, "", nil) means nothing was tried
+// (no fallbacks, all in cooldown, or the confirm policy declined).
+func (e *Engine) tryFallbacks(ctx context.Context, req provider.CompletionRequest, onUpdate TurnOutputHandler) (resp *provider.CompletionResponse, fallbackModel string, fbErr error) {
+	var lastErr error
+	for _, fb := range e.fallbacks {
+		if cd, _ := e.health.inCooldown(fb.ID); cd {
+			continue
+		}
+		// Confirm policy: only ask when the fallback is a DIFFERENT vendor
+		// than the primary; same-vendor fallbacks (e.g. a sibling model on the
+		// same gateway) route automatically.
+		if e.fallbackPolicy == FallbackConfirm && fb.Protocol != "" && fb.Protocol != e.primaryProtocol {
+			ok, err := e.askFallbackConfirmation(fb.Model, fb.ID)
+			if err != nil {
+				return nil, "", err
+			}
+			if !ok {
+				return nil, "", nil // user declined → stop routing
+			}
+		}
+		fbReq := req
+		fbReq.Model = fb.Model
+		fbResp, err := e.completeWith(ctx, fb.Adapter, fbReq)
+		if err == nil {
+			e.health.recordSuccess(fb.ID)
+			e.lastFallback = fb.Model
+			e.fallbackCount++
+			if onUpdate != nil {
+				onUpdate(e.state, fmt.Sprintf("⚠️ Primary provider failed — using fallback model %s", fb.Model))
+			}
+			return fbResp, fb.Model, nil
+		}
+		e.health.recordFailure(fb.ID)
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, "", lastErr
+	}
+	return nil, "", nil
+}
+
+// askFallbackConfirmation asks the user before routing to a fallback from a
+// different vendor than the primary. With no interactive layer wired it
+// defaults to allow, preserving the auto behavior.
+func (e *Engine) askFallbackConfirmation(model, providerID string) (bool, error) {
+	if e.askHandler == nil {
+		return true, nil
+	}
+	ans, err := e.askHandler(fmt.Sprintf(
+		"⚠️ Primary provider (%s) failed. Route this turn to fallback model %s?",
+		e.primaryID, model,
+	), []string{"✅ Use fallback", "🚫 Stop this turn"})
+	if err != nil {
+		return false, err
+	}
+	return !strings.Contains(ans, "Stop") && !strings.Contains(ans, "Deny"), nil
 }
 
 // hookRun fires a lifecycle hook event with structured env data. Output is
