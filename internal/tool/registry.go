@@ -295,9 +295,16 @@ func (r *Registry) gateFileAction(ctx context.Context, kind, path string) (bool,
 // (Allow once / Always allow / Deny). Extracted so the file-action gate can
 // stay separate from the command gate.
 func (r *Registry) askViaModal(ctx context.Context, cmd string) (bool, string, error) {
+	question := "⚠️ BroCode wants to run a gated command:\n\n```\n" + cmd + "\n```"
+	// Soft guard: installing external linters mid-task is redundant with
+	// BroCode's built-in LSP (lsp_scan) and network-heavy. Warn + redirect
+	// instead of blocking — the user can still allow if they really want to.
+	if isLinterInstall(cmd) {
+		question += "\n\n💡 BroCode already surfaces lint/type/deprecated checks via its LSP (`lsp_scan`) — prefer that over installing " + linterName(cmd) + " mid-task. If you truly need it, install it yourself outside BroCode."
+	}
 	results, err := r.askFunc(ctx, []AskQuestion{
 		{
-			Question: "⚠️ BroCode wants to run a gated command:\n\n```\n" + cmd + "\n```",
+			Question: question,
 			Options:  []string{"✅ Allow once", "🔁 Always allow for this session", "🚫 Deny"},
 		},
 	})
@@ -328,6 +335,47 @@ func (r *Registry) askViaModal(ctx context.Context, cmd string) (bool, string, e
 
 func (r *Registry) Register(t Tool) {
 	r.tools[t.Name()] = t
+}
+
+// linterInstallPatterns are external linter/binary names whose mid-task
+// install is redundant with BroCode's built-in LSP diagnostics.
+var linterInstallPatterns = []string{
+	"golangci-lint", "staticcheck", "revive", "ineffassign", "errcheck",
+	"gosimple", "unconvert", "eslint", "flake8", "pylint", "ruff",
+	"stylelint", "shellcheck", "golangci",
+}
+
+// isLinterInstall reports whether cmd is installing an external linter/analyzer
+// toolchain (go install / npm i -g / pip install / cargo install / brew install
+// + a known linter name). Used by the soft guard to redirect to LSP.
+func isLinterInstall(cmd string) bool {
+	lower := strings.ToLower(cmd)
+	hasInstall := strings.Contains(lower, "go install") ||
+		strings.Contains(lower, "npm install -g") || strings.Contains(lower, "npm i -g") ||
+		strings.Contains(lower, "pip install") || strings.Contains(lower, "pip3 install") ||
+		strings.Contains(lower, "cargo install") || strings.Contains(lower, "yarn global add") ||
+		strings.Contains(lower, "brew install")
+	if !hasInstall {
+		return false
+	}
+	for _, name := range linterInstallPatterns {
+		if strings.Contains(lower, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// linterName returns the matched linter name for the soft-guard hint, or a
+// generic phrase when none of the known names appear.
+func linterName(cmd string) string {
+	lower := strings.ToLower(cmd)
+	for _, name := range linterInstallPatterns {
+		if strings.Contains(lower, name) {
+			return name
+		}
+	}
+	return "a linter"
 }
 
 func (r *Registry) Definitions() []provider.ToolDefinition {

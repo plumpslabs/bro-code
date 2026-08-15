@@ -121,6 +121,10 @@ type Engine struct {
 	fallbacks       []Fallback
 	streamHandler   func(delta string)
 	progressHandler TurnOutputHandler
+	// lspAvailable is the count of language servers reachable this session,
+	// set by the UI at startup so the system prompt can tell the model whether
+	// lsp_scan is usable (and steer it away from installing external linters).
+	lspAvailable    int
 	// Adaptive routing state: primaryID/primaryProtocol identify the active
 	// provider for health tracking and cross-vendor confirmation; health is the
 	// per-provider circuit breaker; fallbackPolicy is the user's routing
@@ -398,6 +402,13 @@ func (e *Engine) SetOnFileEdited(fn func(path string)) {
 // convention review, catching type errors without waiting for a full build.
 func (e *Engine) SetDiagnosticsChecker(fn func(path string) string) {
 	e.diagFn = fn
+}
+
+// SetLSPStatus records how many language servers are available this session.
+// The system prompt reads it to decide whether lsp_scan is usable and to steer
+// the model away from installing external linters when LSP is missing.
+func (e *Engine) SetLSPStatus(n int) {
+	e.lspAvailable = n
 }
 
 // localizeVerifyFailure enriches a CLI verification failure with LSP
@@ -1405,6 +1416,14 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 	if e.skillsCtx != "" {
 		sysPrompt += "\n\nAVAILABLE SKILLS:\n" + e.skillsCtx + "\nWhen a task matches a skill, load its SKILL.md file (read_file) and follow its instructions."
 	}
+	// LSP availability: tell the model up front whether lsp_scan is usable so
+	// it does not waste a round discovering (or, worse, trying to install) a
+	// linter. Reinforces the SENIOR REVIEW guidance not to `go install`.
+	if e.lspAvailable > 0 {
+		sysPrompt += fmt.Sprintf("\n\nLSP AVAILABLE (%d language server(s)): use `lsp_scan` for project-wide type/lint/deprecated diagnostics and `lsp_diagnostics` per file — that IS your linter, no external install needed.", e.lspAvailable)
+	} else {
+		sysPrompt += "\n\nLSP NOT AVAILABLE this session: `lsp_scan` will fail. Do NOT `go install` external linters (golangci-lint/staticcheck/revive) — ask the user to run `/lsp-install` once, or rely on the project's own `go vet`/`go build`/`tsc --noEmit`."
+	}
 	if e.mem != nil {
 		if ws := e.mem.WarmStartRelevant(e.context.LastUserPrompt()); ws != "" {
 			sysPrompt += "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + ws
@@ -1440,7 +1459,7 @@ Engine Mode Rules (%s):
 5. REUSE FIRST: before writing new code, use code_locate and search_code to check whether the symbol/function already exists — reimplementing existing code wastes tokens and creates duplicates. Report what you reused.
 6. TYPE SAFETY & PERFORMANCE: treat type errors as blockers — fix them after the auto-verification (build/typecheck) flags them. Avoid N+1 queries, SELECT *, missing WHERE on updates/deletes, string-built SQL (injection), quadratic loops, and unbounded fetches.
 7. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony, no new abstractions. Extract a helper only at 3+ uses; keep a file under ~300 LOC; inline one-off logic. Over-engineering is a review finding.
-8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth and run lsp_scan at most once per task; but lsp_rename is the right tool for project-wide symbol renames, lsp_fix auto-applies quick-fixes (imports, organize), and lsp_symbols/lsp_outline find symbols by name without guessing a cursor position. LSP diagnostics also run automatically on your edited files after verification.
+8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth and run lsp_scan at most once per task (and call it ONCE at the START of any "find/fix warnings/lint" task — that IS your linter: gopls already covers go vet + type errors + deprecated + unused). NEVER go install external linters (golangci-lint/staticcheck/revive/eslint) mid-task — they are redundant with LSP and network-heavy; if LSP is unavailable, ask the user to run /lsp-install or fall back to the project's own go vet/go build. lsp_rename is the right tool for project-wide symbol renames, lsp_fix auto-applies quick-fixes (imports, organize), and lsp_symbols/lsp_outline find symbols by name without guessing a cursor position. LSP diagnostics also run automatically on your edited files after verification.
 9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.
 10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.`
 	}

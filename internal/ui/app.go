@@ -758,16 +758,21 @@ func (m *Model) rebuildEngine() {
 	m.tools.SetSearchEmbedder(embedderFor(m.activeProvider))
 	// Native type-error review after edits: wired to the LSP manager so
 	// edited files get real diagnostics (not just regex) before done.
-	m.engine.SetDiagnosticsChecker(func(path string) string {
-		if m.lspMgr == nil {
-			return ""
+		m.engine.SetDiagnosticsChecker(func(path string) string {
+			if m.lspMgr == nil {
+				return ""
+			}
+			out, err := m.lspMgr.Diagnostics(context.Background(), path)
+			if err != nil {
+				return ""
+			}
+			return out
+		})
+		// Tell the engine how many LSP servers are reachable so its system
+		// prompt can steer the model to lsp_scan (and away from go install).
+		if m.lspMgr != nil {
+			m.engine.SetLSPStatus(len(m.lspMgr.AvailableServers()))
 		}
-		out, err := m.lspMgr.Diagnostics(context.Background(), path)
-		if err != nil {
-			return ""
-		}
-		return out
-	})
 	for _, fb := range m.buildFallbacks() {
 		m.engine.AddFallback(fb)
 	}
