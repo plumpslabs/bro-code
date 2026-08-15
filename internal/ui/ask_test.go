@@ -79,27 +79,46 @@ func TestAskNavigationDoesNotChangeSelection(t *testing.T) {
 	}
 }
 
-func TestAskNextQuestionRemembersCursor(t *testing.T) {
+func TestAskFlatNavigation(t *testing.T) {
 	m := newTestApp()
 	m.ask = newAskBroker()
 	m.askQuestions = []tool.AskQuestion{
 		{Question: "Q1", Options: []string{"a", "b", "c"}, Multi: false},
 		{Question: "Q2", Options: []string{"x", "y"}, Multi: false},
 	}
-	m.askCursorPos = map[int]int{}
-	m.askCursor = 0
-	m.askOptionIdx = 2 // cursor on "c" in Q1
-
-	// Tab to Q2: cursor resets to that question's remembered position (0).
-	m.askNextQuestion(1)
-	if m.askCursor != 1 || m.askOptionIdx != 0 {
-		t.Errorf("after tab to Q2: cursor=%d opt=%d, want 1,0", m.askCursor, m.askOptionIdx)
+	// Flat layout: Q1[a,b,c,custom] Q2[x,y,custom] Submit  => 8 rows.
+	// Tab / ↓ step forward one row; Shift+Tab / ↑ step back; it wraps around
+	// and the Submit row is the final tabbable entry.
+	positions := []struct {
+		cur    int
+		opt    int
+		submit bool
+	}{
+		{0, 0, false}, {0, 1, false}, {0, 2, false}, {0, 3, false},
+		{1, 0, false}, {1, 1, false}, {1, 2, false}, {1, -1, true},
 	}
-	m.askOptionIdx = 1
-	// Tab back to Q1: cursor should return to its remembered position (2).
-	m.askNextQuestion(-1)
-	if m.askCursor != 0 || m.askOptionIdx != 2 {
-		t.Errorf("after tab back to Q1: cursor=%d opt=%d, want 0,2", m.askCursor, m.askOptionIdx)
+	m.askFlat = 0
+	m.askApplyFlat()
+	for i, w := range positions {
+		if m.askCursor != w.cur || m.askOptionIdx != w.opt || m.askOnSubmit() != w.submit {
+			t.Fatalf("forward step %d: cursor=%d opt=%d submit=%v, want %d,%d,%v",
+				i, m.askCursor, m.askOptionIdx, m.askOnSubmit(), w.cur, w.opt, w.submit)
+		}
+		m.askMoveRow(1)
+	}
+	// Wrapped back to the start.
+	if m.askCursor != 0 || m.askOptionIdx != 0 || m.askOnSubmit() {
+		t.Fatalf("after wrap: cursor=%d opt=%d submit=%v, want 0,0,false",
+			m.askCursor, m.askOptionIdx, m.askOnSubmit())
+	}
+	// Going back (Shift+Tab / ↑) reverses through the rows.
+	m.askMoveRow(-1) // -> Submit row
+	if !m.askOnSubmit() {
+		t.Error("back from Q1a should land on the Submit row")
+	}
+	m.askMoveRow(-1) // -> Q2 custom
+	if m.askCursor != 1 || m.askOptionIdx != 2 {
+		t.Errorf("back to Q2 custom: cursor=%d opt=%d, want 1,2", m.askCursor, m.askOptionIdx)
 	}
 }
 

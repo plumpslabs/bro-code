@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -81,6 +82,7 @@ func (m *Model) openAsk(msg askUserMsg) {
 	m.askQuestions = msg.questions
 	m.askCursor = 0
 	m.askOptionIdx = 0
+	m.askFlat = 0
 	m.askChecked = map[int]map[int]bool{}
 	m.askSel = map[int]int{}       // real selections only (set on Space)
 	m.askCursorPos = map[int]int{} // per-question cursor memory (navigation)
@@ -88,6 +90,66 @@ func (m *Model) openAsk(msg askUserMsg) {
 	m.askCustomQ = -1
 	m.askCustomInput.SetValue("")
 	m.status = "Waiting for your input..."
+	m.askApplyFlat()
+	m.refreshAskModal()
+}
+
+// askSubmitRowIndex is the flat index of the trailing Submit row (one past the
+// last question's options). It is the final row in the tabbable list.
+func (m *Model) askSubmitRowIndex() int {
+	n := 0
+	for _, q := range m.askQuestions {
+		n += askRowCount(q)
+	}
+	return n
+}
+
+// askTotalRows is the number of tabbable rows: every option of every question
+// plus the Submit row.
+func (m *Model) askTotalRows() int {
+	return m.askSubmitRowIndex() + 1
+}
+
+// askOnSubmit reports whether the flat cursor is on the Submit row.
+func (m *Model) askOnSubmit() bool {
+	return m.askFlat == m.askSubmitRowIndex()
+}
+
+// askApplyFlat maps the flat cursor onto (question, option) coordinates so the
+// rest of the renderer/collector keeps working unchanged. When the cursor sits
+// on the Submit row, no option is highlighted.
+func (m *Model) askApplyFlat() {
+	flat := m.askFlat
+	for qi := range m.askQuestions {
+		rc := askRowCount(m.askQuestions[qi])
+		if flat < rc {
+			m.askCursor = qi
+			m.askOptionIdx = flat
+			if m.askCursorPos != nil {
+				m.askCursorPos[qi] = flat
+			}
+			return
+		}
+		flat -= rc
+	}
+	// On the Submit row: keep a valid question context, no option highlighted.
+	if len(m.askQuestions) > 0 {
+		m.askCursor = len(m.askQuestions) - 1
+		m.askOptionIdx = -1
+	}
+}
+
+// askMoveRow moves the flat cursor by delta rows, wrapping around the whole
+// list (all options of all questions + Submit). Tab / ↓ go forward, Shift+Tab
+// / ↑ go back — so the user can tab straight through every choice and also go
+// backwards, exactly like a native selector.
+func (m *Model) askMoveRow(delta int) {
+	if len(m.askQuestions) == 0 {
+		return
+	}
+	total := m.askTotalRows()
+	m.askFlat = (m.askFlat + delta + total) % total
+	m.askApplyFlat()
 	m.refreshAskModal()
 }
 
@@ -123,37 +185,27 @@ func (m *Model) refreshAskModal() {
 	}
 }
 
-// askMove moves the option cursor within the current question (wraps around).
-// Navigation only moves the cursor — the selection dot (●) stays put until the
-// user actually selects with Space.
+// askMove moves the option cursor (↑/↓) — implemented as a flat row move so
+// navigation flows continuously through every option and question.
 func (m *Model) askMove(delta int) {
-	if m.askCursor < 0 || m.askCursor >= len(m.askQuestions) {
-		return
-	}
-	q := m.askQuestions[m.askCursor]
-	m.askCursorPos[m.askCursor] = m.askOptionIdx
-	n := askRowCount(q)
-	m.askOptionIdx = (m.askOptionIdx + delta + n) % n
-	m.refreshAskModal()
+	m.askMoveRow(delta)
 }
 
-// askNextQuestion moves focus to the previous/next question.
+// askNextQuestion (Tab / Shift+Tab) moves focus to the next/previous question —
+// also implemented as a flat row move, so Tab steps through options too.
 func (m *Model) askNextQuestion(delta int) {
-	if len(m.askQuestions) == 0 {
-		return
-	}
-	m.askCursorPos[m.askCursor] = m.askOptionIdx
-	n := len(m.askQuestions)
-	m.askCursor = (m.askCursor + delta + n) % n
-	m.askOptionIdx = m.askCursorPos[m.askCursor]
-	m.refreshAskModal()
+	m.askMoveRow(delta)
 }
 
-// askToggle toggles the option under the cursor (checkbox for multi questions,
-// radio selection for single questions). Selecting the custom row opens the
-// custom answer input. Only here (and askSaveCustom) does the selection state
-// change — navigation never touches it.
+// askToggle selects/toggles the option under the flat cursor (checkbox for
+// multi questions, radio selection for single questions). Selecting the custom
+// row opens the custom answer input. On the Submit row it is a no-op. Only here
+// (and askSaveCustom) does the selection state change — navigation never touches
+// it.
 func (m *Model) askToggle() {
+	if m.askOnSubmit() {
+		return
+	}
 	if m.askCursor < 0 || m.askCursor >= len(m.askQuestions) {
 		return
 	}
@@ -246,9 +298,11 @@ func (m *Model) submitAsk() {
 	}
 }
 
-// appendAskToHistory renders the submitted answers as a chat entry, showing
-// the question text alongside each answer so the conversation reads clearly
-// (Q1 · <question> → <answer>), not just cryptic Q1:/Q2: labels.
+// appendAskToHistory renders the submitted answers as a single, compact chat
+// entry (one tidy line per question: "Q1 · <question> → <answer>"), not
+// several scattered rows. The question text is cleaned first so verbose
+// prompts — e.g. a gated command wrapped in ```fences``` — collapse to one
+// readable line instead of a multi-line blob.
 func (m *Model) appendAskToHistory(results []tool.AskResult) {
 	if len(results) == 0 {
 		return
@@ -260,11 +314,12 @@ func (m *Model) appendAskToHistory(results []tool.AskResult) {
 		if qText == "" && i < len(m.askQuestions) {
 			qText = m.askQuestions[i].Question
 		}
+		qText = cleanAskText(qText)
 		label := ""
 		if len(m.askQuestions) > 1 {
 			label = fmt.Sprintf("Q%d · ", i+1)
 		}
-		ans := strings.Join(r.Answers, ", ")
+		ans := strings.Join(strings.Fields(strings.Join(r.Answers, ", ")), " ")
 		if ans == "" {
 			ans = "(no selection)"
 		}
@@ -274,6 +329,14 @@ func (m *Model) appendAskToHistory(results []tool.AskResult) {
 		}
 	}
 	m.appendMessages(sb.String())
+}
+
+// cleanAskText strips markdown code fences (verbose command dumps) and
+// collapses all whitespace so a question renders as one tidy history line.
+func cleanAskText(s string) string {
+	fence := regexp.MustCompile("```[\\s\\S]*?```")
+	s = fence.ReplaceAllString(s, "")
+	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
 }
 
 // skipAsk cancels the interaction without answers (the model proceeds with
@@ -298,21 +361,25 @@ func (m *Model) buildAskBody() string {
 
 	sb.WriteString(titleStyle.Render("🎯 BroCode Needs Your Input") + "\n\n")
 
+	row := 0 // running flat index across all option rows
+	onSubmit := m.askOnSubmit()
 	for qi, q := range m.askQuestions {
 		tag := "single-select"
 		if q.Multi {
 			tag = "multi-select"
 		}
 		header := fmt.Sprintf("Q%d/%d · %s", qi+1, len(m.askQuestions), q.Question)
-		if qi == m.askCursor {
+		if !onSubmit && qi == m.askCursor {
 			sb.WriteString(cursorStyle.Render("❯ "+header) + dimStyle.Render("  ["+tag+"]") + "\n")
 		} else {
 			sb.WriteString("  " + header + dimStyle.Render("  ["+tag+"]") + "\n")
 		}
 
 		for oi, opt := range q.Options {
+			flatHere := row
+			row++
 			cursor := "  "
-			if qi == m.askCursor && oi == m.askOptionIdx {
+			if !onSubmit && flatHere == m.askFlat {
 				cursor = cursorStyle.Render("❯ ")
 			}
 			if q.Multi {
@@ -332,8 +399,10 @@ func (m *Model) buildAskBody() string {
 
 		// Custom answer row
 		customIdx := len(q.Options)
+		flatHere := row
+		row++
 		cursor := "  "
-		if qi == m.askCursor && m.askOptionIdx == customIdx {
+		if !onSubmit && flatHere == m.askFlat {
 			cursor = cursorStyle.Render("❯ ")
 		}
 		if q.Multi {
@@ -359,17 +428,20 @@ func (m *Model) buildAskBody() string {
 		sb.WriteString("\n")
 		// Submit bar: a clear action button showing how many questions are
 		// answered, so the user knows the interaction ends with an explicit
-		// Send — not an accidental Enter.
+		// Send — not an accidental Enter. It is also the last tabbable row, so
+		// it gets the cursor highlight when the flat cursor lands on it.
 		answered := m.askAnsweredCount()
 		btn := " ⏎ Submit answers (" + fmt.Sprintf("%d/%d", answered, len(m.askQuestions)) + ") "
 		btnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("86")).Padding(0, 1)
 		dimBtnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Padding(0, 1)
-		if answered == len(m.askQuestions) && len(m.askQuestions) > 0 {
+		if onSubmit {
+			sb.WriteString(cursorStyle.Render("❯ ") + btnStyle.Render(btn) + "\n")
+		} else if answered == len(m.askQuestions) && len(m.askQuestions) > 0 {
 			sb.WriteString(btnStyle.Render(btn) + "\n")
 		} else {
 			sb.WriteString(dimBtnStyle.Render(btn) + "\n")
 		}
-		sb.WriteString(dimStyle.Render("[↑/↓ move · Space select · Tab next question · Enter submit · ESC skip]"))
+		sb.WriteString(dimStyle.Render("[Tab/↑/↓ choose · Shift+Tab/↑ go back · Space select · Enter submit · ESC skip]"))
 	}
 
 	return sb.String()

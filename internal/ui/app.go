@@ -341,8 +341,9 @@ type Model struct {
 	showAsk        bool
 	askID          string
 	askQuestions   []tool.AskQuestion
-	askCursor      int // current question index
-	askOptionIdx   int // cursor within current question's rows
+	askCursor      int // current question index (derived from askFlat)
+	askOptionIdx   int // cursor within current question's rows (derived)
+	askFlat        int // flat cursor over all option rows + the submit row
 	askChecked     map[int]map[int]bool
 	askSel         map[int]int // real selections (set on Space/select)
 	askCursorPos   map[int]int // per-question cursor memory (navigation)
@@ -1313,9 +1314,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab", "shift+tab":
 			if m.showAsk {
 				if keyStr == "shift+tab" {
-					m.askNextQuestion(-1)
+					m.askMoveRow(-1)
 				} else {
-					m.askNextQuestion(1)
+					m.askMoveRow(1)
+				}
+				return m, nil
+			}
+			if m.showFileConfirm {
+				if keyStr == "shift+tab" {
+					m.fileConfirmSel = 0
+				} else {
+					m.fileConfirmSel = (m.fileConfirmSel + 1) % 3
 				}
 				return m, nil
 			}
@@ -1508,7 +1517,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "space":
 			if m.showAsk && m.askCustomQ < 0 {
-				m.askToggle()
+				if m.askOnSubmit() {
+					m.submitAsk()
+				} else {
+					m.askToggle()
+				}
 				return m, nil
 			}
 
