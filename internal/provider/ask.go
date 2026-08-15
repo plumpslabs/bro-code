@@ -29,54 +29,6 @@ type AskResult struct {
 // they answer. Wired by the TUI; nil means headless (no modal possible).
 type AskUserHandler func(ctx context.Context, questions []AskQuestion) ([]AskResult, error)
 
-// brocodeIdentityPrompt anchors the model's identity when it runs inside the
-// local OpenCode CLI, whose own system prompt can claim a different identity
-// that BroCode cannot override (opencode run has no system-prompt flag). A
-// short firm preamble in the user message tells the model who it is talking
-// to. Kept minimal and brand-agnostic (it never names other tools) so it only
-// shapes identity questions like "who are you?" — never task behavior.
-const brocodeIdentityPrompt = `You are BroCode, a terminal coding agent for software engineering (writing, debugging, refactoring, and explaining code). The user is talking to you through BroCode. You are NOT opencode and you are not any other tool — never introduce yourself as opencode or claim to be another product. If asked who you are, or when greeting the user, say you are BroCode.`
-
-// brocodeCapabilityNote orients the CLI model about BroCode's architecture so
-// capability questions ("whose subagents?", "can you spawn subagents?", "do
-// you have LSP?") are answered directly from context instead of triggering
-// filesystem exploration of config directories (.opencode, ~/.config/opencode,
-// agent definition files) — which the gateway's own permission system then
-// rejects, wasting turns. It only shapes answers about identity/tools — never
-// task behavior.
-const brocodeCapabilityNote = `You are BroCode, running through a local gateway runtime. If asked about your subagents or capabilities, answer directly from this context — do NOT explore configuration directories (.opencode, ~/.config/opencode, agent files) to answer. BroCode's native engine has its own "subagent" tool (isolated sub-agents, optionally parallel) and "scout" tool (background research); in this session you can only call the gateway runtime's own tools (e.g. its task tool), so be honest about which ones you actually have.`
-
-// brocodeAnswerNote keeps final answers proportional to the question without
-// imposing any hard length cap. Deep exploration/architecture questions get
-// full detail; simple questions get short answers. This is the only answer-
-// shaping instruction BroCode sends — there is no max length, no truncation.
-const brocodeAnswerNote = `Answer length should match the question's depth: for exploration or architecture questions give a thorough, detailed answer (structure, evidence from the code, examples) — do not compress a full explanation into a terse summary. Keep answers short only for genuinely simple questions.`
-
-// brocodeEfficiencyNote shapes HOW the model works inside the gateway loop:
-// batch tool calls so each round (which re-sends the whole conversation) does
-// more work, and explore like a senior consultant — a few high-signal reads,
-// then answer. Never demands brevity in the answer itself (that is
-// brocodeAnswerNote's job).
-const brocodeEfficiencyNote = `Work efficiently: batch independent tool calls into a single message instead of one per round — every round re-sends the entire conversation, so denser rounds are dramatically cheaper and faster. Explore like a senior consultant: form a hypothesis about where the answer lives, verify with one targeted batch of reads, then answer. When a tool result is truncated, narrow the range once and move on — never loop with bash sed/head/tail on the same file hoping for different output.`
-
-// askMarkerInstructions is appended to the prompt when the OpenCode CLI model
-// runs with an interactive ask handler wired, so its clarification questions
-// come back as a structured block that can be turned into the selection modal.
-// Without a handler (headless) the model never sees it and behaves as before.
-const askMarkerInstructions = `IMPORTANT — if you need the user to make a decision, choose between options, or confirm requirements before you can continue, do NOT end your message with an open question. Instead append a QUESTION BLOCK:
-
-[Q]The question text[/Q]
-[O]Option 1[/O]
-[O]Option 2[/O]
-[O]Option 3[/O]
-[M]true[/M]
-
-Rules:
-- One [Q] block per question, immediately followed by 2-6 [O] option lines and an optional [M] line. You may ask up to 3 questions.
-- [M]true[/M] means the user may select multiple options; omit it (or write [M]false[/M]) for a single choice.
-- You may write your analysis BEFORE the question blocks — they will be turned into an interactive selection UI for the user.
-- If you do not need clarification, answer normally and include NO question blocks.`
-
 var (
 	askQRe = regexp.MustCompile(`(?s)\[Q\](.*?)\[/Q\]`)
 	askORe = regexp.MustCompile(`(?s)\[O\](.*?)\[/O\]`)

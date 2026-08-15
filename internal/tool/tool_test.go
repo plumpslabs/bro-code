@@ -251,6 +251,7 @@ func TestToolSurfacePruned(t *testing.T) {
 }
 
 func TestReadOnlyExecutionPolicy(t *testing.T) {
+	t.Cleanup(func() { CleanupStaleSnapshots() })
 	tmpDir := t.TempDir()
 	target := filepath.Join(tmpDir, "x.txt")
 	os.WriteFile(target, []byte("hi\n"), 0644)
@@ -383,6 +384,9 @@ func TestGlobToolLeadingSlashAndRecursive(t *testing.T) {
 }
 
 func TestBuiltinTools(t *testing.T) {
+	// write_file/edit_file snapshot the file for one-turn rollback; clean up so
+	// the package-global snapshot list doesn't leak into other tests.
+	t.Cleanup(func() { CleanupStaleSnapshots() })
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "test.txt")
 
@@ -589,6 +593,7 @@ func TestWebSearchEmptyQuery(t *testing.T) {
 }
 
 func TestReviewChangesToolApproveAndRevert(t *testing.T) {
+	t.Cleanup(func() { CleanupStaleSnapshots() })
 	repo := t.TempDir()
 	run := func(args ...string) {
 		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
@@ -649,6 +654,7 @@ func TestReviewChangesToolApproveAndRevert(t *testing.T) {
 func TestFileChangesRecordedOnTools(t *testing.T) {
 	ResetChanges()
 	defer ResetChanges()
+	t.Cleanup(func() { CleanupStaleSnapshots() })
 	tmpDir := t.TempDir()
 	p := filepath.Join(tmpDir, "a.go")
 

@@ -225,8 +225,8 @@ func Summarize(results []Result) Report {
 // RenderReport formats the summary as a compact table.
 func RenderReport(rep Report) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Benchmark: %d cases — %d passed / %d failed (%.1f%%)\n", rep.Total, rep.Passed, rep.Failed, rep.PassRate))
-	sb.WriteString(fmt.Sprintf("Mean task time: %s | Mean context tokens: ~%d | Mean cost: $%.4f\n", rep.MeanDuration.Round(time.Millisecond), rep.MeanTokens, rep.MeanCostUSD))
+	fmt.Fprintf(&sb, "Benchmark: %d cases — %d passed / %d failed (%.1f%%)\n", rep.Total, rep.Passed, rep.Failed, rep.PassRate)
+	fmt.Fprintf(&sb, "Mean task time: %s | Mean context tokens: ~%d | Mean cost: $%.4f\n", rep.MeanDuration.Round(time.Millisecond), rep.MeanTokens, rep.MeanCostUSD)
 	sb.WriteString("\n")
 	for _, r := range rep.PerCase {
 		status := "PASS"
@@ -237,7 +237,7 @@ func RenderReport(rep Report) string {
 		if !r.Pass && r.Error != "" {
 			extra = " — " + firstLine(r.Error)
 		}
-		sb.WriteString(fmt.Sprintf("  [%s] %-40s %6s  %3d iter  ~%5d tok  $%7.4f%s\n", status, r.ID, r.Duration.Round(time.Millisecond), r.Iterations, r.Tokens, r.CostUSD, extra))
+		fmt.Fprintf(&sb, "  [%s] %-40s %6s  %3d iter  ~%5d tok  $%7.4f%s\n", status, r.ID, r.Duration.Round(time.Millisecond), r.Iterations, r.Tokens, r.CostUSD, extra)
 	}
 	return sb.String()
 }

@@ -351,11 +351,11 @@ func diffTouchedLines(oldText, newText string) int {
 		return 0
 	}
 	oldSet := map[string]int{}
-	for _, l := range strings.Split(oldText, "\n") {
+	for l := range strings.SplitSeq(oldText, "\n") {
 		oldSet[l]++
 	}
 	newSet := map[string]int{}
-	for _, l := range strings.Split(newText, "\n") {
+	for l := range strings.SplitSeq(newText, "\n") {
 		newSet[l]++
 	}
 	var touched int
@@ -483,7 +483,7 @@ func (e *Engine) llmReviewEditedFiles(ctx context.Context, angle reviewAngle) st
 		if len(lines) > 120 {
 			lines = lines[:120]
 		}
-		sb.WriteString(fmt.Sprintf("=== %s ===\n%s\n", p, strings.Join(lines, "\n")))
+		fmt.Fprintf(&sb, "=== %s ===\n%s\n", p, strings.Join(lines, "\n"))
 	}
 	if sb.Len() == 0 {
 		return ""
@@ -553,7 +553,7 @@ func formatConventionIssues(issues []conventionIssue) string {
 		if i.Line > 0 {
 			loc += ":" + itoa(i.Line)
 		}
-		sb.WriteString(fmt.Sprintf("- [%s] %s — %s\n", i.Sev, loc, i.Message))
+		fmt.Fprintf(&sb, "- [%s] %s — %s\n", i.Sev, loc, i.Message)
 	}
 	return strings.TrimSpace(sb.String())
 }

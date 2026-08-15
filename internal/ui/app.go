@@ -537,16 +537,10 @@ func NewApp(
 	// interaction than the full question modal.
 	fbrk := newFileConfirmBroker()
 	tools.SetFileActionHandler(fbrk.Confirm)
-	// The OpenCode CLI adapter runs its own agent loop, so its model can't call
-	// the ask_user tool — clarification questions come back as text instead.
-	// Wire the same interactive modal to that path: structured [Q]/[O] blocks
-	// in the CLI output are parsed and shown as the selection modal. Also feed
-	// it the connected MCP server names so MCP questions get answered from
-	// context instead of filesystem exploration.
-	if oa, ok := adapter.(*provider.OpenCodeAdapter); ok {
-		oa.AskUser = brk.Ask
-		oa.MCPStatus = summarizeMCP(mcpMgr)
-	}
+	// The OpenCode adapter is fully standalone (HTTP gateway, no CLI spawn),
+	// so its model runs inside BroCode's own engine loop and uses the native
+	// ask_user tool and intelligence layer like any other provider — no
+	// prompt-injection shims are needed.
 
 	msgs := []string{"⚡ BroCode engine active. Type a prompt or /help for commands."}
 	if len(initialMsgs) > 0 {
@@ -641,17 +635,8 @@ func (m *Model) buildFallbacks() []loop.Fallback {
 		default:
 			a = provider.NewOpenAIAdapter(d.Info.DefaultBaseURL, d.APIKey)
 		}
-		// Fallback opencode adapters surface clarification questions through the
-		// same interactive modal as the primary adapter, and carry the same MCP
-		// summary + native intelligence layer so fallback runs answer context
-		// questions and use learned project knowledge too.
-		if oa, ok := a.(*provider.OpenCodeAdapter); ok {
-			if m.ask != nil {
-				oa.AskUser = m.ask.Ask
-			}
-			oa.MCPStatus = m.mcpSummary
-			oa.ProjectCtx = m.intelligenceBlock()
-		}
+		// Fallback opencode adapters are standalone HTTP gateways, so they need
+		// no CLI-specific shims — BroCode's engine drives them natively.
 		model := ""
 		if len(d.Info.DefaultModels) > 0 {
 			model = d.Info.DefaultModels[0]
@@ -712,9 +697,6 @@ func (m *Model) rebuildEngine() {
 	// prompt, so its model would never see the native intelligence layer
 	// (repo map, memory, project overview). Inject it into the CLI prompt so
 	// free models benefit from what BroCode has learned too.
-	if oa, ok := m.adapter.(*provider.OpenCodeAdapter); ok {
-		oa.ProjectCtx = m.intelligenceBlock()
-	}
 	// Cross-session usage: every file the model touches this turn feeds the
 	// hot-file intelligence ("the more BroCode is used, the smarter it gets").
 	m.engine.SetUsageRecorder(func(paths []string) {
@@ -2267,9 +2249,7 @@ func (m *Model) switchProviderAndModel(pID, modelName string) {
 			} else {
 				m.adapter = provider.NewOpenAIAdapter(d.Info.DefaultBaseURL, d.APIKey)
 			}
-			if oa, ok := m.adapter.(*provider.OpenCodeAdapter); ok && m.ask != nil {
-				oa.AskUser = m.ask.Ask
-			}
+			// OpenCode adapter is a standalone HTTP gateway; no CLI shims.
 			m.rebuildEngine()
 			// The session's context window follows the newly selected model's
 			// declared limit (e.g. 1M models get a 1M window).

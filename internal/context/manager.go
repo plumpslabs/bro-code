@@ -3,6 +3,7 @@ package context
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -23,27 +24,27 @@ type CompactionSummary struct {
 // Format returns the 5-heading markdown representation.
 func (cs CompactionSummary) Format() string {
 	var sb strings.Builder
-	sb.WriteString("## Goal\n" + cs.Goal + "\n\n")
+	fmt.Fprintf(&sb, "## Goal\n%s\n\n", cs.Goal)
 
 	sb.WriteString("## Files Touched\n")
 	for _, f := range cs.FilesTouched {
-		sb.WriteString("- " + f + "\n")
+		fmt.Fprintf(&sb, "- %s\n", f)
 	}
 	sb.WriteString("\n")
 
 	sb.WriteString("## Decisions Made\n")
 	for _, d := range cs.DecisionsMade {
-		sb.WriteString("- " + d + "\n")
+		fmt.Fprintf(&sb, "- %s\n", d)
 	}
 	sb.WriteString("\n")
 
 	sb.WriteString("## Open Questions / Pending Work\n")
 	for _, q := range cs.OpenQuestions {
-		sb.WriteString("- " + q + "\n")
+		fmt.Fprintf(&sb, "- %s\n", q)
 	}
 	sb.WriteString("\n")
 
-	sb.WriteString("## Last Known State\n" + cs.LastKnownState + "\n")
+	fmt.Fprintf(&sb, "## Last Known State\n%s\n", cs.LastKnownState)
 	return sb.String()
 }
 
@@ -258,7 +259,7 @@ func (m *Manager) LastUserPrompt() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for i := len(m.messages) - 1; i >= 0; i-- {
+	for i := range slices.Backward(m.messages) {
 		if m.messages[i].Role == "user" && m.messages[i].ToolCallID == "" {
 			return m.messages[i].Content
 		}
@@ -285,10 +286,7 @@ func (m *Manager) Compact(summary CompactionSummary) error {
 	}
 
 	// Keep last 4 messages (active subgoal / recent tool context)
-	keepCount := 4
-	if len(m.messages) < keepCount {
-		keepCount = len(m.messages)
-	}
+	keepCount := min(4, len(m.messages))
 	tail := m.messages[len(m.messages)-keepCount:]
 
 	m.messages = append([]provider.Message{systemSummaryMsg}, tail...)

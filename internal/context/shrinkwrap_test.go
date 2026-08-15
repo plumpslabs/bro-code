@@ -8,8 +8,10 @@ import (
 func TestShrinkwrapAST(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString("package sample\n\nimport \"fmt\"\n\ntype Service struct{}\n\n")
-	for i := 0; i < 200; i++ {
-		sb.WriteString("func DoWork" + string(rune('A'+i%26)) + "() {\n")
+	for i := range 200 {
+		sb.WriteString("func DoWork")
+		sb.WriteString(string(rune('A'+i%26)))
+		sb.WriteString("() {\n")
 		sb.WriteString("    fmt.Println(\"Doing work\")\n")
 		sb.WriteString("    x := 10 + 20\n")
 		sb.WriteString("    y := x * 2\n")

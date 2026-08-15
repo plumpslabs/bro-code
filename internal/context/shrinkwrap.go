@@ -29,7 +29,8 @@ func ShrinkwrapAST(content string, filename string) string {
 			inBlockComment = true
 		}
 		if inBlockComment {
-			sb.WriteString(line + "\n")
+			sb.WriteString(line)
+			sb.WriteString("\n")
 			if strings.Contains(trimmed, "*/") {
 				inBlockComment = false
 			}
@@ -46,13 +47,15 @@ func ShrinkwrapAST(content string, filename string) string {
 			strings.HasPrefix(trimmed, "export ") ||
 			strings.HasPrefix(trimmed, "const ") ||
 			strings.HasPrefix(trimmed, "var ") {
-			sb.WriteString(line + "\n")
+			sb.WriteString(line)
+			sb.WriteString("\n")
 			continue
 		}
 
 		// Function signature detection (Go, JS/TS, Python)
 		if isFunctionSignature(trimmed) {
-			sb.WriteString(line + "\n")
+			sb.WriteString(line)
+			sb.WriteString("\n")
 			if strings.HasSuffix(trimmed, "{") {
 				inFuncBody = true
 				braceDepth = 1
@@ -72,7 +75,8 @@ func ShrinkwrapAST(content string, filename string) string {
 
 		// Include line if at top-level
 		if braceDepth == 0 {
-			sb.WriteString(line + "\n")
+			sb.WriteString(line)
+			sb.WriteString("\n")
 		}
 	}
 

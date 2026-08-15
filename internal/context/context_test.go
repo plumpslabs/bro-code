@@ -115,7 +115,7 @@ func TestRestoreSessionEngineReminderAndCap(t *testing.T) {
 	// Tiny window: only the newest events that fit ~80% survive.
 	mgr := NewManager("s", nil, 100)
 	var events []store.Event
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		events = append(events, store.Event{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: strings.Repeat("a", 200)})})
 	}
 

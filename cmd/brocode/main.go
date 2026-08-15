@@ -175,6 +175,10 @@ func main() {
 	tools := tool.NewRegistry()
 	tools.SetRepoRoot(cwd)
 
+	// Clear any stale edit backups (.brocode/snapshots) left by a previous
+	// session that crashed mid-turn — keeps the cache dir from accumulating.
+	tool.PurgeAllSnapshots()
+
 	// Granular per-tool sandbox (.brocode/sandbox.json): deny / allow-only /
 	// command patterns. Loaded once; applies to every tool call this session.
 	tools.SetSandbox(tool.LoadSandbox(cwd))

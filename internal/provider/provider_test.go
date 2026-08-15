@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestAutoDetect(t *testing.T) {
@@ -421,20 +420,29 @@ func TestOpenCodeImportDisabled(t *testing.T) {
 	}
 }
 
-func TestOpenCodeCompleteWithProgress(t *testing.T) {
-	tmp := t.TempDir()
-	fakeCLI := filepath.Join(tmp, "opencode")
-	script := "#!/bin/sh\n" +
-		"echo '\033[0m> build · hy3-free' >&2\n" +
-		"echo 'grep (pattern: filter)' >&2\n" +
-		"echo 'read_file (src/app.tsx)' >&2\n" +
-		"echo 'FINAL ANSWER LINE 1'\n" +
-		"echo 'FINAL ANSWER LINE 2'\n"
-	if err := os.WriteFile(fakeCLI, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake cli: %v", err)
-	}
+// TestOpenCodeAdapterStreamsViaHTTP proves the OpenCode adapter is fully
+// standalone: it forwards the request to the HTTP gateway and streams content
+// deltas, with NO opencode CLI spawned. A fake SSE server stands in for the
+// gateway.
+func TestOpenCodeAdapterStreamsViaHTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for _, c := range []string{"FINAL", " ANSWER", " LINE 1", " LINE 2"} {
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", c)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
 
-	a := &OpenCodeAdapter{cliPath: fakeCLI, http: NewOpenAIAdapter("http://127.0.0.1:1/v1", "")}
+	a := &OpenCodeAdapter{http: NewOpenAIAdapter(srv.URL, "")}
 	var progress []string
 	res, err := a.CompleteWithProgress(context.Background(), CompletionRequest{
 		Model:    "hy3-free",
@@ -443,94 +451,79 @@ func TestOpenCodeCompleteWithProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompleteWithProgress failed: %v", err)
 	}
-	if !strings.Contains(res.Content, "FINAL ANSWER LINE 1") {
-		t.Errorf("expected final answer in content, got %q", res.Content)
+	if res.Content != "FINAL ANSWER LINE 1 LINE 2" {
+		t.Errorf("expected streamed content, got %q", res.Content)
 	}
-	// Progress should have surfaced the tool steps in order.
-	joined := strings.Join(progress, "\n")
-	if !strings.Contains(joined, "grep (pattern: filter)") || !strings.Contains(joined, "read_file (src/app.tsx)") {
-		t.Errorf("expected tool progress lines, got %q", joined)
-	}
-}
-
-// TestOpenCodeCompleteTimeout ensures a hung opencode CLI process cannot
-// block the turn forever — the adapter must time out and fall back to the
-// HTTP router instead of waiting indefinitely.
-func TestOpenCodeCompleteTimeout(t *testing.T) {
-	tmp := t.TempDir()
-	fakeCLI := filepath.Join(tmp, "opencode")
-	script := "#!/bin/sh\nsleep 30\n"
-	if err := os.WriteFile(fakeCLI, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake cli: %v", err)
-	}
-
-	// HTTP router points at a dead port; if the timeout path works we get a
-	// connection error (fast) rather than hanging on the CLI sleep.
-	a := &OpenCodeAdapter{cliPath: fakeCLI, http: NewOpenAIAdapter("http://127.0.0.1:1/v1", "")}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := a.CompleteWithProgress(ctx, CompletionRequest{
-			Model:    "hy3-free",
-			Messages: []Message{{Role: "user", Content: "hi"}},
-		}, nil)
-		done <- err
-	}()
-
-	select {
-	case <-time.After(10 * time.Second):
-		t.Fatal("CompleteWithProgress blocked longer than the CLI timeout")
-	case err := <-done:
-		// With a 10-minute internal timeout we can't wait for the real hang;
-		// cancelling the parent ctx must abort promptly.
-		if ctx.Err() == nil && err == nil {
-			t.Fatal("expected an error after cancellation")
-		}
+	joined := strings.Join(progress, "")
+	if !strings.Contains(joined, "FINAL") || !strings.Contains(joined, "LINE 2") {
+		t.Errorf("expected streamed progress deltas, got %q", joined)
 	}
 }
 
-func TestStripOpenCodeHeader(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{
-			name: "single build banner",
-			in:   "> build · hy3-free\n\nAnswer here",
-			want: "Answer here",
-		},
-		{
-			name: "spinner before banner",
-			in:   "⠋ Thinking...\n│ build · hy3-free\n\nAnswer here",
-			want: "Answer here",
-		},
-		{
-			name: "ansi around banner",
-			in:   "\x1b[0m> build · hy3-free\x1b[0m\n\nAnswer here",
-			want: "Answer here",
-		},
-		{
-			name: "no banner",
-			in:   "Plain answer text",
-			want: "Plain answer text",
-		},
-		{
-			name: "markdown with pipe keeps table",
-			in:   "| col | col |\n| --- | --- |\n| a | b |",
-			want: "| col | col |\n| --- | --- |\n| a | b |",
-		},
-	}
+// TestOpenCodeAdapterHTTPFailurePropagates proves a gateway failure returns an
+// error instead of silently hanging or spawning a fallback CLI.
+func TestOpenCodeAdapterHTTPFailurePropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := stripOpenCodeHeader(tc.in)
-			if got != tc.want {
-				t.Errorf("stripOpenCodeHeader(%q)\n got: %q\nwant: %q", tc.in, got, tc.want)
-			}
-		})
+	a := &OpenCodeAdapter{http: NewOpenAIAdapter(srv.URL, "")}
+	_, err := a.CompleteWithProgress(context.Background(), CompletionRequest{
+		Model:    "hy3-free",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected error from failing gateway, got nil")
+	}
+}
+
+// TestOpenCodeAdapterStripsRoutingPrefix proves an "opencode/" prefixed model
+// id is normalized before hitting the HTTP gateway (the gateway's own
+// catalogue has no such prefix).
+func TestOpenCodeAdapterStripsRoutingPrefix(t *testing.T) {
+	var gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body openAIChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotModel = body.Model
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	a := &OpenCodeAdapter{http: NewOpenAIAdapter(srv.URL, "")}
+	if _, err := a.CompleteWithProgress(context.Background(), CompletionRequest{
+		Model:    "opencode/hy3-free",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, nil); err != nil {
+		t.Fatalf("complete failed: %v", err)
+	}
+	if gotModel != "hy3-free" {
+		t.Errorf("expected routing prefix stripped, got model %q", gotModel)
+	}
+}
+
+// TestOpenCodeStandalone proves the adapter talks to the gateway over HTTP
+// only — it never shells out to an opencode binary, so a missing opencode
+// install must not break completion (a fake gateway stands in here).
+func TestOpenCodeStandalone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	a := NewOpenCodeAdapter()
+	// Point the embedded HTTP adapter at the fake gateway.
+	a.http = NewOpenAIAdapter(srv.URL, "")
+	if _, err := a.CompleteWithProgress(context.Background(), CompletionRequest{
+		Model:    "hy3-free",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, nil); err != nil {
+		t.Fatalf("standalone completion failed: %v", err)
 	}
 }
 

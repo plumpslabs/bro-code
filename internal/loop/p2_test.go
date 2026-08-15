@@ -101,7 +101,7 @@ func TestPromptCacheStableAcrossIterations(t *testing.T) {
 // instruction, and the turn still completes when the model answers.
 func TestFuzzyLoopBreakBlocksSameFamilyBash(t *testing.T) {
 	var responses []provider.CompletionResponse
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		responses = append(responses, provider.CompletionResponse{
 			ToolCalls: []provider.ToolCall{bashCall("ls /nope_" + string(rune('a'+i)))},
 		})

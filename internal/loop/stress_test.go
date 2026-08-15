@@ -33,7 +33,7 @@ func TestEngineHighWorkloadStabilityAndMemoryLeaks(t *testing.T) {
 	runtime.ReadMemStats(&mBefore)
 
 	// Run 100 consecutive turn cycles
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		prompt := fmt.Sprintf("Analyze multi-language project refactoring task #%d (Go, Rust, TS, Python, PHP)", i)
 		res, err := engine.RunTurn(context.Background(), prompt, nil)
 		if err != nil {

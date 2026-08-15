@@ -43,7 +43,7 @@ func (rc *ReviewCouncil) FormatFindings(findings []string) string {
 	var sb strings.Builder
 	sb.WriteString("🛡️ Peer Review Council Audit Warnings:\n")
 	for _, f := range findings {
-		sb.WriteString(fmt.Sprintf("- %s\n", f))
+		fmt.Fprintf(&sb, "- %s\n", f)
 	}
 	return strings.TrimSpace(sb.String())
 }

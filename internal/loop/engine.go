@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1396,17 +1397,18 @@ If the user asks about your mode (in any language), answer directly with the mod
 Engine Mode Rules (%s):
 `, currentMode, modeDesc, currentMode, currentMode, currentMode, currentMode)
 
-	if currentMode == "PLANNER" {
+	switch currentMode {
+	case "PLANNER":
 		sysPrompt += `1. Focus on inspecting codebase, analyzing files, and proposing high-level step-by-step implementation plans.
 2. DO NOT modify any source files or execute write_file/edit_file tools.
 3. Use read_file, list_dir, grep, and glob to research before writing your plan.`
-	} else if currentMode == "MINER" {
+	case "MINER":
 		sysPrompt += `1. MISSION: learn the project deeply and persist VERIFIED knowledge into PROJECT MEMORY using the memory tool (retain). This is how BroCode gets smarter the more it is used.
 2. Read-only: DO NOT modify source files (write_file/edit_file are blocked). You may run read-only bash (git log, git status, ls) to understand history.
 3. VERIFY BEFORE RETAINING: only store facts you confirmed in the code — architecture (service -> repo -> DB), build/test commands that actually exist, conventions (naming, error handling, package manager), decisions, gotchas. Never store guesses; if unsure, read more or skip.
 4. Organize with good sections: Architecture, Build & Test, Conventions, Decisions, Gotchas. Keep each fact short, concrete, and actionable.
 5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`
-	} else {
+	default:
 		sysPrompt += `1. PLAN & CONTINUE: reason through your plan BEFORE acting, then keep the tool loop running until the goal is achieved — do not stop to ask unless technical ambiguity cannot be resolved by tools. Use native function calling.
 2. EXPLORE BEFORE ANSWERING: form a hypothesis about where the answer lives, then verify it with ONE batched round of targeted reads (glob/grep/read_file/code_locate/search_code; git tool for repo state; fetch_url/web_search for docs). Never answer from memory — read the real code and verify your claims. If a result is unhelpful, adapt; do NOT re-run the same narrow search.
 3. BATCH & STAY LEAN (cost): every round re-sends the ENTIRE conversation, so the number of rounds is the single biggest cost driver. Issue 3-4 independent read/grep/glob calls in ONE message. A read_file over 250 lines truncates — cover the rest with 1-2 range reads (start_line/end_line) then answer; NEVER fight truncation with bash sed/head/tail/grep loops on the same file. Range reads of a large file ARE progress.
@@ -1512,10 +1514,8 @@ func (e *Engine) recordExplored(tc provider.ToolCall) {
 	if target == "" {
 		return
 	}
-	for _, ex := range e.explored {
-		if ex == target {
-			return
-		}
+	if slices.Contains(e.explored, target) {
+		return
 	}
 	e.explored = append(e.explored, target)
 	if len(e.explored) > 12 {
