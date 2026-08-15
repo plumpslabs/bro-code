@@ -67,6 +67,16 @@ func ChangesLen() int {
 	return len(changes)
 }
 
+// PeekChanges returns a copy of the turn's recorded changes WITHOUT clearing
+// the list (unlike TakeChanges). Used by review gates to size the diff.
+func PeekChanges() []FileChange {
+	changeMu.Lock()
+	defer changeMu.Unlock()
+	out := make([]FileChange, len(changes))
+	copy(out, changes)
+	return out
+}
+
 // FileChangesSep separates the compact per-file block from the full diff block
 // inside a FILES message. The UI renders the compact part by default and the
 // diff part when the user expands the block.

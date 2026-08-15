@@ -242,6 +242,22 @@ func runCheck(ctx context.Context, c checkCmd) string {
 	return ""
 }
 
+// TestCommandPlan returns the planned verification commands as shell command
+// lines (for the model-callable run_tests tool), in order, or nil when the
+// project has no recognized test/build system. Reuses planVerification so the
+// harness gate and the on-demand tool never diverge.
+func TestCommandPlan() []string {
+	var lines []string
+	for _, c := range planVerification() {
+		line := c.name + " " + strings.Join(c.args, " ")
+		if c.dir != "" && c.dir != "." {
+			line = "cd " + c.dir + " && " + line
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
 // describeVerification returns a short human-readable summary of the planned
 // checks (for the UI progress line), or "" when nothing will run.
 func describeVerification() string {

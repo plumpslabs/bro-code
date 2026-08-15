@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
 // Convention checks are deterministic, language-aware code-quality guards
@@ -342,6 +343,35 @@ func extractToolPath(argsJSON string) string {
 // that keeps editing in response to review feedback cannot loop forever.
 const maxReviewPasses = 2
 
+// diffTouchedLines approximates how many lines an edit added or removed (line
+// multiset difference). Used to gate the expensive LLM review layer on edit
+// complexity: small diffs get deterministic + one-pass review.
+func diffTouchedLines(oldText, newText string) int {
+	if oldText == newText {
+		return 0
+	}
+	oldSet := map[string]int{}
+	for _, l := range strings.Split(oldText, "\n") {
+		oldSet[l]++
+	}
+	newSet := map[string]int{}
+	for _, l := range strings.Split(newText, "\n") {
+		newSet[l]++
+	}
+	var touched int
+	for l, c := range oldSet {
+		if d := c - newSet[l]; d > 0 {
+			touched += d
+		}
+	}
+	for l, c := range newSet {
+		if d := c - oldSet[l]; d > 0 {
+			touched += d
+		}
+	}
+	return touched
+}
+
 // reviewEditedFiles runs the two-layer review over the files edited this turn:
 //   - Layer 1 (free, deterministic): debug leftovers, markers, type-safety red
 //     flags, duplicate symbols, plus LSP diagnostics when wired.
@@ -363,6 +393,17 @@ func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 	}
 	issues = append(issues, findDuplicateSymbols(e.editedFiles, nil)...)
 
+	// Complexity gate for the expensive LLM layer: small edits (≤30 lines
+	// touched this turn) are high-confidence targets — deterministic checks
+	// plus ONE correctness angle is enough; the second security/edge angle is
+	// reserved for edits big enough to hide regressions.
+	const smallEditLines = 30
+	var changedLines int
+	for _, c := range tool.PeekChanges() {
+		changedLines += diffTouchedLines(c.Old, c.New)
+	}
+	highComplexity := changedLines > smallEditLines
+
 	// Native type errors via LSP (when wired) — catches what regex can't.
 	if e.diagFn != nil {
 		for _, p := range e.editedFiles {
@@ -378,13 +419,23 @@ func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 
 	// Layer 2: senior LLM review only when the free checks are clean and we
 	// are still inside the per-turn budget. If Layer 1 already found problems,
-	// don't spend tokens — the model must fix those first.
-	if len(issues) == 0 && e.reviewLLMEnabled && e.reviewPasses == 1 {
-		if out := e.llmReviewEditedFiles(ctx); out != "" {
-			issues = append(issues, conventionIssue{
-				Kind:    "senior-review",
-				Message: out,
-			})
+	// don't spend tokens — the model must fix those first. Two bounded angles
+	// run on successive clean review rounds: correctness (round 1) then
+	// security/edge/regression (round 2, AFTER the model fixed round 1's
+	// findings) — so the same code is seen from two lenses and the fix itself
+	// is re-reviewed. Small edits (≤30 lines) never reach the second angle.
+	if len(issues) == 0 && e.reviewLLMEnabled && e.reviewPasses <= maxReviewPasses {
+		if e.reviewPasses == 1 || highComplexity {
+			var angle reviewAngle = llmReviewCorrectness
+			if e.reviewPasses > 1 {
+				angle = llmReviewSecurity
+			}
+			if out := e.llmReviewEditedFiles(ctx, angle); out != "" {
+				issues = append(issues, conventionIssue{
+					Kind:    "senior-review",
+					Message: out,
+				})
+			}
 		}
 	}
 
@@ -395,14 +446,25 @@ func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 	return formatConventionIssues(issues)
 }
 
+// reviewAngle selects which senior-review lens runs. Correctness (round 1)
+// covers the classic merge-blockers; Security (round 2) runs only after the
+// correctness pass is clean so the SAME code is examined from a second
+// perspective — catching issues one lens would gloss over.
+type reviewAngle int
+
+const (
+	llmReviewCorrectness reviewAngle = iota
+	llmReviewSecurity
+)
+
 // llmReviewEditedFiles runs one bounded senior-level code review over the
-// edited files. It returns "" on any failure (never blocks the turn) and
-// keeps the prompt + output small so the cost stays proportional. The call
-// inherits the turn's context (so ESC interrupts it) and is additionally
-// bounded by a 60s timeout — a hung provider must never stall the turn
-// (previously it used context.Background, which ignored ESC and could block
-// up to the HTTP client's full timeout).
-func (e *Engine) llmReviewEditedFiles(ctx context.Context) string {
+// edited files using the given lens. It returns "" on any failure (never
+// blocks the turn) and keeps the prompt + output small so the cost stays
+// proportional. The call inherits the turn's context (so ESC interrupts it)
+// and is additionally bounded by a 60s timeout — a hung provider must never
+// stall the turn (previously it used context.Background, which ignored ESC and
+// could block up to the HTTP client's full timeout).
+func (e *Engine) llmReviewEditedFiles(ctx context.Context, angle reviewAngle) string {
 	files := e.editedFiles
 	if len(files) == 0 {
 		return ""
@@ -427,7 +489,21 @@ func (e *Engine) llmReviewEditedFiles(ctx context.Context) string {
 		return ""
 	}
 
-	prompt := `You are a senior code reviewer. Review ONLY the edited files below for real, high-signal problems a senior engineer would catch before merging:
+	var prompt string
+	temperature := 0.1
+	switch angle {
+	case llmReviewSecurity:
+		temperature = 0.3
+		prompt = `You are a senior security & robustness reviewer. Review ONLY the edited files below from a SECOND, different angle — security, edge cases, and regression risk:
+- Security: user input reaching SQL/shell/HTML/deserialization sinks; missing authz/validation on the new code path; secrets logged or committed; unsafe eval/exec of untrusted data
+- Edge cases: empty input, nil/zero values, off-by-one, race between check and use (TOCTOU), boundary loops, overflow
+- Performance regression: the change introducing quadratic behavior, repeated allocations in loops, blocking calls on hot paths
+- Cross-module side effects: the change breaking callers outside these files (signature changes, removed exports, changed return semantics)
+Be terse. Format: one line per issue as "file:line — problem → fix". If the code is clean on this angle too, reply exactly: CLEAN
+
+` + sb.String()
+	default: // llmReviewCorrectness
+		prompt = `You are a senior code reviewer. Review ONLY the edited files below for real, high-signal problems a senior engineer would catch before merging:
 - N+1 query patterns (DB query inside a loop — flag the loop and suggest batch loading)
 - SQL: unbounded SELECT *, missing WHERE on updates/deletes, string-built queries (injection risk)
 - Error handling: swallowed errors, empty catch, ignoring return errors
@@ -438,6 +514,7 @@ func (e *Engine) llmReviewEditedFiles(ctx context.Context) string {
 Be terse. Format: one line per issue as "file:line — problem → fix". If the code is clean, reply exactly: CLEAN
 
 ` + sb.String()
+	}
 
 	reviewCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -445,7 +522,7 @@ Be terse. Format: one line per issue as "file:line — problem → fix". If the 
 	req := provider.CompletionRequest{
 		Model:       e.model,
 		Messages:    []provider.Message{{Role: "user", Content: prompt}},
-		Temperature: 0.1,
+		Temperature: temperature,
 	}
 	resp, err := e.complete(reviewCtx, req)
 	if err != nil || resp == nil {

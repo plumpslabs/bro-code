@@ -11,6 +11,12 @@ type Message struct {
 	Reasoning  string     `json:"reasoning,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	// Mode and Model are BroCode-internal metadata stamped when the turn was
+	// produced. They are never forwarded to providers (adapters map the known
+	// fields into their own wire format) — they exist so a persisted session
+	// can restore each answer with its original mode badge and model label.
+	Mode  string `json:"mode,omitempty"`
+	Model string `json:"model,omitempty"`
 }
 
 // ToolCall represents a function call invoked by the model.

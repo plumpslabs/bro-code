@@ -21,6 +21,7 @@ type Session struct {
 	CreatedAt   time.Time `json:"created_at"`
 	ProjectPath string    `json:"project_path"`
 	Status      string    `json:"status"`
+	Mode        string    `json:"mode,omitempty"` // last active engine mode ("BUILDER"/"PLANNER"/"MINER")
 }
 
 // Event represents an append-only log entry in the events table.
@@ -66,7 +67,8 @@ func (s *Store) initSchema() error {
 		id TEXT PRIMARY KEY,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		project_path TEXT,
-		status TEXT
+		status TEXT,
+		mode TEXT DEFAULT 'BUILDER'
 	);
 
 	CREATE TABLE IF NOT EXISTS events (
@@ -81,13 +83,65 @@ func (s *Store) initSchema() error {
 		FOREIGN KEY(session_id) REFERENCES sessions(id)
 	);
 	`
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Migration for databases created before the mode column existed: add it
+	// with the same default as fresh schemas. SQLite lacks "ADD COLUMN IF NOT
+	// EXISTS", so probe the column list first.
+	rows, err := s.db.Query("PRAGMA table_info(sessions)")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasMode := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "mode" {
+			hasMode = true
+			break
+		}
+	}
+	if !hasMode {
+		if _, err := s.db.Exec("ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT 'BUILDER'"); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // CreateSession initializes a new session row.
 func (s *Store) CreateSession(sessionID, projectPath string) error {
-	_, err := s.db.Exec("INSERT INTO sessions (id, project_path, status) VALUES (?, ?, ?)", sessionID, projectPath, "active")
+	_, err := s.db.Exec("INSERT INTO sessions (id, project_path, status, mode) VALUES (?, ?, ?, ?)", sessionID, projectPath, "active", "BUILDER")
+	return err
+}
+
+// GetSessionMode returns the last persisted engine mode for a session, or ""
+// when the session row is missing (callers treat "" as BUILDER).
+func (s *Store) GetSessionMode(sessionID string) (string, error) {
+	var mode string
+	err := s.db.QueryRow("SELECT COALESCE(mode, '') FROM sessions WHERE id = ?", sessionID).Scan(&mode)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return mode, nil
+}
+
+// UpdateSessionMode persists the active engine mode for a session so a later
+// resume (`-c` or /sessions) continues in the same mode.
+func (s *Store) UpdateSessionMode(sessionID, mode string) error {
+	_, err := s.db.Exec("UPDATE sessions SET mode = ? WHERE id = ?", mode, sessionID)
 	return err
 }
 
@@ -194,7 +248,7 @@ func (s *Store) CleanupReplayDuplicates(sessionID string) (int, error) {
 
 // ListSessions retrieves all sessions from the SQLite database.
 func (s *Store) ListSessions() ([]Session, error) {
-	rows, err := s.db.Query("SELECT id, created_at, project_path, status FROM sessions ORDER BY created_at DESC")
+	rows, err := s.db.Query("SELECT id, created_at, project_path, status, COALESCE(mode, 'BUILDER') FROM sessions ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +257,7 @@ func (s *Store) ListSessions() ([]Session, error) {
 	var list []Session
 	for rows.Next() {
 		var sess Session
-		if err := rows.Scan(&sess.ID, &sess.CreatedAt, &sess.ProjectPath, &sess.Status); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.CreatedAt, &sess.ProjectPath, &sess.Status, &sess.Mode); err != nil {
 			return nil, err
 		}
 		list = append(list, sess)
@@ -245,7 +299,7 @@ func (s *Store) ListSessionsByProjectPath(projectPath string) ([]Session, error)
 	if projectPath == "" {
 		return s.ListSessions()
 	}
-	rows, err := s.db.Query("SELECT id, created_at, project_path, status FROM sessions WHERE project_path = ? ORDER BY created_at DESC", projectPath)
+	rows, err := s.db.Query("SELECT id, created_at, project_path, status, COALESCE(mode, 'BUILDER') FROM sessions WHERE project_path = ? ORDER BY created_at DESC", projectPath)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +308,7 @@ func (s *Store) ListSessionsByProjectPath(projectPath string) ([]Session, error)
 	var list []Session
 	for rows.Next() {
 		var sess Session
-		if err := rows.Scan(&sess.ID, &sess.CreatedAt, &sess.ProjectPath, &sess.Status); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.CreatedAt, &sess.ProjectPath, &sess.Status, &sess.Mode); err != nil {
 			return nil, err
 		}
 		list = append(list, sess)

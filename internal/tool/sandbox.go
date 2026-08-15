@@ -26,12 +26,29 @@ import (
 // bash gate applies). The sandbox is advisory to the loop: a blocked tool call
 // returns an explicit error the model can adapt around.
 
+// ContainerSandbox routes every bash command through a Docker container for
+// real OS-level isolation. The project root is mounted read-write at
+// /workspace and commands run as `sh -c <cmd>` inside the chosen image, so a
+// destructive or buggy command cannot touch the host. Opt-in via
+// .brocode/sandbox.json:
+//
+//	{ "container": { "enabled": true, "image": "golang:1.23-alpine" } }
+//
+// The image should contain the toolchain the project needs (go, node, etc.).
+// When enabled but docker is unavailable the tool errors clearly — it never
+// silently falls back to running on the host (that would defeat the point).
+type ContainerSandbox struct {
+	Enabled bool   `json:"enabled"`
+	Image   string `json:"image"`
+}
+
 // Sandbox is a parsed permission policy.
 type Sandbox struct {
-	Deny          []string `json:"deny"`          // tool names blocked outright
-	AllowOnly     []string `json:"allowOnly"`     // if set, only these tools run
-	DenyCommands  []string `json:"denyCommands"`  // substrings blocked in bash/git
-	AllowCommands []string `json:"allowCommands"` // substrings that override denyCommands
+	Deny          []string          `json:"deny"`          // tool names blocked outright
+	AllowOnly     []string          `json:"allowOnly"`     // if set, only these tools run
+	DenyCommands  []string          `json:"denyCommands"`  // substrings blocked in bash/git
+	AllowCommands []string          `json:"allowCommands"` // substrings that override denyCommands
+	Container     *ContainerSandbox `json:"container"`     // when enabled, bash runs inside Docker
 }
 
 // LoadSandbox reads the first sandbox.json found (project then global).

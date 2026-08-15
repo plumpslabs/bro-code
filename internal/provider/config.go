@@ -13,6 +13,10 @@ import (
 type ModelLimits struct {
 	Context int `json:"context,omitempty"` // context window size in tokens
 	Output  int `json:"output,omitempty"`  // max output tokens
+	// Optional list prices in USD per million tokens. Override the built-in
+	// price table when a custom provider/model bills differently.
+	InputPrice  float64 `json:"input_price,omitempty"`  // USD per M input tokens
+	OutputPrice float64 `json:"output_price,omitempty"` // USD per M output tokens
 }
 
 // CustomModel describes a declared model with optional display name and limits.
@@ -116,7 +120,24 @@ func LoadConfig() AppConfig {
 	// Final pass: drop providers persisted as duplicates in an older config
 	// file (e.g. an imported lalarasa saved alongside the keyed kahuna with
 	// the same base URL) so they stop appearing even before the next save.
-	return dedupeProvidersByBaseURL(cfg)
+	cfg = dedupeProvidersByBaseURL(cfg)
+
+	// Register any configured per-model prices so EstimateCostUSD reflects
+	// custom provider billing instead of the built-in table.
+	applyConfigPrices(cfg)
+	return cfg
+}
+
+// applyConfigPrices registers InputPrice/OutputPrice overrides from the config
+// into the package-level pricing table used by EstimateCostUSD.
+func applyConfigPrices(cfg AppConfig) {
+	for _, p := range cfg.Providers {
+		for model, m := range p.ModelMap {
+			if m.Limits.InputPrice > 0 || m.Limits.OutputPrice > 0 {
+				RegisterModelPrice(model, m.Limits.InputPrice, m.Limits.OutputPrice)
+			}
+		}
+	}
 }
 
 // mergeBroCodeConfig reads one BroCode config file (JSON or JSONC — comments

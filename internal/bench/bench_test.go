@@ -104,8 +104,8 @@ func TestBenchSandboxIsolation(t *testing.T) {
 
 func TestSummarizeAndRender(t *testing.T) {
 	rep := Summarize([]Result{
-		{ID: "b", Pass: true, Duration: time.Second, Tokens: 100},
-		{ID: "a", Pass: false, Error: "boom\nline2", Duration: 2 * time.Second, Tokens: 50},
+		{ID: "b", Pass: true, Duration: time.Second, Tokens: 100, CostUSD: 0.02},
+		{ID: "a", Pass: false, Error: "boom\nline2", Duration: 2 * time.Second, Tokens: 50, CostUSD: 0.04},
 	})
 	if rep.Total != 2 || rep.Passed != 1 || rep.Failed != 1 {
 		t.Errorf("summary counts wrong: %+v", rep)
@@ -116,6 +116,9 @@ func TestSummarizeAndRender(t *testing.T) {
 	if rep.MeanTokens != 75 {
 		t.Errorf("mean tokens = %d, want 75", rep.MeanTokens)
 	}
+	if rep.MeanCostUSD != 0.03 {
+		t.Errorf("mean cost = %.4f, want 0.0300", rep.MeanCostUSD)
+	}
 	// Per-case must be sorted by ID (a before b).
 	if rep.PerCase[0].ID != "a" || rep.PerCase[1].ID != "b" {
 		t.Errorf("per-case not sorted: %+v", rep.PerCase)
@@ -123,6 +126,9 @@ func TestSummarizeAndRender(t *testing.T) {
 	rendered := RenderReport(rep)
 	if !strings.Contains(rendered, "50.0%") {
 		t.Errorf("render missing pass rate: %q", rendered)
+	}
+	if !strings.Contains(rendered, "$0.0300") {
+		t.Errorf("render missing mean cost: %q", rendered)
 	}
 }
 

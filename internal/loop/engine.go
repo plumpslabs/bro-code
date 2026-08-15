@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/hooks"
@@ -74,14 +75,21 @@ type ScoutDrainer interface {
 
 // Engine orchestrates the ReAct loop and verification ladder.
 type Engine struct {
-	adapter         provider.ProviderAdapter
-	tools           *tool.Registry
-	context         *bcontext.Manager
-	model           string
-	mode            string // "BUILDER" or "PLANNER"
+	adapter           provider.ProviderAdapter
+	tools             *tool.Registry
+	context           *bcontext.Manager
+	model             string
+	mode              string // "BUILDER" or "PLANNER"
 	maxIterations     int
 	baseMaxIterations int
-	state             LoopState
+	// costUSD accumulates the turn's estimated spend (USD) from provider usage
+	// reports × list price. budgetUSD is a hard per-task cap: when the turn
+	// exceeds it, the loop stops synthesizing a final answer (no extension
+	// prompt). 0 disables cost accounting enforcement (but accumulation still
+	// runs when a budget is set, and CostUSD always returns the total).
+	costUSD         float64
+	budgetUSD       float64
+	state           LoopState
 	fallbacks       []Fallback
 	streamHandler   func(delta string)
 	progressHandler TurnOutputHandler
@@ -165,6 +173,56 @@ type Engine struct {
 	// the LSP manager). When set, edited files get a native type-error check
 	// after the convention review — no LLM needed.
 	diagFn func(path string) string
+	// reproGateArmed is true when the current task looks like a bug fix (the
+	// user query carried a failure signal). While armed and no repro is
+	// established, write/edit/delete calls are gated behind a TSR REPRODUCE
+	// reminder: the model must observe the failure first, then fix.
+	reproGateArmed bool
+	// reproEstablished records that the failure was actually reproduced this
+	// turn — either the user pasted the error/stack trace in the prompt, or a
+	// tool result showed a failing command/test. Only then are edits allowed.
+	reproEstablished bool
+	// reproReminderSent guards the REPRODUCE reminder against being re-emitted
+	// every round once the model has seen it.
+	reproReminderSent bool
+	// tsrAttempts counts repair cycles this turn (verification failures fed
+	// back to the model) for the typed revision contract stop condition.
+	tsrAttempts int
+	// lastVerifyHash is a normalized signature of the most recent verification
+	// failure. Repeating the same hash across attempts means the model is
+	// retrying without progress (the error persists unchanged).
+	lastVerifyHash string
+	// verifyErrorStreak counts consecutive identical verification failures.
+	// Reaching 3 stops the repair loop instead of burning iterations.
+	verifyErrorStreak int
+	// lastVerifyErr remembers the last verification error text so a lesson can
+	// be distilled once the repair succeeds.
+	lastVerifyErr string
+	// repairSucceeded is set when a verification that previously failed passes
+	// after the model repaired the code — the trigger for lesson extraction.
+	repairSucceeded bool
+	// lessonFiles snapshots the files involved in a successful repair, taken
+	// before the review resets editedFiles, so distillLesson can name them.
+	lessonFiles []string
+	// sysPromptCached is the system prompt built ONCE per turn and reused for
+	// every loop iteration. Without this, the prompt was re-rendered each
+	// round and — because the warm-start memory excerpt keyed off the evolving
+	// "last user prompt" — the leading bytes changed on every iteration, which
+	// defeats provider prompt caching (Anthropic/OpenAI cache hit = identical
+	// prefix). A stable per-turn prefix means iterations 2..N re-send the same
+	// leading tokens and hit the cache instead of re-billing full input.
+	sysPromptCached string
+	// Fuzzy loop-break state: bashFamilyStreak counts consecutive ROUNDS whose
+	// bash calls share the same leading command word (e.g. round after round of
+	// "go test …"). It is incremented at most once per round, and a round that
+	// mixes different command families resets it. This catches same-strategy
+	// spins where the arguments change (so exact-repeat detection never fires)
+	// while tolerating batched same-family calls within a single round.
+	lastBashFamily   string
+	bashFamilyStreak int
+	// iterBashFamily is the family counted for the CURRENT round ("" until the
+	// round's first bash call). Guards against double-counting batched calls.
+	iterBashFamily string
 	// usage accumulates token + cost across the session (per model), so the
 	// UI can show live cost tracking. Cost is estimated from the usage the
 	// adapters report and the per-model pricing table.
@@ -250,7 +308,7 @@ const maxParallelReadOnlyTools = 4
 // effects and user prompts keep their order.
 func isParallelReadOnly(name string) bool {
 	switch name {
-	case "read_file", "list_dir", "grep", "glob", "code_symbols", "search_code", "fetch_url", "web_search":
+	case "read_file", "list_dir", "grep", "glob", "search_code", "fetch_url", "web_search":
 		return true
 	}
 	return false
@@ -352,6 +410,23 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 
 func (e *Engine) SetMode(m string) {
 	e.mode = m
+	e.applyModePolicy()
+}
+
+// applyModePolicy hard-enforces the mode at the tool executor level: PLANNER
+// and MINER mark the registry read-only (mutating tools blocked everywhere,
+// even from subagents), and PLANNER additionally blocks bash. This is the
+// structural backstop — the prompt and the loop filters are advisory; the
+// executor cannot mutate.
+func (e *Engine) applyModePolicy() {
+	switch e.mode {
+	case "PLANNER":
+		e.tools.SetExecutionPolicy(true, true)
+	case "MINER":
+		e.tools.SetExecutionPolicy(true, false)
+	default: // BUILDER
+		e.tools.SetExecutionPolicy(false, false)
+	}
 }
 
 // SetMaxIterations overrides the loop iteration cap (default 25). Used by the
@@ -361,6 +436,18 @@ func (e *Engine) SetMaxIterations(n int) {
 		e.maxIterations = n
 		e.baseMaxIterations = n
 	}
+}
+
+// SetBudgetUSD caps the turn's total estimated spend in USD. 0 (the default)
+// disables the cap. Applied per user turn — the counter resets when the turn
+// starts.
+func (e *Engine) SetBudgetUSD(usd float64) {
+	e.budgetUSD = usd
+}
+
+// CostUSD returns the accumulated estimated spend (USD) for the current turn.
+func (e *Engine) CostUSD() float64 {
+	return e.costUSD
 }
 
 func (e *Engine) Mode() string {
@@ -389,6 +476,28 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.exploredStalls = 0
 	e.lastExploredTarget = "\x00"
 	e.lastReasoning = ""
+	// Reset the TSR contract state for this turn: the reproduce gate, repair
+	// attempt budget, and identical-error streak all start fresh.
+	e.reproGateArmed = false
+	e.reproEstablished = false
+	e.reproReminderSent = false
+	e.tsrAttempts = 0
+	e.lastVerifyHash = ""
+	e.verifyErrorStreak = 0
+	e.lastVerifyErr = ""
+	e.repairSucceeded = false
+	// Reset the per-turn cost budget counter.
+	e.costUSD = 0
+	// Reset the turn's recorded file changes so the review complexity gate and
+	// the UI summary only ever see THIS turn's edits (headless contexts like
+	// the bench harness and tests have no UI ResetChanges call).
+	tool.ResetChanges()
+	// Prompt cache and fuzzy loop-break state are per-turn too: a new turn
+	// rebuilds its own stable prefix and resets the same-family streak.
+	e.sysPromptCached = ""
+	e.lastBashFamily = ""
+	e.bashFamilyStreak = 0
+	e.iterBashFamily = ""
 	if !e.autoExtendSession {
 		if e.baseMaxIterations > 0 {
 			e.maxIterations = e.baseMaxIterations
@@ -421,6 +530,16 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	if userQuery != "" {
 		if err := e.context.AppendUserMessage(userQuery); err != nil {
 			return "", err
+		}
+		// TSR REPRODUCE gate: arm only when the task looks like a bug fix AND
+		// there is a verification command to reproduce it with. If the user
+		// already pasted the error/stack trace, treat the repro as provided.
+		e.reproGateArmed = looksLikeBugFixTask(userQuery)
+		if looksLikeProvidedRepro(userQuery) {
+			e.reproEstablished = true
+		}
+		if e.reproGateArmed && len(planVerification()) == 0 {
+			e.reproGateArmed = false
 		}
 	}
 
@@ -480,48 +599,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				}
 			}
 
+			// Iteration budget exhausted: graceful synthesis (no extension).
+			return e.finalSynth(ctx, fmt.Sprintf("MAXIMUM ITERATIONS REACHED (%d): You have reached the maximum iteration limit for this task.", e.maxIterations), "Batas Maksimal 25 Ronde Tercapai")
+		}
+
+		// Hard cost budget: once the estimated spend exceeds the per-task USD
+		// cap, stop the turn gracefully — budget is a hard limit, so no
+		// extension prompt is offered.
+		if e.budgetUSD > 0 && e.costUSD >= e.budgetUSD {
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Maximum iterations reached — synthesizing final answer from explored context...")
+				onUpdate(e.state, fmt.Sprintf("⚠️ Cost budget exceeded ($%.4f) — synthesizing final answer from explored context...", e.costUSD))
 			}
-			synthPrompt := fmt.Sprintf("⚠️ MAXIMUM ITERATIONS REACHED (%d): You have reached the maximum iteration limit for this task. Tools are now DISABLED for this final response. You MUST now synthesize a helpful, comprehensive response for the user in the user's language based ONLY on the files and context you have explored so far. Answer as much of the user's prompt as possible, summarize your findings, and clearly state any missing context or next steps.%s", e.maxIterations, e.exploredSummary())
-			_ = e.context.AppendUserMessage(synthPrompt)
-
-			localSysPrompt := fmt.Sprintf("You are BroCode CLI, an autonomous AI coding assistant.\n%s", e.projectContextBlock())
-			reqMessages := append([]provider.Message{
-				{Role: "system", Content: localSysPrompt},
-			}, e.context.Messages()...)
-
-			synthReq := provider.CompletionRequest{
-				Model:       e.model,
-				Messages:    reqMessages,
-				Tools:       nil,
-				Temperature: 0.2,
-			}
-
-			synthResp, synthErr := e.complete(ctx, synthReq)
-			if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) != "" {
-				res := synthResp.Content + "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (Batas Maksimal 25 Ronde Tercapai).* "
-				_ = e.context.AppendAssistantTurn("", res, nil)
-				e.state = StateDone
-				if onUpdate != nil {
-					onUpdate(e.state, "Completed with graceful context synthesis")
-				}
-				return res, nil
-			}
-
-			// Deterministic Fallback if synthesis completion fails/times out:
-			// NEVER surface a raw error to the user — construct a helpful summary!
-			e.state = StateDone
-			fallbackMsg := fmt.Sprintf("⚠️ Exploration budget limit reached (%d rounds).\n\nHere is what was verified from the explored codebase:\n%s", e.maxIterations, e.exploredSummary())
-			if e.lastReasoning != "" {
-				fallbackMsg += "\n\n**Last Working Focus**: " + e.lastReasoning
-			}
-			fallbackMsg += "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (Batas Maksimal 25 Ronde Tercapai).* "
-			_ = e.context.AppendAssistantTurn("", fallbackMsg, nil)
-			if onUpdate != nil {
-				onUpdate(e.state, "Completed with fallback context synthesis")
-			}
-			return fallbackMsg, nil
+			return e.finalSynth(ctx, fmt.Sprintf("COST BUDGET EXCEEDED ($%.4f): The per-task cost budget has been exhausted.", e.costUSD), "Batas Biaya Tercapai")
 		}
 
 		// Progress detection: a tool-only round that examined NO new file is a
@@ -577,73 +666,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		}
 
 		currentMode := e.Mode()
-		// Mode descriptions are language-agnostic on purpose: the model is
-		// told to answer in whatever language the user writes in, and must not
-		// be biased by hardcoded phrases or foreign product names.
-		modeDesc := "BUILDER (autonomous coding agent: can read, edit, and run terminal commands)"
-		switch currentMode {
-		case "PLANNER":
-			modeDesc = "PLANNER (architecture & strategy agent: read-only — analyze and plan without editing files)"
-		case "MINER":
-			modeDesc = "MINER (project knowledge agent: read-only exploration that persists verified facts into project memory — learn the codebase, then remember it)"
+		// System prompt is built ONCE per turn and cached: the full mode rules,
+		// project context, repo map, skills, and warm-start memory excerpt form
+		// a stable prefix so every later iteration sends the same leading bytes
+		// (provider prompt caching). A fresh turn rebuilds it for the new query.
+		if e.sysPromptCached == "" {
+			e.sysPromptCached = e.buildSystemPrompt(currentMode, iteration, onUpdate)
 		}
-
-		sysPrompt := fmt.Sprintf(`You are BroCode CLI, an autonomous AI coding assistant.
-%s`, e.projectContextBlock())
-		if e.repoMap != "" {
-			sysPrompt += "\n\n" + e.repoMap
-		}
-		if e.skillsCtx != "" {
-			sysPrompt += "\n\nAVAILABLE SKILLS:\n" + e.skillsCtx + "\nWhen a task matches a skill, load its SKILL.md file (read_file) and follow its instructions."
-		}
-		if e.mem != nil {
-			prompt := e.context.LastUserPrompt()
-			if ws := e.mem.WarmStartRelevant(prompt); ws != "" {
-				sysPrompt += "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + ws
-				if onUpdate != nil && iteration == 1 {
-					onUpdate(e.state, "🧠 Warm Start: Recalled project memory & hot files")
-				}
-			}
-		}
-		sysPrompt += fmt.Sprintf(`
-🔥 ACTIVE ENGINE MODE: %s (%s).
-CRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as PLANNER or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY. You are NOW operating strictly in %s mode.
-If the user asks about your mode (in any language), answer directly with the mode name (%s) and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.
-
-Engine Mode Rules (%s):
-`, currentMode, modeDesc, currentMode, currentMode, currentMode, currentMode)
-
-		if currentMode == "PLANNER" {
-			sysPrompt += `1. Focus on inspecting codebase, analyzing files, and proposing high-level step-by-step implementation plans.
-2. DO NOT modify any source files or execute write_file/edit_file tools.
-3. Use read_file, list_dir, grep, and glob to research before writing your plan.`
-		} else if currentMode == "MINER" {
-			sysPrompt += `1. MISSION: learn the project deeply and persist VERIFIED knowledge into PROJECT MEMORY using the memory tool (retain). This is how BroCode gets smarter the more it is used.
-2. Read-only: DO NOT modify source files (write_file/edit_file are blocked). You may run read-only bash (git log, git status, ls) to understand history.
-3. VERIFY BEFORE RETAINING: only store facts you confirmed in the code — architecture (service -> repo -> DB), build/test commands that actually exist, conventions (naming, error handling, package manager), decisions, gotchas. Never store guesses; if unsure, read more or skip.
-4. Organize with good sections: Architecture, Build & Test, Conventions, Decisions, Gotchas. Keep each fact short, concrete, and actionable.
-5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`
-		} else {
-			sysPrompt += `1. Always reason through your plan BEFORE executing any tool or returning an answer.
-2. CONTINUATION RULE: After receiving tool execution results, DO NOT stop to ask the user unless technical ambiguity cannot be resolved by tools. Continue the tool loop until the goal is achieved.
-3. Use native function calling for tool execution.
-4. DEEP EXPLORATION: Before answering questions about code, thoroughly explore the codebase first. Use glob to find relevant files, grep to search for definitions and usages, read_file to read the actual code, and bash (git status/log) to understand repo state. Never answer from memory or a single grep hit — read the relevant files and verify your claims against the real code before answering.
-5. When you need a decision, preference, or confirmation that tools cannot determine (e.g. choosing a database or architecture, destructive operations, or unclear requirements), call the ask_user tool with 1-3 clear multiple-choice questions instead of guessing.
-6. Some risky shell commands (rm, sudo, git push --force, etc.) require the user's approval. If a command is denied or blocked, do NOT retry it — adapt and use a safe alternative.
-7. Use the git tool to inspect repo state (status/diff/log/branch), fetch_url to read a specific page, web_search to find docs/errors on the web, review_changes to let the user approve or roll back your edits, and undo to revert a bad file edit made this turn.
-8. Answer in the same language the user writes in.
-9. REUSE FIRST: before writing new code, use code_locate and search_code to check whether the functionality or symbol already exists in the codebase — reimplementing existing code wastes tokens and creates duplicates. Report what you reused.
-10. TYPE SAFETY: treat type errors as blockers. After editing, rely on the auto verification (project build/typecheck CLI + native review) and fix any type errors before declaring done; use lsp_diagnostics only on specific edited files when the auto checks are not conclusive.
-11. PERFORMANCE & SQL AWARENESS: avoid N+1 query patterns (DB query inside a loop — batch load instead), SELECT * without need, missing WHERE on updates/deletes, string-built SQL (injection risk), quadratic loops, and unbounded fetches. Mention the Big-O of hot paths.
-12. SENIOR REVIEW: after editing, a senior-level code review runs automatically (deterministic checks + LLM review of your changed files for N+1, SQL, error handling, concurrency, reuse, security). When the review flags an issue, FIX IT — do not ignore or argue; a clean review is part of "done".
-13. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony. Named constants, validation helpers, error envelopes, and heavy abstractions apply to real product logic (auth, DB, cross-cutting), NOT to guard clauses or 10-line bug fixes. Over-engineering is a review finding.
-14. DECISION MATRIX: reuse over rewrite — if the codebase already has a function/utility for it, use it. Extract a helper only at 3+ uses (DRY threshold). Keep a file under ~300 LOC; split only when it handles >3 concerns. Inline one-off logic instead of abstracting it. When two approaches are viable, prefer the simpler one unless there is measured evidence the other matters.
-15. TOOL ECONOMY (LSP is selective, not default): lsp_* tools (lsp_definition, lsp_references, lsp_hover, lsp_diagnostics, lsp_scan) are token- and resource-heavy — language servers index the whole project and their responses are verbose. Use them only where structural accuracy matters: cross-file refactors, real type errors, deprecated API detection. For cheap lookups ("where is X used", "what does Y do") prefer grep, glob, search_code, read_file first. Run lsp_scan at most once per task. Prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, bun test, cargo check) as the source of truth — LSP complements it, never replaces it.
-16. ANSWER PROPORTIONALITY: match answer length to the question's depth. Exploration/architecture questions deserve thorough, detailed answers — structure, evidence from the code, examples. Do NOT compress a full explanation into a terse summary; the user wants the detail. Short answers are for simple questions only. Never pad a short answer into an essay either.
-17. BATCH YOUR TOOL CALLS (cost-critical): every round re-sends the ENTIRE conversation to the model, so the number of rounds is the single biggest cost driver. Issue MULTIPLE independent tool calls in ONE message — e.g. 3-4 read_file/grep/glob/list_dir calls together instead of one per round. They execute in sequence within the round. A senior consultant explores with a few high-signal batch reads, not dozens of narrow single-file greps.
-18. SENIOR CONSULTANT POSTURE: think before you act. For a question, first form a hypothesis about where the answer lives (likely files/symbols), then verify it with ONE batched round of targeted reads, then answer directly with what you verified. Do not dump raw exploration or file lists into your answer — synthesize. If a tool result is unhelpful, say so and adapt; never re-run the same narrow search hoping for a different outcome.
-19. LARGE FILES & TRUNCATION: read_file of a file over 250 lines returns the first 250 with a notice — cover the rest with start_line/end_line range reads (2-3 max for a typical large file), or use code_search to locate symbols first. If a tool result is truncated, narrow the range ONCE and move on; NEVER fight truncation with bash sed/head/tail/grep loops on the same file hoping for different output — that burns rounds and gets the turn aborted. Range reads of a large file ARE progress; answer from what you have after covering the key sections.`
-		}
+		sysPrompt := e.sysPromptCached
 
 		adaptiveCap := CalculateAdaptiveToolBudget(e.context.LastUserPrompt(), e.Mode())
 		if e.toolOnlyRounds >= adaptiveCap && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute) {
@@ -668,9 +698,15 @@ Engine Mode Rules (%s):
 			}
 
 			synthResp, synthErr := e.complete(ctx, synthReq)
-			if synthErr == nil && synthResp != nil && synthResp.Content != "" {
+			if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) == "" {
+				// The model stalled into an empty reply (or kept emitting tool
+				// calls despite tools being disabled). Give the no-tools request
+				// ONE more attempt before giving up.
+				synthResp, synthErr = e.complete(ctx, synthReq)
+			}
+			if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) != "" {
 				res := synthResp.Content + "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (Batas Tool Limit Tercapai).* "
-				_ = e.context.AppendAssistantTurn("", res, nil)
+				_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", res, nil)
 				e.state = StateDone
 				if onUpdate != nil {
 					onUpdate(e.state, "Completed with graceful context synthesis")
@@ -678,15 +714,20 @@ Engine Mode Rules (%s):
 				return res, nil
 			}
 
-			// Fallback if synthesis completion fails: return structured message
-			e.state = StateBlocked
-			msg := "Turn paused: tool budget limit reached after two warnings. "
+			// Deterministic fallback when the synthesis completion itself fails
+			// or returns empty: NEVER dump a raw error or a cold "paused"
+			// status line — construct a helpful answer from what the agent
+			// already explored, mirroring the success path so the conversation
+			// stays connected instead of ending on an abrupt notice.
+			e.state = StateDone
+			msg := "⚠️ Tool budget limit reached — here is what was verified from the explored context:\n" + e.exploredSummary()
 			if e.lastReasoning != "" {
-				msg += "\n\nWhat the agent was last working on: " + e.lastReasoning
+				msg += "\n\n**Last Working Focus**: " + e.lastReasoning
 			}
-			msg += e.exploredSummary()
+			msg += "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (Batas Tool Limit Tercapai).* "
+			_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", msg, nil)
 			if onUpdate != nil {
-				onUpdate(e.state, msg)
+				onUpdate(e.state, "Completed with fallback context synthesis")
 			}
 			return msg, nil
 		}
@@ -715,7 +756,7 @@ Engine Mode Rules (%s):
 		req := provider.CompletionRequest{
 			Model:       e.model,
 			Messages:    reqMessages,
-			Tools:       e.tools.Definitions(),
+			Tools:       e.toolsForMode(currentMode),
 			Temperature: 0.2,
 		}
 
@@ -761,17 +802,18 @@ Engine Mode Rules (%s):
 		}
 
 		// Append assistant turn to store and context
-		if err := e.context.AppendAssistantTurn(reasoning, resp.Content, resp.ToolCalls); err != nil {
+		if err := e.context.AppendAssistantTurn(e.Mode(), e.model, reasoning, resp.Content, resp.ToolCalls); err != nil {
 			return "", err
 		}
 
 		// 2. Check if Model wants to call tools (Acting & Observing State)
-		hasCodeChanges := false
 		if len(resp.ToolCalls) > 0 {
 			e.state = StateActing
 			// This round was tool-only (no answer text); count it toward the
 			// budget so a model that never answers gets cut off.
 			e.toolOnlyRounds++
+			// A fresh round has not counted any bash family yet.
+			e.iterBashFamily = ""
 
 			// PHASE 1 — DECISION (sequential, in call order): classify every
 			// tool call as either blocked (guard/deny/override message) or
@@ -791,10 +833,6 @@ Engine Mode Rules (%s):
 			execCount := 0
 
 			for i, tc := range resp.ToolCalls {
-				if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" {
-					hasCodeChanges = true
-				}
-
 				// Strict mode tool guards: PLANNER is fully read-only (no bash,
 				// no writes); MINER is read-only on source files but may run
 				// read-only bash (git log/status) and, crucially, may retain
@@ -818,6 +856,31 @@ Engine Mode Rules (%s):
 						pending[i] = pendingTool{tc: tc, output: guardMsg}
 						continue
 					}
+				}
+
+				// TSR REPRODUCE gate: while the task is armed as a bug fix and no
+				// reproduction has been observed, code edits are blocked with a
+				// reminder to reproduce the failure first (run the failing test /
+				// command and watch it FAIL) before fixing. This is the
+				// REPRODUCE→LOCALIZE→SOLVE→VERIFY contract: a fix verified against
+				// an unreproduced bug is not verified at all. Edits stay blocked
+				// until a tool result shows a failing command/test, the user
+				// already pasted the failure, or the model chooses to answer
+				// without editing (it may honestly report it cannot reproduce).
+				if e.reproGateArmed && !e.reproEstablished &&
+					(tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file") {
+					var reproGuard string
+					if !e.reproReminderSent {
+						e.reproReminderSent = true
+						reproGuard = "⚠️ [TSR REPRODUCE GATE]: You tried to change code, but the reported failure has NOT been reproduced yet. TSR contract: REPRODUCE first — run the relevant test/command and OBSERVE it fail (that confirms the bug and gives you a verification baseline), THEN fix it. Do not edit before reproducing. If you cannot reproduce the failure, do not edit — answer directly and state that the bug could not be reproduced."
+					} else {
+						reproGuard = "⚠️ [TSR REPRODUCE GATE]: Still no reproduction observed. Edit blocked. Reproduce the failure first (run the test/command and see it fail), or answer directly explaining that you cannot reproduce it — do not edit blind."
+					}
+					if onUpdate != nil {
+						onUpdate(e.state, "⚠️ TSR reproduce gate: edit blocked until failure is reproduced")
+					}
+					pending[i] = pendingTool{tc: tc, output: reproGuard}
+					continue
 				}
 
 				toolInfo := formatToolCallInfo(tc.Name, tc.Arguments)
@@ -860,6 +923,35 @@ Engine Mode Rules (%s):
 				}
 				e.lastToolCall = tc
 
+				// Fuzzy loop-break: exact repeats are caught above, but a model
+				// can spin by re-issuing the SAME command family with different
+				// arguments across rounds (go test ./a → go test ./b → …).
+				// Each bash family is counted AT MOST once per round; a round
+				// that mixes different families resets the streak (varied
+				// exploration is not spinning, and batched same-family calls
+				// in one round are legitimate). Once the streak is high, block
+				// the call with a "change strategy" instruction.
+				if tc.Name == "bash" {
+					fam := bashFamily(tc.Arguments)
+					if fam != "" {
+						if e.iterBashFamily == "" {
+							e.iterBashFamily = fam
+							e.lastBashFamily, e.bashFamilyStreak = advanceBashFamily(fam, e.lastBashFamily, e.bashFamilyStreak)
+						} else if fam != e.iterBashFamily {
+							e.lastBashFamily = ""
+							e.bashFamilyStreak = 0
+						}
+					}
+					if e.bashFamilyStreak >= 6 {
+						fuzzyGuard := fmt.Sprintf("⚠️ [LOOP GUARD]: You have spent %d consecutive rounds running similar '%s' commands without converging. Stop re-running the same command family — change your approach, answer directly with what you have, or state precisely what information is still missing.", e.bashFamilyStreak, e.lastBashFamily)
+						if onUpdate != nil {
+							onUpdate(e.state, "⚠️ Same-command loop detected — instructing model to change strategy")
+						}
+						pending[i] = pendingTool{tc: tc, output: fuzzyGuard}
+						continue
+					}
+				}
+
 				// Permission gate: risky bash commands ask the user for approval
 				// (Allow once / Always allow / Deny) via the interactive modal.
 				approved, reason, gerr := e.tools.GateAction(ctx, tc)
@@ -893,8 +985,8 @@ Engine Mode Rules (%s):
 			}
 
 			// PHASE 2 — EXECUTION: run every pending call. Read-only tools
-			// (read_file, grep, glob, list_dir, search_code, code_symbols,
-			// fetch_url, web_search) execute CONCURRENTLY — they are stateless
+			// (read_file, grep, glob, list_dir, search_code, fetch_url,
+			// web_search) execute CONCURRENTLY — they are stateless
 			// and their results land in index-aligned slots, so ordering is
 			// preserved regardless of completion order. Mutating/interactive
 			// tools (write_file, edit_file, delete_file, bash, ask_user, git,
@@ -971,6 +1063,16 @@ Engine Mode Rules (%s):
 				if err := e.context.AppendToolResult(pending[i].tc.ID, pending[i].output); err != nil {
 					return "", err
 				}
+				// A failing tool result is a REPRODUCTION: the bug is confirmed
+				// by a command/test that actually failed, so the TSR reproduce
+				// gate opens and the model may fix it. Only real outputs count —
+				// guard/deny/override messages are never a reproduction.
+				if pending[i].exec && e.reproGateArmed && !e.reproEstablished && looksLikeFailure(pending[i].output) {
+					e.reproEstablished = true
+					if onUpdate != nil {
+						onUpdate(e.state, "🧪 Failure reproduced — TSR reproduce gate open, edits allowed")
+					}
+				}
 			}
 
 			// Continuation rule: loop back to StateThinking automatically!
@@ -979,8 +1081,12 @@ Engine Mode Rules (%s):
 
 		// 3. Verifying State (§2.4 Verification Ladder Level 1 & 2). Language-
 		// agnostic: the project type (Go / JS-TS / Python / Rust / Java) is
-		// detected from its config files and the matching checks run.
-		if hasCodeChanges {
+		// detected from its config files and the matching checks run. Runs when
+		// the model has actually edited files this turn (tracked on the engine,
+		// so edits from EARLIER tool-only rounds are verified the moment the
+		// model answers — a per-iteration hasCodeChanges flag would be dead
+		// code, since tool-call rounds always continue before this block).
+		if len(e.editedFiles) > 0 {
 			e.state = StateVerifying
 			if onUpdate != nil {
 				msg := "Running verification..."
@@ -991,8 +1097,38 @@ Engine Mode Rules (%s):
 			}
 
 			if vetErr := runVerification(ctx); vetErr != "" {
+				// Typed revision contract (§ TSR REPAIR/STOP): track repair
+				// attempts and detect when the SAME error persists across fixes
+				// (the model is retrying without progress). Stop the repair loop
+				// gracefully — never burn iterations on a stuck fix.
+				e.tsrAttempts++
+				e.lastVerifyErr = vetErr
+				hash := verifyErrorSignature(vetErr)
+				if hash != "" && hash == e.lastVerifyHash {
+					e.verifyErrorStreak++
+				} else {
+					e.lastVerifyHash = hash
+					e.verifyErrorStreak = 1
+				}
+				if e.tsrAttempts >= maxTSRAttempts || e.verifyErrorStreak >= 3 {
+					msg := fmt.Sprintf(
+						"⚠️ Fix could not be verified after %d attempt(s) (same error %d×): stopping the repair loop.\n\nError still failing:\n%s\n\nSuggestions: try a different approach, split the change, or ask the user for clarification.",
+						e.tsrAttempts, e.verifyErrorStreak, vetErr)
+					_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", msg, nil)
+					e.state = StateDone
+					if onUpdate != nil {
+						onUpdate(e.state, "Repair loop stopped (attempts exhausted / identical error persisted)")
+					}
+					return msg, nil
+				}
 				_ = e.context.AppendUserMessage("Level 1 verification check failed:\n" + vetErr + "\nPlease fix the issues.")
 				continue
+			}
+			// Verification passed after a previous failure: the repair
+			// succeeded — record it so a durable lesson can be distilled.
+			if e.tsrAttempts > 0 {
+				e.repairSucceeded = true
+				e.lessonFiles = append([]string{}, e.editedFiles...)
 			}
 
 			// Native code review (no LLM): debug leftovers, work markers,
@@ -1039,6 +1175,16 @@ Engine Mode Rules (%s):
 			}
 			_ = e.mem.CaptureMinerFindings(resp.Content, explored)
 		}
+
+		// Lesson auto-extract: a repair that started failing and ended passing
+		// is the highest-value failure signal a harness can capture — distill a
+		// one-line durable lesson into project memory (## Gotchas) so future
+		// sessions start knowing this failure mode instead of re-discovering it.
+		if e.repairSucceeded && e.mem != nil && e.lastVerifyErr != "" {
+			if lesson := e.distillLesson(ctx); lesson != "" {
+				_, _ = e.mem.Retain("Gotchas", lesson)
+			}
+		}
 		e.explored = nil
 
 		if onUpdate != nil {
@@ -1046,6 +1192,161 @@ Engine Mode Rules (%s):
 		}
 		return resp.Content, nil
 	}
+}
+
+// distillLesson condenses a repaired verification failure into one durable
+// line for project memory. It builds a deterministic fallback first (never
+// blocks the turn) and, when LLM review is enabled, polishes it into a terse
+// insight via one bounded completion — the LLM version carries the "why"/fix,
+// the deterministic version is always safe if that call fails.
+func (e *Engine) distillLesson(ctx context.Context) string {
+	files := e.lessonFiles
+	if len(files) == 0 {
+		files = e.editedFiles
+	}
+	fileList := "unknown files"
+	if len(files) > 0 {
+		fileList = strings.Join(files, ", ")
+		if len(fileList) > 120 {
+			fileList = fileList[:120] + "…"
+		}
+	}
+	errHead := e.lastVerifyErr
+	if len(errHead) > 300 {
+		errHead = errHead[:300] + "…"
+	}
+	fallback := "Verification failed on " + fileList + ": " + errHead + " — fixed after " + formatTSRAttempts(e.tsrAttempts) + "."
+	if !e.reviewLLMEnabled {
+		return fallback
+	}
+
+	reviewCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req := provider.CompletionRequest{
+		Model: e.model,
+		Messages: []provider.Message{{
+			Role:    "user",
+			Content: "You are a codebase lesson extractor. One sentence (max 40 words) about this failure so a future session avoids repeating the mistake. Focus on the root cause / fix, not the process. Files: " + fileList + "\nFailure was:\n" + errHead + "\n\nReply with only the lesson sentence, no prefix, no quotes.",
+		}},
+		Temperature: 0.2,
+	}
+	resp, err := e.complete(reviewCtx, req)
+	if err != nil || resp == nil {
+		return fallback
+	}
+	lesson := strings.TrimSpace(resp.Content)
+	if lesson == "" || len(lesson) > 400 {
+		return fallback
+	}
+	return lesson
+}
+
+// formatTSRAttempts renders the repair attempt count for lesson text.
+func formatTSRAttempts(n int) string {
+	switch n {
+	case 1:
+		return "1 repair attempt"
+	case 2:
+		return "2 repair attempts"
+	default:
+		return fmt.Sprintf("%d repair attempts", n)
+	}
+}
+
+// buildSystemPrompt renders the full system prompt for the current mode. It is
+// called ONCE per turn and the result is cached on the engine so every loop
+// iteration sends byte-identical leading tokens (provider prompt caching).
+// The warm-start memory excerpt is derived from the user's initial query.
+func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate TurnOutputHandler) string {
+	// Mode descriptions are language-agnostic on purpose: the model is told to
+	// answer in whatever language the user writes in, and must not be biased
+	// by hardcoded phrases or foreign product names.
+	modeDesc := "BUILDER (autonomous coding agent: can read, edit, and run terminal commands)"
+	switch currentMode {
+	case "PLANNER":
+		modeDesc = "PLANNER (architecture & strategy agent: read-only — analyze and plan without editing files)"
+	case "MINER":
+		modeDesc = "MINER (project knowledge agent: read-only exploration that persists verified facts into project memory — learn the codebase, then remember it)"
+	}
+
+	sysPrompt := fmt.Sprintf(`You are BroCode CLI, an autonomous AI coding assistant.
+%s`, e.projectContextBlock())
+	if e.repoMap != "" {
+		sysPrompt += "\n\n" + e.repoMap
+	}
+	if e.skillsCtx != "" {
+		sysPrompt += "\n\nAVAILABLE SKILLS:\n" + e.skillsCtx + "\nWhen a task matches a skill, load its SKILL.md file (read_file) and follow its instructions."
+	}
+	if e.mem != nil {
+		if ws := e.mem.WarmStartRelevant(e.context.LastUserPrompt()); ws != "" {
+			sysPrompt += "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + ws
+			if onUpdate != nil && iteration == 1 {
+				onUpdate(e.state, "🧠 Warm Start: Recalled project memory & hot files")
+			}
+		}
+	}
+	sysPrompt += fmt.Sprintf(`
+🔥 ACTIVE ENGINE MODE: %s (%s).
+CRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as PLANNER or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY. You are NOW operating strictly in %s mode.
+If the user asks about your mode (in any language), answer directly with the mode name (%s) and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.
+
+Engine Mode Rules (%s):
+`, currentMode, modeDesc, currentMode, currentMode, currentMode, currentMode)
+
+	if currentMode == "PLANNER" {
+		sysPrompt += `1. Focus on inspecting codebase, analyzing files, and proposing high-level step-by-step implementation plans.
+2. DO NOT modify any source files or execute write_file/edit_file tools.
+3. Use read_file, list_dir, grep, and glob to research before writing your plan.`
+	} else if currentMode == "MINER" {
+		sysPrompt += `1. MISSION: learn the project deeply and persist VERIFIED knowledge into PROJECT MEMORY using the memory tool (retain). This is how BroCode gets smarter the more it is used.
+2. Read-only: DO NOT modify source files (write_file/edit_file are blocked). You may run read-only bash (git log, git status, ls) to understand history.
+3. VERIFY BEFORE RETAINING: only store facts you confirmed in the code — architecture (service -> repo -> DB), build/test commands that actually exist, conventions (naming, error handling, package manager), decisions, gotchas. Never store guesses; if unsure, read more or skip.
+4. Organize with good sections: Architecture, Build & Test, Conventions, Decisions, Gotchas. Keep each fact short, concrete, and actionable.
+5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`
+	} else {
+		sysPrompt += `1. PLAN & CONTINUE: reason through your plan BEFORE acting, then keep the tool loop running until the goal is achieved — do not stop to ask unless technical ambiguity cannot be resolved by tools. Use native function calling.
+2. EXPLORE BEFORE ANSWERING: form a hypothesis about where the answer lives, then verify it with ONE batched round of targeted reads (glob/grep/read_file/code_locate/search_code; git tool for repo state; fetch_url/web_search for docs). Never answer from memory — read the real code and verify your claims. If a result is unhelpful, adapt; do NOT re-run the same narrow search.
+3. BATCH & STAY LEAN (cost): every round re-sends the ENTIRE conversation, so the number of rounds is the single biggest cost driver. Issue 3-4 independent read/grep/glob calls in ONE message. A read_file over 250 lines truncates — cover the rest with 1-2 range reads (start_line/end_line) then answer; NEVER fight truncation with bash sed/head/tail/grep loops on the same file. Range reads of a large file ARE progress.
+4. ASK ONLY WHEN TOOLS CANNOT DECIDE: for preferences, architecture choices, or destructive operations, call ask_user with 1-3 clear multiple-choice questions. If a risky command is denied or blocked, do NOT retry it — adapt with a safe alternative.
+5. REUSE FIRST: before writing new code, use code_locate and search_code to check whether the symbol/function already exists — reimplementing existing code wastes tokens and creates duplicates. Report what you reused.
+6. TYPE SAFETY & PERFORMANCE: treat type errors as blockers — fix them after the auto-verification (build/typecheck) flags them. Avoid N+1 queries, SELECT *, missing WHERE on updates/deletes, string-built SQL (injection), quadratic loops, and unbounded fetches.
+7. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony, no new abstractions. Extract a helper only at 3+ uses; keep a file under ~300 LOC; inline one-off logic. Over-engineering is a review finding.
+8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools are selective: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth, and run lsp_scan at most once per task.
+9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.
+10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.`
+	}
+	return sysPrompt
+}
+
+// toolsForMode returns the tool surface exposed to the model for the current
+// mode. Structural pruning: read-only modes (PLANNER, MINER) simply DO NOT
+// receive the mutating tools — write_file/edit_file/delete_file are never
+// offered, so the model cannot propose them, cannot waste rounds on guard
+// messages, and pays fewer schema tokens per request. PLANNER additionally
+// drops bash entirely. BUILDER gets the full surface. The runtime mode guards
+// stay as a backstop (MCP/subagent tools bypass this filter), but the LLM is
+// never tempted by tools its mode forbids.
+func (e *Engine) toolsForMode(mode string) []provider.ToolDefinition {
+	defs := e.tools.Definitions()
+	if mode == "BUILDER" {
+		return defs
+	}
+	exclude := map[string]bool{
+		"write_file":  true,
+		"edit_file":   true,
+		"delete_file": true,
+	}
+	if mode == "PLANNER" {
+		exclude["bash"] = true
+	}
+	out := make([]provider.ToolDefinition, 0, len(defs))
+	for _, d := range defs {
+		if exclude[d.Name] {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // LastFallbackModel returns the fallback model used in the most recent turn
@@ -1134,6 +1435,51 @@ func (e *Engine) exploredSummary() string {
 	return "\n\nFiles you have already examined: " + strings.Join(e.explored, ", ")
 }
 
+// finalSynth is the graceful turn-abort path (max iterations or cost budget
+// exceeded): one bounded completion with tools disabled that synthesizes a
+// final answer from the explored context, with a deterministic fallback that
+// NEVER surfaces a raw error. reason is the abort headline (no "⚠️ " prefix);
+// marker labels the synthesized answer in the history.
+func (e *Engine) finalSynth(ctx context.Context, reason string, marker string) (string, error) {
+	synthPrompt := fmt.Sprintf("⚠️ %s Tools are now DISABLED for this final response. You MUST now synthesize a helpful, comprehensive response for the user in the user's language based ONLY on the files and context you have explored so far. Answer as much of the user's prompt as possible, summarize your findings, and clearly state any missing context or next steps.%s", reason, e.exploredSummary())
+	_ = e.context.AppendUserMessage(synthPrompt)
+
+	// Reuse the per-turn cached system prompt so the final synthesis keeps the
+	// byte-identical prefix (provider prompt cache hits).
+	localSysPrompt := e.sysPromptCached
+	if localSysPrompt == "" {
+		localSysPrompt = fmt.Sprintf("You are BroCode CLI, an autonomous AI coding assistant.\n%s", e.projectContextBlock())
+	}
+	reqMessages := append([]provider.Message{
+		{Role: "system", Content: localSysPrompt},
+	}, e.context.Messages()...)
+
+	synthReq := provider.CompletionRequest{
+		Model:       e.model,
+		Messages:    reqMessages,
+		Tools:       nil,
+		Temperature: 0.2,
+	}
+
+	synthResp, synthErr := e.complete(ctx, synthReq)
+	if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) != "" {
+		res := synthResp.Content + "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (" + marker + ").* "
+		_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", res, nil)
+		e.state = StateDone
+		return res, nil
+	}
+
+	// Deterministic fallback — NEVER surface a raw error to the user.
+	e.state = StateDone
+	fallbackMsg := fmt.Sprintf("⚠️ %s\n\nHere is what was verified from the explored codebase:\n%s", reason, e.exploredSummary())
+	if e.lastReasoning != "" {
+		fallbackMsg += "\n\n**Last Working Focus**: " + e.lastReasoning
+	}
+	fallbackMsg += "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (" + marker + ").* "
+	_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", fallbackMsg, nil)
+	return fallbackMsg, nil
+}
+
 // isRepeatToolCall reports whether a tool call is an exact repeat of the
 // previous one in this turn (same name and identical arguments).
 func isRepeatToolCall(tc, prev provider.ToolCall) bool {
@@ -1159,6 +1505,35 @@ func isRepeatToolCall(tc, prev provider.ToolCall) bool {
 		return string(ja) == string(jb)
 	}
 	return false
+}
+
+// bashFamily returns the leading command word of a bash tool call (e.g.
+// "git" for `git status`, "grep" for `grep -rn foo`). It is the coarse signal
+// used by the fuzzy loop-break to detect same-strategy spins where the
+// arguments change but the command family never does. Empty for non-bash use.
+func bashFamily(argsJSON string) string {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil || args.Command == "" {
+		return ""
+	}
+	cmd := strings.TrimSpace(args.Command)
+	if i := strings.IndexAny(cmd, " \t"); i > 0 {
+		cmd = cmd[:i]
+	}
+	return strings.ToLower(cmd)
+}
+
+// advanceBashFamily tracks the consecutive same-family bash streak across
+// ROUNDS: given the current round's family and the engine's last-round family
+// + streak, it returns the updated (family, streak) pair. A switch to a
+// different family (or an empty family) resets the streak to 1.
+func advanceBashFamily(fam, last string, streak int) (string, int) {
+	if fam != "" && fam == last {
+		return fam, streak + 1
+	}
+	return fam, 1
 }
 
 // complete runs a completion through the primary adapter, streaming when the
@@ -1197,6 +1572,11 @@ func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, r
 	// Live cost tracking: accumulate reported usage into the session tracker.
 	if resp != nil && e.usage != nil {
 		e.usage.Record(req.Model, resp.Usage)
+	}
+	// Per-turn cost accumulation for the USD budget: providers report exact
+	// token usage; multiply by the model list price.
+	if resp != nil && (resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0) {
+		e.costUSD += provider.EstimateCostUSD(req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 	return resp, nil
 }

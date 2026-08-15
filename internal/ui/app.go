@@ -19,7 +19,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/glamour"
-	"golang.org/x/term"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/hooks"
 	"github.com/plumpslabs/bro-code/internal/loop"
@@ -33,6 +32,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/subagent"
 	"github.com/plumpslabs/bro-code/internal/tool"
+	"golang.org/x/term"
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -170,6 +170,10 @@ type Model struct {
 	mode           string // "BUILDER", "PLANNER", or "MINER"
 	messages       []string
 	status         string
+
+	// budgetUSD is the per-task cost cap passed via the -budget flag; the
+	// engine stops a turn gracefully once estimated spend exceeds it.
+	budgetUSD float64
 
 	// Reference to running Bubble Tea program for async event broadcasting
 	prog *tea.Program
@@ -436,6 +440,7 @@ func NewApp(
 	mcpMgr *mcp.Manager,
 	lspMgr *lsp.Manager,
 	scoutMgr *subagent.ScoutManager,
+	budgetUSD float64,
 	initialMsgs ...string,
 ) Model {
 	ti := textarea.New()
@@ -532,6 +537,16 @@ func NewApp(
 		msgs = initialMsgs
 	}
 
+	// Resume the session's last engine mode (persisted on every mode change)
+	// so `brocode -c` and /sessions keep working in the mode the user left it
+	// in — a PLANNER session resumes in PLANNER, not BUILDER.
+	initialMode := "BUILDER"
+	if st := ctxMgr.Store(); st != nil {
+		if mode, err := st.GetSessionMode(ctxMgr.SessionID()); err == nil && mode != "" {
+			initialMode = mode
+		}
+	}
+
 	m := Model{
 		cfg:                 cfg,
 		activeProvider:      p,
@@ -542,7 +557,8 @@ func NewApp(
 		mcpMgr:              mcpMgr,
 		lspMgr:              lspMgr,
 		scoutMgr:            scoutMgr,
-		mode:                "BUILDER",
+		mode:                initialMode,
+		budgetUSD:           budgetUSD,
 		mouseMode:           "SELECT",
 		status:              "Ready",
 		messages:            msgs,
@@ -567,6 +583,7 @@ func NewApp(
 	m.globalIndex = search.BuildGlobalIndex(cwd)
 	m.tools.Register(&tool.CodeLocateTool{Index: m.globalIndex})
 	m.tools.Register(&tool.CheckpointTool{})
+	m.tools.Register(&tool.RunTestsTool{Plan: loop.TestCommandPlan})
 
 	m.modelOptions = provider.DiscoverModels(cfg)
 	m.rebuildEngine()
@@ -636,6 +653,7 @@ func (m *Model) buildFallbacks() []loop.Fallback {
 func (m *Model) rebuildEngine() {
 	m.engine = loop.NewEngine(m.adapter, m.tools, m.context, m.activeModel)
 	m.engine.SetMode(m.mode)
+	m.engine.SetBudgetUSD(m.budgetUSD)
 	if m.ask != nil {
 		m.engine.SetAskHandler(func(question string, options []string) (string, error) {
 			results, err := m.ask.Ask(context.Background(), []tool.AskQuestion{
@@ -894,10 +912,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Stamp the mode the turn ran under ("BROCODE:PLANNER\n...") so
 			// every answer shows which engine mode produced it — the mode badge
-			// is rendered by formatMessage. Empty mode falls back to the legacy
+			// is rendered by formatMessage. The active model rides along
+			// ("BROCODE:PLANNER:poolside/x\n...") so the label also names the
+			// model that answered. Empty mode falls back to the legacy
 			// unstamped format (e.g. restored sessions).
 			if msg.mode != "" {
-				m.appendMessages("BROCODE:" + msg.mode + "\n" + display)
+				m.appendMessages("BROCODE:" + msg.mode + ":" + m.activeModel + "\n" + display)
 			} else {
 				m.appendMessages("BROCODE:\n" + display)
 			}
@@ -1093,6 +1113,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.mode = "BUILDER"
 				}
 				m.engine.SetMode(m.mode)
+				m.persistMode()
 				return m, nil
 			}
 
@@ -1399,6 +1420,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		// mining pass that persists verified facts into project memory.
 		m.mode = "MINER"
 		m.engine.SetMode(m.mode)
+		m.persistMode()
 		m.appendMessages("⛏️ MINER mode active — explore the codebase and I'll persist verified knowledge (architecture, build commands, conventions, decisions, gotchas) into project memory. Shift+Tab to switch back to BUILDER.")
 
 	case "/memory":
@@ -1744,6 +1766,15 @@ func (m *Model) applySelectedSession() {
 		st := m.context.Store()
 		m.context = bcontext.NewManager(targetSess.ID, st, m.contextWindow())
 
+		// Continue in the session's last engine mode (persisted on each mode
+		// change) rather than silently dropping back to BUILDER.
+		if targetSess.Mode != "" {
+			m.mode = targetSess.Mode
+		} else {
+			m.mode = "BUILDER"
+		}
+		m.engine.SetMode(m.mode) // apply executor-level policy for the restored mode
+
 		// Load past events into context and message log
 		m.messages = []string{fmt.Sprintf("✅ Switched to session: %s", targetSess.ID)}
 		if st != nil {
@@ -1765,6 +1796,16 @@ func (m *Model) applySelectedSession() {
 		m.renderedKey = ""
 		m.logViewport.SetYOffset(0)
 		m.rebuildEngine()
+		m.persistMode()
+	}
+}
+
+// persistMode writes the current engine mode to the session row so a later
+// resume (`-c` or /sessions) continues in the same mode. Best-effort: the
+// store is optional (nil when SQLite init failed).
+func (m *Model) persistMode() {
+	if st := m.context.Store(); st != nil {
+		_ = st.UpdateSessionMode(m.context.SessionID(), m.mode)
 	}
 }
 
@@ -2170,7 +2211,12 @@ func (m *Model) View() tea.View {
 			// PgUp/PgDn/wheel, chrome below stays pinned.
 			sb.WriteString(m.logViewport.View())
 		} else {
-			sb.WriteString(log)
+			// Before the first WindowSizeMsg lands, width/height are 0 and the
+			// viewport path is unavailable. Clip the raw log to the terminal
+			// height so a resumed session's restored history never dumps its
+			// whole length on the very first frame (a giant flash) before the
+			// viewport takes over.
+			sb.WriteString(clipToTerminalBounds(log, getTerminalHeight()-chromeLines))
 		}
 
 		sb.WriteString(chrome)
@@ -2191,13 +2237,16 @@ func (m *Model) View() tea.View {
 	return v
 }
 
+// clipToTerminalBounds keeps only the NEWEST maxH lines of content (the tail),
+// so a first frame rendered before WindowSizeMsg lands lands on the newest
+// content instead of dumping the whole (restored) history.
 func clipToTerminalBounds(content string, maxH int) string {
 	if maxH <= 0 {
 		return content
 	}
 	lines := strings.Split(content, "\n")
 	if len(lines) > maxH {
-		lines = lines[:maxH]
+		lines = lines[len(lines)-maxH:]
 	}
 	return strings.Join(lines, "\n")
 }
@@ -2696,6 +2745,13 @@ func getTerminalWidth() int {
 	return 120
 }
 
+func getTerminalHeight() int {
+	if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 10 {
+		return h
+	}
+	return 40
+}
+
 // FormatMessageForTerminal renders a formatted message string for stdout stream printing.
 func FormatMessageForTerminal(msg string, width int) string {
 	return formatMessage(msg, width, false)
@@ -2760,15 +2816,24 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 
 	// Assistant messages may be mode-stamped ("BROCODE:PLANNER\n...") so each
 	// answer shows which engine mode produced it as a colored badge next to
-	// the BROCODE label. Legacy "BROCODE:\n" and "🤖 " forms carry no mode
-	// and render without a badge (e.g. sessions restored from disk).
+	// the BROCODE label. The active model rides after the mode separated by a
+	// colon ("BROCODE:PLANNER:poolside/x\n...") and renders dimmed next to the
+	// badge. Legacy "BROCODE:\n" and "🤖 " forms carry no mode and render
+	// without a badge (e.g. sessions restored from disk).
 	mode := ""
+	model := ""
 	var content string
 	if strings.HasPrefix(msg, "BROCODE:") {
 		rest := strings.TrimPrefix(msg, "BROCODE:")
 		if i := strings.Index(rest, "\n"); i >= 0 {
-			mode = rest[:i]
+			stamp := rest[:i]
 			content = rest[i+1:]
+			if s, m, ok := strings.Cut(stamp, ":"); ok {
+				mode = s
+				model = m
+			} else {
+				mode = stamp
+			}
 		} else {
 			content = rest
 		}
@@ -2824,6 +2889,12 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 			badge = badge.Foreground(lipgloss.Color("241"))
 		}
 		label += " " + badge.Render(mode)
+		// Dimmed model label right after the badge ("BROCODE BUILDER
+		// poolside/laguna-s-2.1") so it's clear which provider/model answered.
+		if model != "" {
+			modelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+			label += " " + modelStyle.Render(model)
+		}
 
 		if thinking != "" {
 			return botBarStyle.Render(label + "\n" +

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -200,5 +201,101 @@ func TestStoreSessionAndEvents(t *testing.T) {
 
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+}
+
+func TestSessionModePersist(t *testing.T) {
+	tmpDir := t.TempDir()
+	st, err := NewStore(filepath.Join(tmpDir, "test_brocode.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer st.Close()
+
+	if err := st.CreateSession("mode-sess", "/tmp/proj"); err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	// New sessions default to BUILDER.
+	mode, err := st.GetSessionMode("mode-sess")
+	if err != nil {
+		t.Fatalf("GetSessionMode failed: %v", err)
+	}
+	if mode != "BUILDER" {
+		t.Errorf("expected default mode BUILDER, got %q", mode)
+	}
+
+	// A missing session reports "" (callers treat it as BUILDER).
+	if mode, err := st.GetSessionMode("never-existed"); err != nil || mode != "" {
+		t.Errorf("expected '' for missing session, got %q err=%v", mode, err)
+	}
+
+	// Persisting a mode change survives reads and list queries.
+	if err := st.UpdateSessionMode("mode-sess", "PLANNER"); err != nil {
+		t.Fatalf("UpdateSessionMode failed: %v", err)
+	}
+	mode, err = st.GetSessionMode("mode-sess")
+	if err != nil || mode != "PLANNER" {
+		t.Errorf("expected PLANNER after update, got %q err=%v", mode, err)
+	}
+
+	list, err := st.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions failed: %v", err)
+	}
+	if len(list) != 1 || list[0].Mode != "PLANNER" {
+		t.Errorf("expected ListSessions to carry mode PLANNER, got %+v", list)
+	}
+}
+
+// TestModeColumnMigration simulates a database created before the mode column
+// existed: NewStore's initSchema must migrate it (ALTER TABLE) so reads work.
+func TestModeColumnMigration(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_brocode.db")
+
+	// Build a DB with the OLD schema (no mode column) + a session row.
+	old, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	oldSchema := `
+	CREATE TABLE sessions (
+		id TEXT PRIMARY KEY,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		project_path TEXT,
+		status TEXT
+	);`
+	if _, err := old.Exec(oldSchema); err != nil {
+		t.Fatalf("failed to create old schema: %v", err)
+	}
+	if _, err := old.Exec(`INSERT INTO sessions (id, project_path, status) VALUES ('legacy', '/p', 'active')`); err != nil {
+		t.Fatalf("failed to insert legacy row: %v", err)
+	}
+	old.Close()
+
+	// Reopen with NewStore — initSchema must add the mode column.
+	st, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen store: %v", err)
+	}
+	defer st.Close()
+
+	mode, err := st.GetSessionMode("legacy")
+	if err != nil {
+		t.Fatalf("GetSessionMode on migrated db failed: %v", err)
+	}
+	if mode != "BUILDER" {
+		t.Errorf("expected migrated default BUILDER, got %q", mode)
+	}
+	if err := st.UpdateSessionMode("legacy", "MINER"); err != nil {
+		t.Fatalf("UpdateSessionMode on migrated db failed: %v", err)
+	}
+	list, err := st.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions on migrated db failed: %v", err)
+	}
+	if len(list) != 1 || list[0].Mode != "MINER" {
+		t.Errorf("expected MINER after migration+update, got %+v", list)
 	}
 }

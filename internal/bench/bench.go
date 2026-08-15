@@ -32,6 +32,7 @@ import (
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/loop"
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/tokens"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
@@ -52,6 +53,7 @@ type Result struct {
 	Duration   time.Duration
 	Iterations int
 	Tokens     int // estimated context tokens consumed by the turn
+	CostUSD    float64
 	Answer     string
 }
 
@@ -102,7 +104,7 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []Result {
 				if !res.Pass {
 					status = "FAIL"
 				}
-				fmt.Fprintf(os.Stderr, "  [%s] %s (%s, %d iter, ~%d tok)\n", status, res.ID, res.Duration.Round(time.Millisecond), res.Iterations, res.Tokens)
+				fmt.Fprintf(os.Stderr, "  [%s] %s (%s, %d iter, ~%d tok, $%.4f)\n", status, res.ID, res.Duration.Round(time.Millisecond), res.Iterations, res.Tokens, res.CostUSD)
 			}
 		}
 	}
@@ -170,6 +172,7 @@ func (r *Runner) runCase(ctx context.Context, c Case) Result {
 	res.Answer = answer
 	res.Iterations = iterations
 	res.Tokens = ctxMgr.TotalTokens()
+	res.CostUSD = provider.EstimateCostUSD(r.Model, ctxMgr.TotalTokens(), tokens.EstimateTokens(answer))
 
 	// Verification script (optional; empty verify = pass by completing).
 	if strings.TrimSpace(c.Verify) == "" {
@@ -192,6 +195,7 @@ type Report struct {
 	PassRate     float64
 	MeanDuration time.Duration
 	MeanTokens   int
+	MeanCostUSD  float64
 	PerCase      []Result
 }
 
@@ -206,11 +210,13 @@ func Summarize(results []Result) Report {
 		}
 		rep.MeanDuration += r.Duration
 		rep.MeanTokens += r.Tokens
+		rep.MeanCostUSD += r.CostUSD
 	}
 	if rep.Total > 0 {
 		rep.PassRate = float64(rep.Passed) / float64(rep.Total) * 100
 		rep.MeanDuration /= time.Duration(rep.Total)
 		rep.MeanTokens /= rep.Total
+		rep.MeanCostUSD /= float64(rep.Total)
 	}
 	sort.Slice(rep.PerCase, func(i, j int) bool { return rep.PerCase[i].ID < rep.PerCase[j].ID })
 	return rep
@@ -220,7 +226,7 @@ func Summarize(results []Result) Report {
 func RenderReport(rep Report) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Benchmark: %d cases — %d passed / %d failed (%.1f%%)\n", rep.Total, rep.Passed, rep.Failed, rep.PassRate))
-	sb.WriteString(fmt.Sprintf("Mean task time: %s | Mean context tokens: ~%d\n", rep.MeanDuration.Round(time.Millisecond), rep.MeanTokens))
+	sb.WriteString(fmt.Sprintf("Mean task time: %s | Mean context tokens: ~%d | Mean cost: $%.4f\n", rep.MeanDuration.Round(time.Millisecond), rep.MeanTokens, rep.MeanCostUSD))
 	sb.WriteString("\n")
 	for _, r := range rep.PerCase {
 		status := "PASS"
@@ -231,7 +237,7 @@ func RenderReport(rep Report) string {
 		if !r.Pass && r.Error != "" {
 			extra = " — " + firstLine(r.Error)
 		}
-		sb.WriteString(fmt.Sprintf("  [%s] %-40s %6s  %3d iter  ~%5d tok%s\n", status, r.ID, r.Duration.Round(time.Millisecond), r.Iterations, r.Tokens, extra))
+		sb.WriteString(fmt.Sprintf("  [%s] %-40s %6s  %3d iter  ~%5d tok  $%7.4f%s\n", status, r.ID, r.Duration.Round(time.Millisecond), r.Iterations, r.Tokens, r.CostUSD, extra))
 	}
 	return sb.String()
 }

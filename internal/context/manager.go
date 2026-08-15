@@ -130,7 +130,9 @@ func (m *Manager) AppendUserMessage(content string) error {
 }
 
 // AppendAssistantTurn adds assistant reasoning, answer content, and tool calls.
-func (m *Manager) AppendAssistantTurn(reasoning, content string, toolCalls []provider.ToolCall) error {
+// mode and model stamp the turn's origin (engine mode + active model) so a
+// persisted session can restore each answer with its original badge/label.
+func (m *Manager) AppendAssistantTurn(mode, model, reasoning, content string, toolCalls []provider.ToolCall) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -139,6 +141,8 @@ func (m *Manager) AppendAssistantTurn(reasoning, content string, toolCalls []pro
 		Content:   content,
 		Reasoning: reasoning,
 		ToolCalls: toolCalls,
+		Mode:      mode,
+		Model:     model,
 	}
 	m.messages = append(m.messages, msg)
 
@@ -168,12 +172,14 @@ func (m *Manager) ImportUserMessage(content string) {
 }
 
 // ImportAssistantTurn restores an assistant turn into memory (tokens counted)
-// WITHOUT re-persisting it to the store. See ImportUserMessage.
-func (m *Manager) ImportAssistantTurn(reasoning, content string, toolCalls []provider.ToolCall) {
+// WITHOUT re-persisting it to the store. See ImportUserMessage. mode and model
+// carry the turn's original engine mode and model so the restored UI log can
+// render the correct badge.
+func (m *Manager) ImportAssistantTurn(mode, model, reasoning, content string, toolCalls []provider.ToolCall) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.messages = append(m.messages, provider.Message{Role: "assistant", Content: content, Reasoning: reasoning, ToolCalls: toolCalls})
+	m.messages = append(m.messages, provider.Message{Role: "assistant", Content: content, Reasoning: reasoning, ToolCalls: toolCalls, Mode: mode, Model: model})
 	m.totalTokens += EstimateTokens(reasoning + content)
 }
 
@@ -375,13 +381,24 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 				display = append(display, "YOU:\n"+text)
 			}
 		case "assistant_msg":
-			m.ImportAssistantTurn(msg.Reasoning, msg.Content, msg.ToolCalls)
+			m.ImportAssistantTurn(msg.Mode, msg.Model, msg.Reasoning, msg.Content, msg.ToolCalls)
 			for _, tc := range msg.ToolCalls {
 				pendingTools = append(pendingTools, tc.Name)
 			}
 			if strings.TrimSpace(msg.Content) != "" {
 				flushPendingTools()
-				display = append(display, "BROCODE:\n"+msg.Content)
+				// Stamp the original mode/model ("BROCODE:PLANNER:poolside/x\n")
+				// so the restored answer renders with its true badge. Fall back
+				// to the legacy unstamped form for messages saved without them.
+				stamp := "BROCODE:\n" + msg.Content
+				if msg.Mode != "" {
+					stamp = "BROCODE:" + msg.Mode
+					if msg.Model != "" {
+						stamp += ":" + msg.Model
+					}
+					stamp += "\n" + msg.Content
+				}
+				display = append(display, stamp)
 			}
 		case "tool_result":
 			text := msg.Content

@@ -389,3 +389,75 @@ func TestSanitizeLLMOutputCollapsesMultipleNewlines(t *testing.T) {
 		t.Errorf("expected %q, got %q", expected, got)
 	}
 }
+
+// TestResumeHistoryContinuity pins the `-c` resume UX: the restored history
+// (resume banner + old turns) is loaded INTO the chat log, so continuing the
+// session keeps ONE continuous conversation — the newest answer lands at the
+// bottom, the view never exceeds the terminal, and the oldest restored message
+// is still reachable by scrolling up (nothing is overwritten or detached).
+func TestResumeHistoryContinuity(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 24
+	m.promptInput.SetWidth(m.width - 4)
+	m.logViewport.SetWidth(m.width)
+	m.updateLogHeight()
+
+	// The exact `-c` shape after the fix: resume banner + restored history
+	// seeded into the message list, then the user continues the conversation.
+	m.messages = []string{
+		"✅ Resumed session sess_123 (6 events total)",
+		"YOU:\nhalo bro, lanjutin task filter omnichannel",
+		"BROCODE:\nOke, kita lanjut. Jawaban lama baris satu.\nBaris dua.",
+		"YOU:\nbagus, lanjut",
+		"BROCODE:\nJawaban lama.\nBaris lagi.",
+	}
+
+	// Continuation: new prompt + long answer.
+	m.appendMessages("YOU:\nlanjut bro, kerjain sekarang")
+	m.appendMessages("BROCODE:BUILDER\n" + longAnswer(30))
+
+	v := m.View()
+	n := strings.Count(v.Content, "\n") + 1
+	if n > m.height {
+		t.Fatalf("resumed view taller than terminal: %d > %d — nothing may be cropped", n, m.height)
+	}
+	visible := ansiRegex.ReplaceAllString(v.Content, "")
+	if !strings.Contains(visible, "line of the long answer with some detail and context") {
+		t.Fatalf("newest answer not visible at bottom after resume continuation:\n%s", visible)
+	}
+
+	// Old history must remain in the log (reachable by scrolling up) — the
+	// conversation is continuous, never split or overwritten.
+	m.logViewport.GotoTop()
+	v = m.View()
+	top := ansiRegex.ReplaceAllString(v.Content, "")
+	if !strings.Contains(top, "halo bro, lanjutin task filter omnichannel") {
+		t.Fatalf("oldest restored message not reachable by scrolling up (continuity lost):\n%s", top)
+	}
+}
+
+// TestFirstFrameClippedBeforeWindowSize pins the pre-resize first frame: before
+// the model receives WindowSizeMsg the viewport path is unavailable (width 0),
+// so a long restored history must NOT dump its full length — the frame is
+// clipped to the terminal height and lands on the newest content.
+func TestFirstFrameClippedBeforeWindowSize(t *testing.T) {
+	m := newTestApp()
+	m.width = 0
+	m.height = 0
+	m.messages = []string{"✅ Resumed session sess_123"}
+	for i := 1; i <= 40; i++ {
+		m.appendMessages(fmt.Sprintf("YOU:\nprompt %d with some filler text to wrap lines", i))
+		m.appendMessages(fmt.Sprintf("BROCODE:\nanswer %d with filler text", i))
+	}
+
+	v := m.View()
+	n := strings.Count(v.Content, "\n") + 1
+	if n > 80 {
+		t.Fatalf("first frame before WindowSizeMsg dumped %d lines — must be clipped to terminal height", n)
+	}
+	visible := ansiRegex.ReplaceAllString(v.Content, "")
+	if !strings.Contains(visible, "answer 40") {
+		t.Fatalf("newest content missing after first-frame clip:\n%s", visible)
+	}
+}

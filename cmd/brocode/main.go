@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -26,7 +27,17 @@ func main() {
 	flagContinueLong := flag.Bool("continue", false, "Continue most recent active session")
 	flagContinueShort := flag.Bool("c", false, "Continue most recent active session (shorthand)")
 	flagSession := flag.String("session", "", "Resume specific session ID")
+	flagReplay := flag.String("replay", "", "Replay a session's stored trajectory to stdout and exit (no LLM, no TUI)")
+	flagBudget := flag.Float64("budget", 0, "Per-task cost cap in USD — the turn stops gracefully once estimated spend exceeds it (0 = unlimited)")
+	flagBench := flag.String("bench", "", "Run the benchmark harness on a JSON manifest of cases (file path or single case object) and exit")
 	flag.Parse()
+
+	// 0. Replay mode is fully offline: render the session's chronological
+	// event log (user prompts, assistant turns, tool calls, tool results,
+	// compaction summaries) as plain text and exit — no provider, no TUI.
+	if *flagReplay != "" {
+		os.Exit(replaySession(*flagReplay))
+	}
 
 	// 1. Load Configurations
 	cfg := provider.LoadConfig()
@@ -91,6 +102,13 @@ func main() {
 		adapter = provider.NewAnthropicAdapter(activeProvider.Info.DefaultBaseURL, activeProvider.APIKey)
 	} else {
 		adapter = provider.NewOpenAIAdapter(activeProvider.Info.DefaultBaseURL, activeProvider.APIKey)
+	}
+
+	// 4b. Benchmark mode: run the eval harness headless (cases from a JSON
+	// manifest) and exit with 0 if every case passed, 1 otherwise. Uses the
+	// same resolved provider+model as a normal session.
+	if *flagBench != "" {
+		os.Exit(runBenchmark(*flagBench, adapter, activeModel))
 	}
 
 	// 5. Initialize SQLite Store & Session Management
@@ -201,16 +219,13 @@ func main() {
 	scoutMgr := subagent.NewScoutManager(subRunner)
 	tools.Register(&subagent.ScoutTool{Manager: scoutMgr})
 
-	// 8. Print initial/restored history directly to stdout so it sits naturally
-	// in the OS terminal scrollback buffer (Aider / REPL model), then launch TUI.
-	if len(initialMessages) > 0 {
-		for _, msg := range initialMessages {
-			fmt.Println(ui.FormatMessageForTerminal(msg, 0))
-			fmt.Println()
-		}
-	}
-
-	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr)
+	// 8. Load the initial/restored history INTO the TUI chat log so the whole
+	// conversation (old + new) lives in ONE viewport and scrolls together like
+	// a normal terminal (opencode / claude code style). Printing the history to
+	// stdout instead split a resumed session into two disconnected regions —
+	// old chat stuck in the OS scrollback, new chat in the TUI viewport — so
+	// the newest content appeared to detach from the conversation.
+	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr, *flagBudget, initialMessages...)
 	p := tea.NewProgram(&appModel)
 	appModel.SetProgram(p)
 
@@ -229,4 +244,114 @@ func main() {
 			_ = mem.CaptureSession(sessionID, events)
 		}
 	}
+}
+
+// replaySession prints a session's chronological event trajectory as plain
+// text and returns a process exit code (0 on success). Fully offline — the
+// events are the same append-only log the resume logic replays, re-paired here
+// with the mode/model stamps the turn recorded.
+func replaySession(sessionID string) int {
+	st, err := store.NewStore("")
+	if err != nil {
+		fmt.Printf("Error opening store: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	events, err := st.GetSessionEvents(sessionID)
+	if err != nil {
+		fmt.Printf("Error loading session %s: %v\n", sessionID, err)
+		return 1
+	}
+	if len(events) == 0 {
+		fmt.Printf("Session %s has no visible events.\n", sessionID)
+		return 1
+	}
+
+	var sessions []store.Session
+	if all, lerr := st.ListSessions(); lerr == nil {
+		sessions = all
+	}
+
+	fmt.Print(renderReplay(sessionID, events, sessions))
+	return 0
+}
+
+// renderReplay renders a session's chronological event trajectory as text.
+// Extracted from replaySession so the output can be unit-tested offline.
+func renderReplay(sessionID string, events []store.Event, sessions []store.Session) string {
+	var b strings.Builder
+
+	var sessionMeta string
+	for _, s := range sessions {
+		if s.ID == sessionID {
+			sessionMeta = fmt.Sprintf("project: %s | status: %s | created: %s",
+				s.ProjectPath, s.Status, s.CreatedAt.Format("2006-01-02 15:04:05"))
+			break
+		}
+	}
+
+	fmt.Fprintf(&b, "=== Replay: %s ===\n", sessionID)
+	if sessionMeta != "" {
+		fmt.Fprintf(&b, "%s\n", sessionMeta)
+	}
+	b.WriteString(strings.Repeat("─", 64))
+
+	for _, ev := range events {
+		fmt.Fprintf(&b, "\n[#%d] %s (%s)\n", ev.Seq, ev.Type, ev.CreatedAt.Format("15:04:05"))
+		switch ev.Type {
+		case "user_msg", "assistant_msg", "tool_result", "compaction_summary":
+			var msg provider.Message
+			if json.Unmarshal([]byte(ev.PayloadJSON), &msg) != nil {
+				b.WriteString("  <unparseable payload>\n")
+				continue
+			}
+			printEventBody(&b, ev.Type, msg)
+		default:
+			fmt.Fprintf(&b, "  %s\n", singleLine(ev.PayloadJSON, 240))
+		}
+	}
+	return b.String()
+}
+
+// printEventBody renders one parsed event payload in a human-readable form,
+// re-pairing tool calls with their arguments and showing the mode/model stamp.
+func printEventBody(b *strings.Builder, evType string, msg provider.Message) {
+	switch evType {
+	case "user_msg":
+		if msg.ToolCallID != "" {
+			fmt.Fprintf(b, "  [tool result → %s]\n", msg.ToolCallID)
+			fmt.Fprintf(b, "  %s\n", singleLine(msg.Content, 300))
+			return
+		}
+		fmt.Fprintf(b, "  %s\n", singleLine(msg.Content, 400))
+	case "assistant_msg":
+		stamp := ""
+		if msg.Mode != "" {
+			stamp = fmt.Sprintf("[%s/%s]", msg.Mode, msg.Model)
+		}
+		if msg.Reasoning != "" {
+			fmt.Fprintf(b, "  %s reasoning: %s\n", stamp, singleLine(msg.Reasoning, 200))
+		}
+		if msg.Content != "" {
+			fmt.Fprintf(b, "  %s answer: %s\n", stamp, singleLine(msg.Content, 400))
+		}
+		for _, tc := range msg.ToolCalls {
+			fmt.Fprintf(b, "  → %s(%s)\n", tc.Name, singleLine(tc.Arguments, 200))
+		}
+	case "tool_result":
+		fmt.Fprintf(b, "  %s\n", singleLine(msg.Content, 300))
+	case "compaction_summary":
+		fmt.Fprintf(b, "  %s\n", singleLine(msg.Content, 300))
+	}
+}
+
+// singleLine flattens multi-line text to one line for compact replay output.
+func singleLine(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ⏎ ")
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
 }

@@ -61,16 +61,16 @@ func TestEngineHighWorkloadStabilityAndMemoryLeaks(t *testing.T) {
 
 func TestSelfHealLadderMultiLanguageCoverage(t *testing.T) {
 	testFiles := map[string]string{
-		"main.go":      "package main",
-		"app.ts":       "console.log('hi')",
-		"script.py":    "print('hi')",
-		"main.rs":      "fn main() {}",
-		"main.cpp":     "int main() {}",
-		"index.php":    "<?php echo 'hi';",
-		"app.rb":       "puts 'hi'",
-		"config.yaml":  "key: val",
-		"styles.css":   "body { color: red; }",
-		"document.md":  "# Title",
+		"main.go":     "package main",
+		"app.ts":      "console.log('hi')",
+		"script.py":   "print('hi')",
+		"main.rs":     "fn main() {}",
+		"main.cpp":    "int main() {}",
+		"index.php":   "<?php echo 'hi';",
+		"app.rb":      "puts 'hi'",
+		"config.yaml": "key: val",
+		"styles.css":  "body { color: red; }",
+		"document.md": "# Title",
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

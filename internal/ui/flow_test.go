@@ -446,21 +446,31 @@ func TestTurnResultModeBadge(t *testing.T) {
 		t.Fatal("no messages appended")
 	}
 	last := m.messages[len(m.messages)-1]
-	if !strings.HasPrefix(last, "BROCODE:PLANNER\n") {
-		t.Fatalf("expected mode-stamped message, got %q", last)
+	if !strings.HasPrefix(last, "BROCODE:PLANNER:test-model\n") {
+		t.Fatalf("expected mode+model-stamped message, got %q", last)
 	}
 
-	// Renderer must draw the mode chip next to the BROCODE label. ANSI codes
-	// are stripped first — glamour interleaves them mid-word.
+	// Renderer must draw the mode chip next to the BROCODE label, with the
+	// model shown dimmed after it. ANSI codes are stripped first — glamour
+	// interleaves them mid-word.
 	rendered := ansiRegex.ReplaceAllString(formatMessage(last, 120, false), "")
 	if !strings.Contains(rendered, "PLANNER") {
 		t.Fatalf("rendered answer missing PLANNER badge:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "test-model") {
+		t.Fatalf("rendered answer missing model label:\n%s", rendered)
 	}
 
 	// Legacy unstamped format still renders (no badge, no crash).
 	legacy := ansiRegex.ReplaceAllString(formatMessage("BROCODE:\nplain answer", 120, false), "")
 	if !strings.Contains(legacy, "plain answer") {
 		t.Fatalf("legacy format broken:\n%s", legacy)
+	}
+
+	// Mode-only (no model) legacy stamp still parses and renders the badge.
+	modeOnly := ansiRegex.ReplaceAllString(formatMessage("BROCODE:PLANNER\nplain", 120, false), "")
+	if !strings.Contains(modeOnly, "PLANNER") || !strings.Contains(modeOnly, "plain") {
+		t.Fatalf("mode-only stamp broken:\n%s", modeOnly)
 	}
 }
 
@@ -535,7 +545,7 @@ func TestSessionsDeleteWithConfirm(t *testing.T) {
 	}
 
 	ctx := bcontext.NewManager("test-sess", st, 128000)
-	m := NewApp(provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, "⚡ test")
+	m := NewApp(provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, "⚡ test")
 
 	_, _ = m.handleSlashCommand("/sessions")
 	if !m.showSessions || len(m.sessionList) != 2 {
@@ -587,7 +597,7 @@ func newTestApp() Model {
 	cfg := provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}
 	p := provider.DetectedProvider{}
 	ctx := bcontext.NewManager("test-sess", nil, 128000)
-	return NewApp(cfg, p, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, "⚡ test")
+	return NewApp(cfg, p, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, "⚡ test")
 }
 
 func longAnswer(n int) string {

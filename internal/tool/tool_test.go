@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/plumpslabs/bro-code/internal/memory"
+	"github.com/plumpslabs/bro-code/internal/provider"
 )
 
 func TestReadFileBlockedForSensitiveAndHeavy(t *testing.T) {
@@ -171,29 +172,80 @@ func TestGrepNoMatchRunsOnce(t *testing.T) {
 	}
 }
 
-func TestCodeSymbolsTool(t *testing.T) {
-	tmpDir := t.TempDir()
-	f := filepath.Join(tmpDir, "svc.js")
-	content := `class UserService {
-  async findAll() { return []; }
-  async findByEmail(email) { return null; }
-}
-function helper() {}
-`
-	if err := os.WriteFile(f, []byte(content), 0644); err != nil {
-		t.Fatal(err)
+// TestToolSurfacePruned verifies the structural pruning: the redundant
+// per-file code_symbols tool is NOT part of the exposed surface (code_locate
+// + search_code + read_file ranges cover symbol navigation), while the core
+// read/write/explore tools remain registered.
+func TestToolSurfacePruned(t *testing.T) {
+	reg := NewRegistry()
+	defs := reg.Definitions()
+	names := map[string]bool{}
+	for _, d := range defs {
+		names[d.Name] = true
 	}
+	if names["code_symbols"] {
+		t.Fatal("code_symbols should have been pruned (redundant with code_locate/search_code/read_file)")
+	}
+	for _, want := range []string{
+		"read_file", "write_file", "edit_file", "delete_file", "list_dir",
+		"grep", "glob", "bash", "ask_user", "fetch_url", "git", "undo",
+		"web_search", "review_changes", "search_code", "memory", "run_tests",
+	} {
+		if !names[want] {
+			t.Errorf("expected tool %q to be registered", want)
+		}
+	}
+}
+
+func TestReadOnlyExecutionPolicy(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "x.txt")
+	os.WriteFile(target, []byte("hi\n"), 0644)
 
 	reg := NewRegistry()
-	out, err := reg.Execute(context.Background(), "code_symbols", `{"paths":["`+f+`"]}`)
-	if err != nil {
-		t.Fatalf("code_symbols: %v", err)
+	reg.SetExecutionPolicy(true, false) // read-only files, bash allowed (MINER)
+
+	// Execute path: mutating tools are hard-blocked at the executor level.
+	for _, tc := range []struct {
+		name string
+		args string
+	}{
+		{"write_file", `{"path":"` + tmpDir + `/new.txt","content":"x"}`},
+		{"edit_file", `{"path":"` + target + `","target":"hi","replacement":"bye"}`},
+		{"delete_file", `{"path":"` + target + `"}`},
+	} {
+		if _, err := reg.Execute(context.Background(), tc.name, tc.args); err == nil || !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("expected %q blocked in read-only mode, got err=%v", tc.name, err)
+		}
 	}
-	if !strings.Contains(out, "UserService") || !strings.Contains(out, "findAll") || !strings.Contains(out, "helper") {
-		t.Errorf("code_symbols output missing symbols: %q", out)
+
+	// GateAction path (the engine loop): also denied.
+	ok, _, err := reg.GateAction(context.Background(), provider.ToolCall{Name: "write_file"})
+	if err != nil || ok {
+		t.Fatalf("expected GateAction to deny write_file in read-only mode, ok=%v err=%v", ok, err)
 	}
-	if !strings.Contains(out, "[class]") && !strings.Contains(out, "class") {
-		t.Errorf("code_symbols should show kind: %q", out)
+
+	// Read tools still work under a read-only policy.
+	if out, err := reg.Execute(context.Background(), "read_file", `{"path":"`+target+`"}`); err != nil || !strings.Contains(out, "hi") {
+		t.Fatalf("expected read_file to work in read-only mode, out=%q err=%v", out, err)
+	}
+
+	// SubRegistry inherits the policy — a MINER subagent cannot mutate either.
+	sub := reg.SubRegistry()
+	if _, err := sub.Execute(context.Background(), "write_file", `{"path":"`+tmpDir+`/s.txt","content":"x"}`); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("expected subagent write_file to be blocked via inherited policy, err=%v", err)
+	}
+
+	// PLANNER additionally blocks bash.
+	reg.SetExecutionPolicy(true, true)
+	if _, err := reg.Execute(context.Background(), "bash", `{"command":"echo hi"}`); err == nil || !strings.Contains(err.Error(), "bash") {
+		t.Fatalf("expected bash blocked in PLANNER policy, err=%v", err)
+	}
+
+	// Clearing the policy restores execution (write now actually runs).
+	reg.SetExecutionPolicy(false, false)
+	if _, err := reg.Execute(context.Background(), "write_file", `{"path":"`+tmpDir+`/y.txt","content":"ok"}`); err != nil {
+		t.Fatalf("expected write_file allowed after clearing policy, err=%v", err)
 	}
 }
 

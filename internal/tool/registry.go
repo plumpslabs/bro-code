@@ -60,11 +60,28 @@ type Registry struct {
 	askFunc  func(context.Context, []AskQuestion) ([]AskResult, error)
 	sandbox  *Sandbox // granular per-tool policy (.brocode/sandbox.json)
 
+	// readOnly / readOnlyBash enforce a mode at the EXECUTOR level, not just
+	// in the engine loop: mutating tools (and bash, for PLANNER) are hard
+	// blocked here, so ANY execution path — the main loop, subagents, direct
+	// Execute calls — cannot mutate in a read-only mode. A subagent spawned
+	// from MINER/PLANNER inherits the policy via SubRegistry.
+	readOnly     bool
+	readOnlyBash bool
+
 	// fileActionFunc asks the user before critical file mutations (create /
 	// delete) via the input-bar confirm; fileAllow remembers "always allow"
 	// paths for the rest of the session (keys "create_file:<path>").
 	fileActionFunc func(context.Context, FileActionRequest) (FileActionDecision, error)
 	fileAllow      map[string]bool
+}
+
+// SetExecutionPolicy hard-enforces a read-only mode at the executor level.
+// readOnly=true blocks write_file/edit_file/delete_file everywhere;
+// readOnlyBash additionally blocks bash (PLANNER mode). Safe to call at any
+// time; mutating tools return a clear error instead of executing.
+func (r *Registry) SetExecutionPolicy(readOnly, readOnlyBash bool) {
+	r.readOnly = readOnly
+	r.readOnlyBash = readOnlyBash
 }
 
 // NewRegistry initializes default built-in tools.
@@ -84,9 +101,9 @@ func NewRegistry() *Registry {
 	r.Register(&UndoTool{})
 	r.Register(&WebSearchTool{})
 	r.Register(&ReviewChangesTool{})
-	r.Register(&CodeSymbolsTool{})
 	r.Register(&SearchCodeTool{})
 	r.Register(&MemoryTool{})
+	r.Register(&RunTestsTool{})
 	return r
 }
 
@@ -101,9 +118,14 @@ func (r *Registry) SetSearchEmbedder(e *search.Embedder) {
 	}
 }
 
-// SetRepoRoot anchors the out-of-repo escape check for cd/pushd gates.
+// SetRepoRoot anchors the out-of-repo escape check for cd/pushd gates and
+// tells the bash tool where the project root is (so a container sandbox can
+// mount it at /workspace).
 func (r *Registry) SetRepoRoot(path string) {
 	r.repoRoot = path
+	if bt, ok := r.tools["bash"].(*BashTool); ok {
+		bt.WorkDir = path
+	}
 }
 
 // SetUserAskHandler wires the interactive ask modal so gated commands can
@@ -132,9 +154,15 @@ func (r *Registry) SetMemoryStore(st *memory.Store) {
 
 // SetSandbox applies a granular per-tool permission policy (from
 // .brocode/sandbox.json). Nil or disabled sandboxes leave the default
-// gate-only behavior untouched.
+// gate-only behavior untouched. When the sandbox enables the container
+// sandbox, the bash tool is switched to run inside Docker.
 func (r *Registry) SetSandbox(s *Sandbox) {
 	r.sandbox = s
+	if s != nil && s.Container != nil && s.Container.Enabled {
+		if bt, ok := r.tools["bash"].(*BashTool); ok {
+			bt.Container = s.Container
+		}
+	}
 }
 
 // Sandbox returns the active sandbox policy, or nil when none is configured.
@@ -148,6 +176,16 @@ func (r *Registry) Sandbox() *Sandbox {
 // are hard-blocked. write_file/edit_file are not gated — the PLANNER mode
 // guard already handles read-only enforcement.
 func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approved bool, reason string, err error) {
+	// Read-only mode policy (executor-level enforcement): mutating tools and
+	// bash are hard-blocked before any sandbox/gate logic. This backstops the
+	// engine-loop guards so even a path that bypasses them cannot mutate.
+	if r.readOnly && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file") {
+		return false, fmt.Sprintf("⚠️ [READ-ONLY MODE]: Tool '%s' is disabled in read-only mode (PLANNER/MINER). Switch to BUILDER (Shift+Tab) to modify code.", tc.Name), nil
+	}
+	if r.readOnlyBash && tc.Name == "bash" {
+		return false, "⚠️ [READ-ONLY MODE]: Tool 'bash' is disabled in PLANNER mode (read-only architecture mode). Switch to BUILDER (Shift+Tab) to execute commands.", nil
+	}
+
 	// Sandbox policy first: a blocked tool is hard-denied, never prompted.
 	if r.sandbox != nil {
 		if reason := r.sandbox.CheckTool(tc.Name, tc.Arguments); reason != "" {
@@ -315,6 +353,14 @@ func (r *Registry) Definitions() []provider.ToolDefinition {
 }
 
 func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (string, error) {
+	// Executor-level read-only enforcement: catches direct Execute calls that
+	// never pass through GateAction (sub-agents and other non-loop callers).
+	if r.readOnly && (name == "write_file" || name == "edit_file" || name == "delete_file") {
+		return "", fmt.Errorf("tool '%s' is disabled in read-only mode (PLANNER/MINER): switch to BUILDER to modify code", name)
+	}
+	if r.readOnlyBash && name == "bash" {
+		return "", fmt.Errorf("tool 'bash' is disabled in PLANNER mode (read-only): switch to BUILDER to execute commands")
+	}
 	t, ok := r.tools[name]
 	if !ok {
 		return "", fmt.Errorf("tool '%s' not registered", name)
@@ -335,9 +381,11 @@ func (r *Registry) Lookup(name string) Tool {
 // agent's approval modal, never a silent background run.
 func (r *Registry) SubRegistry() *Registry {
 	nr := &Registry{
-		tools:    make(map[string]Tool, len(r.tools)),
-		repoRoot: r.repoRoot,
-		allow:    make(map[string]bool),
+		tools:        make(map[string]Tool, len(r.tools)),
+		repoRoot:     r.repoRoot,
+		allow:        make(map[string]bool),
+		readOnly:     r.readOnly,
+		readOnlyBash: r.readOnlyBash,
 	}
 	for name, t := range r.tools {
 		switch name {
@@ -934,7 +982,14 @@ func (t *AskUserTool) Execute(ctx context.Context, argsJSON string) (string, err
 }
 
 // BashTool
-type BashTool struct{}
+type BashTool struct {
+	// Container, when non-nil and Enabled, routes every command through a
+	// Docker container instead of the host shell (see ContainerSandbox). It is
+	// wired by Registry.SetSandbox from the sandbox.json policy.
+	Container *ContainerSandbox
+	// WorkDir is the project root, mounted at /workspace inside the container.
+	WorkDir string
+}
 
 func (t *BashTool) Name() string        { return "bash" }
 func (t *BashTool) Description() string { return "Execute shell command" }
@@ -962,7 +1017,8 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	}
 
 	// Native guard: block commands that read/dump sensitive files (cat .env,
-	// head id_rsa, ...) so secrets never enter the LLM context.
+	// head id_rsa, ...) so secrets never enter the LLM context. Applies inside
+	// a container too — isolation is not permission to exfiltrate secrets.
 	if msg := GuardSensitiveCommand(args.Command); msg != "" {
 		return "", fmt.Errorf("%s", msg)
 	}
@@ -970,6 +1026,11 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	// Bound every command with a timeout so a hung process cannot stall the loop.
 	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
+
+	// Container sandbox (opt-in): run inside Docker instead of the host shell.
+	if t.Container != nil && t.Container.Enabled {
+		return t.execInContainer(tctx, args.Command)
+	}
 
 	cmd := exec.CommandContext(tctx, "sh", "-c", args.Command)
 	out, err := cmd.CombinedOutput()
@@ -984,6 +1045,47 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		return "Command executed successfully with no output.", nil
 	}
 	return CapOutput(result), nil
+}
+
+// execInContainer runs the command inside a Docker container with the project
+// root mounted at /workspace. If docker is missing the tool errors clearly
+// instead of falling back to the host — a silently disabled sandbox would give
+// the user false isolation.
+func (t *BashTool) execInContainer(ctx context.Context, command string) (string, error) {
+	image := strings.TrimSpace(t.Container.Image)
+	if image == "" {
+		image = "alpine:3.20"
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		return "", fmt.Errorf("container sandbox is enabled (image %q) but docker is not installed — install Docker Desktop/CLI or disable the container sandbox in .brocode/sandbox.json", image)
+	}
+
+	cmd := exec.CommandContext(ctx, "docker", containerRunArgs(t.WorkDir, image, command)...)
+	out, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(out))
+	if ctx.Err() == context.DeadlineExceeded {
+		return CapOutput(fmt.Sprintf("Command timed out after 60s (container %s).\nOutput:\n%s", image, result)), nil
+	}
+	if err != nil {
+		return CapOutput(fmt.Sprintf("Container command failed with error: %v\nOutput:\n%s", err, result)), nil
+	}
+	if result == "" {
+		return "Command executed successfully in container with no output.", nil
+	}
+	return CapOutput(result), nil
+}
+
+// containerRunArgs builds the docker run invocation: the repo root (if any) is
+// mounted read-write at /workspace and the command runs as sh -c inside the
+// image. Kept as a pure function so the construction is unit-testable without
+// Docker.
+func containerRunArgs(workDir, image, command string) []string {
+	args := []string{"run", "--rm"}
+	if workDir != "" {
+		args = append(args, "-v", workDir+":/workspace", "-w", "/workspace")
+	}
+	args = append(args, image, "sh", "-c", command)
+	return args
 }
 
 // ---------------- Web & Git ----------------

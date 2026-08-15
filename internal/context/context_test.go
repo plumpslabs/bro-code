@@ -34,12 +34,12 @@ func TestContextManagerImportDoesNotDoubleCount(t *testing.T) {
 
 	// Append like a normal turn.
 	_ = mgr.AppendUserMessage("first prompt")
-	_ = mgr.AppendAssistantTurn("thinking...", "first answer", nil)
+	_ = mgr.AppendAssistantTurn("BUILDER", "test-model", "thinking...", "first answer", nil)
 	before := mgr.TotalTokens()
 
 	// Resume/replay must import without duplicating persistence side effects.
 	mgr.ImportUserMessage("first prompt")
-	mgr.ImportAssistantTurn("thinking...", "first answer", nil)
+	mgr.ImportAssistantTurn("BUILDER", "test-model", "thinking...", "first answer", nil)
 
 	msgs := mgr.Messages()
 	if len(msgs) != 4 {
@@ -185,5 +185,56 @@ func TestContextManagerAppendAndCompaction(t *testing.T) {
 	compactedMsgs := mgr.Messages()
 	if len(compactedMsgs) < 1 || compactedMsgs[0].Role != "system" {
 		t.Errorf("expected compacted system summary message as first element")
+	}
+}
+
+// TestRestoreSessionStampsModeAndModel verifies that an assistant turn
+// persisted with Mode/Model metadata restores with a "BROCODE:MODE:MODEL\n"
+// display prefix (so the UI renders the original badge), while messages saved
+// without metadata keep the legacy unstamped form.
+func TestRestoreSessionStampsModeAndModel(t *testing.T) {
+	mgr := NewManager("s", nil, 128000)
+	events := []store.Event{
+		{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: "pahami arsitektur"})},
+		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", Content: "ini rencana", Mode: "PLANNER", Model: "poolside/laguna-s-2.1"})},
+		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", Content: "jawaban lama tanpa stamp"})},
+	}
+
+	display := RestoreSession(mgr, events)
+
+	if !strings.Contains(display[1], "BROCODE:PLANNER:poolside/laguna-s-2.1\n") {
+		t.Errorf("expected mode+model stamped display, got: %q", display[1])
+	}
+	if !strings.HasPrefix(display[2], "BROCODE:\n") {
+		t.Errorf("expected legacy unstamped display, got: %q", display[2])
+	}
+
+	// The metadata must also survive into the restored model context so a
+	// re-serialized request keeps the fields.
+	msgs := mgr.Messages()
+	if msgs[1].Mode != "PLANNER" || msgs[1].Model != "poolside/laguna-s-2.1" {
+		t.Errorf("expected mode/model restored into context, got %+v", msgs[1])
+	}
+}
+
+// TestAppendAssistantTurnPersistsModeModel verifies AppendAssistantTurn stamps
+// the turn with its mode and model and that the stored payload round-trips.
+func TestAppendAssistantTurnPersistsModeModel(t *testing.T) {
+	mgr := NewManager("s", nil, 128000)
+	if err := mgr.AppendAssistantTurn("MINER", "poolside/x", "why", "jawaban", nil); err != nil {
+		t.Fatalf("AppendAssistantTurn failed: %v", err)
+	}
+	msgs := mgr.Messages()
+	if len(msgs) != 1 || msgs[0].Mode != "MINER" || msgs[0].Model != "poolside/x" {
+		t.Errorf("expected mode/model on appended turn, got %+v", msgs)
+	}
+
+	// Round-trip through the same payload format resume reads from disk.
+	var decoded provider.Message
+	if err := json.Unmarshal([]byte(eventPayload(msgs[0])), &decoded); err != nil {
+		t.Fatalf("failed to unmarshal payload: %v", err)
+	}
+	if decoded.Mode != "MINER" || decoded.Model != "poolside/x" {
+		t.Errorf("mode/model lost in serialization round-trip: %+v", decoded)
 	}
 }
