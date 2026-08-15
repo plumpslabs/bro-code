@@ -111,6 +111,12 @@ type Engine struct {
 	// runs when a budget is set, and CostUSD always returns the total).
 	costUSD         float64
 	budgetUSD       float64
+	// turnTokens accumulates the raw token count of this turn's completions
+	// (for the per-turn HUD, P2 #3). lastChangeEmit tracks how many file
+	// changes have already been surfaced to the activity slot this turn, so
+	// the real-time diff (P2 #2) emits only on a NEW change (not every round).
+	turnTokens      int
+	lastChangeEmit  int
 	state           LoopState
 	fallbacks       []Fallback
 	streamHandler   func(delta string)
@@ -549,6 +555,12 @@ func (e *Engine) CostUSD() float64 {
 	return e.costUSD
 }
 
+// TurnTokens returns the raw token count consumed by this turn's completions
+// (per-turn HUD, P2 #3).
+func (e *Engine) TurnTokens() int {
+	return e.turnTokens
+}
+
 func (e *Engine) Mode() string {
 	if e.mode == "" {
 		return "BUILDER"
@@ -587,6 +599,8 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.repairSucceeded = false
 	// Reset the per-turn cost budget counter.
 	e.costUSD = 0
+	e.turnTokens = 0
+	e.lastChangeEmit = 0
 	// Reset the turn's recorded file changes so the review complexity gate and
 	// the UI summary only ever see THIS turn's edits (headless contexts like
 	// the bench harness and tests have no UI ResetChanges call).
@@ -1172,6 +1186,16 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					if onUpdate != nil {
 						onUpdate(e.state, "🧪 Failure reproduced — TSR reproduce gate open, edits allowed")
 					}
+				}
+			}
+
+			// Real-time compact file-change summary into the activity slot
+			// (P2 #2): emit only when NEW changes appeared this round, so the
+			// user sees "what just got edited" live instead of a silent spinner.
+			if onUpdate != nil {
+				if n := tool.ChangesLen(); n > e.lastChangeEmit {
+					e.lastChangeEmit = n
+					onUpdate(e.state, "📝 "+tool.FileChangesOneLine(tool.PeekChanges()))
 				}
 			}
 
@@ -1786,6 +1810,7 @@ func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, r
 	// token usage; multiply by the model list price.
 	if resp != nil && (resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0) {
 		e.costUSD += provider.EstimateCostUSD(req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		e.turnTokens += resp.Usage.TotalTokens
 	}
 	return resp, nil
 }

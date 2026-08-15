@@ -121,6 +121,41 @@ func FileChangesCompact(ch []FileChange) string {
 // Each file's diff is capped so a huge rewrite cannot flood the terminal.
 const maxDiffLinesPerFile = 60
 
+// FileChangesOneLine renders a single compact summary line for the activity
+// slot: total file count, net line deltas, and a per-file breakdown. Used for
+// the real-time "what just changed" HUD during a turn (P2 #2) — kept to one
+// line so it never floods the term.
+func FileChangesOneLine(ch []FileChange) string {
+	if len(ch) == 0 {
+		return ""
+	}
+	totalAdd, totalDel := 0, 0
+	parts := make([]string, 0, len(ch))
+	for _, c := range ch {
+		var add, del int
+		switch c.Action {
+		case "created":
+			add = lineCount(c.New)
+		case "deleted":
+			del = lineCount(c.Old)
+		default:
+			add, del = diffCounts(c.Old, c.New)
+		}
+		totalAdd += add
+		totalDel += del
+		base := c.Path
+		if i := strings.LastIndex(base, "/"); i >= 0 {
+			base = base[i+1:]
+		}
+		parts = append(parts, fmt.Sprintf("%s +%d −%d", base, add, del))
+	}
+	label := "file"
+	if len(ch) > 1 {
+		label = "files"
+	}
+	return fmt.Sprintf("%d %s · +%d −%d  (%s)", len(ch), label, totalAdd, totalDel, strings.Join(parts, " · "))
+}
+
 func FileChangesDiff(ch []FileChange) string {
 	var sb strings.Builder
 	for i, c := range ch {

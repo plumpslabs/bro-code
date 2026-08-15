@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
@@ -424,7 +425,7 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 				return
 			}
 			if m.prog != nil {
-				m.prog.Send(stepProgressMsg(info))
+				m.prog.Send(stepProgressMsg{state: state, info: info})
 			}
 		})
 		// The program may already be exiting (ctrl+c): a Send to a
@@ -439,8 +440,38 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 }
 
 type statusUpdateMsg string
-type stepProgressMsg string
+type stepProgressMsg struct {
+	state loop.LoopState
+	info  string
+}
 type streamChunkMsg string
+
+// phaseBadge returns a short emoji prefix for an engine phase so the live
+// activity slot makes the agent's current state explicit — reasoning vs
+// observing vs running a tool — instead of an ambiguous "still processing".
+func phaseBadge(s loop.LoopState) string {
+	switch s {
+	case loop.StateThinking:
+		return "🧠"
+	case loop.StateObserving:
+		return "👀"
+	case loop.StateVerifying:
+		return "✅"
+	case loop.StateBlocked:
+		return "⚠️"
+	case loop.StateActing:
+		return "🔧"
+	default:
+		return ""
+	}
+}
+
+// startsWithEmoji reports whether the first rune is a symbol/emoji glyph
+// (the message already carries its own visual marker, so skip the badge).
+func startsWithEmoji(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	return r >= 0x2600
+}
 
 // diagnoseResultMsg carries the output of an async /diagnose project scan.
 type diagnoseResultMsg string
@@ -854,7 +885,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case stepProgressMsg:
-		str := string(msg)
+		str := msg.info
 		// Progress events that land AFTER the turn has already settled (the
 		// adapter's stderr goroutine may still flush lines after turnResultMsg)
 		// must not clobber the final status or pollute the history.
@@ -865,6 +896,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if str == "Completed" {
 			m.status = str
 			return m, nil
+		}
+		// Phase badge: make explicit whether the agent is reasoning,
+		// observing, or running a tool — so a long "still processing" state is
+		// never ambiguous. Messages that already lead with their own glyph
+		// (tool calls, warnings, scouts) keep that glyph.
+		if badge := phaseBadge(msg.state); badge != "" && !startsWithEmoji(str) {
+			str = badge + " " + str
 		}
 		// Live agent activity is shown in the status slot ABOVE the input — it
 		// must never be appended to the conversation history (that made process
@@ -2693,10 +2731,14 @@ func (m *Model) buildLogChrome() (string, int) {
 		sessID = sessID[:16] + "..."
 	}
 	tokensStr := fmt.Sprintf("Tokens: %s/%s", provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()))
-	// Live cost estimate in the footer (per-session, from adapter usage).
+	// Live cost/token HUD: per-turn tokens + $ (from this completion run) and
+	// per-session $ (cumulative across turns). Lightweight, in-memory only.
 	if m.engine != nil {
-		if cost := m.engine.SessionCostUSD(); cost > 0 {
-			tokensStr += fmt.Sprintf(" · Cost: $%.4f", cost)
+		if tk, c := m.engine.TurnTokens(), m.engine.CostUSD(); tk > 0 || c > 0 {
+			tokensStr += fmt.Sprintf(" · Turn: %s tok $%.4f", provider.FormatTokens(tk), c)
+		}
+		if s := m.engine.SessionCostUSD(); s > 0 {
+			tokensStr += fmt.Sprintf(" · Sess: $%.4f", s)
 		}
 	}
 

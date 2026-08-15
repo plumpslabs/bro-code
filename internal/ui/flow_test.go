@@ -37,7 +37,7 @@ func TestTurnFlowKeepsHistoryAndSettlesStatus(t *testing.T) {
 		"grep (pattern: 'filter')",
 		"read_file (OmnichannelPanel.tsx)",
 	} {
-		if _, err := m.Update(stepProgressMsg(p)); err != nil {
+		if _, err := m.Update(stepProgressMsg{info: p}); err != nil {
 			t.Fatalf("step progress update failed: %v", err)
 		}
 	}
@@ -55,7 +55,7 @@ func TestTurnFlowKeepsHistoryAndSettlesStatus(t *testing.T) {
 
 	// 4. Late "Completed" progress from the adapter's stderr goroutine must be
 	// ignored once the turn has settled.
-	if _, err := m.Update(stepProgressMsg("Completed")); err != nil {
+	if _, err := m.Update(stepProgressMsg{info: "Completed"}); err != nil {
 		t.Fatalf("late progress update failed: %v", err)
 	}
 	if m.status != "Ready" {
@@ -140,10 +140,10 @@ func TestActivityShownLiveDuringTurn(t *testing.T) {
 
 	// Start a turn and stream a couple of steps.
 	m.status = "Thinking..." // mimics handleEnter before the turn starts
-	if _, err := m.Update(stepProgressMsg("grep (pattern: 'filter')")); err != nil {
+	if _, err := m.Update(stepProgressMsg{info: "grep (pattern: 'filter')"}); err != nil {
 		t.Fatalf("step progress update failed: %v", err)
 	}
-	if _, err := m.Update(stepProgressMsg("read_file (OmnichannelPanel.tsx)")); err != nil {
+	if _, err := m.Update(stepProgressMsg{info: "read_file (OmnichannelPanel.tsx)"}); err != nil {
 		t.Fatalf("step progress update failed: %v", err)
 	}
 
@@ -420,7 +420,7 @@ func TestTurnResultAppendsFileSummary(t *testing.T) {
 func TestActivityResetsOnNewTurn(t *testing.T) {
 	m := newTestApp()
 	m.status = "Thinking..." // mimics handleEnter before the turn starts
-	if _, err := m.Update(stepProgressMsg("grep (pattern: 'filter')")); err != nil {
+	if _, err := m.Update(stepProgressMsg{info: "grep (pattern: 'filter')"}); err != nil {
 		t.Fatalf("step progress update failed: %v", err)
 	}
 	if len(m.activity) != 1 {
