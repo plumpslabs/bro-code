@@ -476,6 +476,10 @@ func startsWithEmoji(s string) bool {
 // diagnoseResultMsg carries the output of an async /diagnose project scan.
 type diagnoseResultMsg string
 
+// diagnoseFixMsg carries a finished project scan whose findings should be
+// handed straight to the agent to fix (the `/diagnose fix` command).
+type diagnoseFixMsg string
+
 // NewApp initializes the Bubble Tea v2 TUI model.
 func NewApp(
 	cfg provider.AppConfig,
@@ -1065,6 +1069,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendMessages(string(msg))
 		m.status = "Ready"
 
+	case diagnoseFixMsg:
+		diag := string(msg)
+		m.appendMessages(diag)
+		// Nothing to fix — don't spawn a pointless turn.
+		if strings.Contains(diag, "No diagnostics found") {
+			m.appendMessages("✅ Tidak ada diagnostik untuk diperbaiki.")
+			m.status = "Ready"
+			return m, nil
+		}
+		m.status = "Fixing diagnostics..."
+		// Hand the LSP findings straight to the agent: fix every safe issue
+		// (lsp_fix for quick-fixes, edit_file for deprecated/unused, lsp_rename
+		// for renames) without asking, then verify.
+		prompt := "Berdasarkan diagnostik LSP di atas, PERBAIKI semua warning dan error yang aman secara otomatis tanpa bertanya:\n\n" +
+			"- Gunakan lsp_fix untuk quick-fix (auto-import, organize imports).\n" +
+			"- Gunakan edit_file untuk deprecated API, unused imports/symbols, dan perbaikan manual lainnya.\n" +
+			"- Gunakan lsp_rename untuk rename simbol yang konsisten project-wide.\n" +
+			"- Setelah selesai, verifikasi dengan `go build ./... && go vet ./...` atau panggil lsp_scan sekali. Jangan ubah behavior—hanya bersihkan warning.\n" +
+			"- Prioritaskan perubahan aman; kalau ada yang butuh keputusan desain, skip dan sebutkan di jawaban."
+		return m.startTurn(prompt)
+
 	case statusUpdateMsg:
 		m.status = string(msg)
 
@@ -1615,7 +1640,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.appendMessages("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
+		m.appendMessages("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/diagnose fix - Scan, then auto-fix all safe warnings/errors via the agent\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
 
 	case "/miner":
 		// Jump straight into MINER mode so the next prompt is a knowledge
@@ -1647,6 +1672,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.appendMessages("⚠️ LSP not initialized.")
 			return m, nil
 		}
+		fixMode := len(parts) > 1 && strings.TrimSpace(parts[1]) == "fix"
 		cwd, _ := os.Getwd()
 		m.status = "Scanning project diagnostics..."
 		lsp := m.lspMgr
@@ -1655,6 +1681,10 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			if err != nil {
 				return diagnoseResultMsg("❌ Diagnose failed: " + err.Error())
 			}
+			if fixMode {
+				return diagnoseFixMsg(out)
+			}
+			out += "\n\n💡 Ketik `/diagnose fix` untuk BroCode langsung memperbaiki semua warning/error di atas secara otomatis."
 			return diagnoseResultMsg(out)
 		}
 
@@ -2732,34 +2762,32 @@ func (m *Model) buildLogChrome() (string, int) {
 	}
 
 	sessID := m.context.SessionID()
-	if len(sessID) > 16 {
-		sessID = sessID[:16] + "..."
+	if len(sessID) > 12 {
+		sessID = sessID[:12] + "…"
 	}
-	tokensStr := fmt.Sprintf("Tokens: %s/%s", provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()))
-	// Live cost/token HUD: per-turn tokens + $ (from this completion run) and
-	// per-session $ (cumulative across turns). Lightweight, in-memory only.
+	// Compact token/$ HUD: window usage, per-turn tokens+$ and per-session $.
+	// Short labels keep the footer on one line even on narrow terminals.
+	tokensStr := fmt.Sprintf("%s/%s", provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()))
 	if m.engine != nil {
 		if tk, c := m.engine.TurnTokens(), m.engine.CostUSD(); tk > 0 || c > 0 {
-			tokensStr += fmt.Sprintf(" · Turn: %s tok $%.4f", provider.FormatTokens(tk), c)
+			tokensStr += fmt.Sprintf(" · T:%s $%.4f", provider.FormatTokens(tk), c)
 		}
 		if s := m.engine.SessionCostUSD(); s > 0 {
-			tokensStr += fmt.Sprintf(" · Sess: $%.4f", s)
+			tokensStr += fmt.Sprintf(" · Sess:$%.4f", s)
 		}
 	}
 
 	// Live LSP indicator: count of available language servers (binary on
-	// PATH) with a colored badge — teal when at least one is usable.
+	// PATH). Compact "· LSP:N" form so the footer never overflows.
 	lspBadge := ""
 	if m.lspMgr != nil {
-		n := len(m.lspMgr.AvailableServers())
-		if n > 0 {
-			lspStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86"))
-			lspBadge = " | " + lspStyle.Render(fmt.Sprintf("🧠 LSP:%d", n))
+		if n := len(m.lspMgr.AvailableServers()); n > 0 {
+			lspBadge = fmt.Sprintf(" · LSP:%d", n)
 		}
 	}
 
-	footerBanner := fmt.Sprintf(" BROCODE🔥 | Mode: %s | Provider: %s | Model: %s | Session: %s | %s%s ",
-		modeBadgeStyle.Render(m.mode+" (Shift+Tab)"), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
+	footerBanner := fmt.Sprintf("🔥 %s · P:%s · M:%s · S:%s · %s%s",
+		modeBadgeStyle.Render(m.mode), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
 
 	helpStr := " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+P pager · Ctrl+Y copy · Ctrl+M mouse · /help "
 	if m.width >= 120 {
