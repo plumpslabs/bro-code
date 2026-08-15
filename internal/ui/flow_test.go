@@ -123,6 +123,22 @@ func TestModeCycleThreeModes(t *testing.T) {
 	}
 }
 
+// TestBareTabDoesNotChangeMode guards against a regression where a plain Tab
+// (no Shift) flipped the mode. Mode switching is Shift+Tab ONLY — a bare Tab
+// is reserved for in-modal navigation and must be a no-op otherwise.
+func TestBareTabDoesNotChangeMode(t *testing.T) {
+	m := newTestApp()
+	if m.mode != "BUILDER" {
+		t.Fatalf("expected default BUILDER, got %s", m.mode)
+	}
+	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyTab}); err != nil {
+		t.Fatalf("tab update failed: %v", err)
+	}
+	if m.mode != "BUILDER" {
+		t.Errorf("bare Tab must not change mode, got %s", m.mode)
+	}
+}
+
 // TestActivityShownLiveDuringTurn verifies the spinner + steps are rendered in
 // the status slot above the input while a turn runs, and clear after it ends.
 func TestActivityShownLiveDuringTurn(t *testing.T) {

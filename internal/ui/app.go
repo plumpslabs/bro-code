@@ -1328,8 +1328,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
-				// Shift+Tab cycles BUILDER → PLANNER → MINER → BUILDER.
+			// Mode switching is Shift+Tab ONLY. A bare Tab must never flip the
+			// mode (it's reserved for in-modal navigation), so it is a no-op
+			// here — and the key is still consumed so it can't bubble elsewhere.
+			if keyStr == "shift+tab" && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
 				switch m.mode {
 				case "BUILDER":
 					m.mode = "PLANNER"
@@ -1340,8 +1342,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.engine.SetMode(m.mode)
 				m.persistMode()
-				return m, nil
 			}
+			return m, nil
 
 		case "esc":
 			// Input-bar file-action confirm: ESC discards (denies) the action.
