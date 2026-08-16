@@ -602,7 +602,7 @@ func (m *Manager) Diagnostics(ctx context.Context, path string) (string, error) 
 			fmt.Fprintf(&sb, "... and %d more diagnostics\n", len(diags)-i)
 			break
 		}
-		sb.WriteString(formatDiagnostic(d) + "\n")
+		sb.WriteString(formatDiagnostic(d));sb.WriteString("\n")
 	}
 	return strings.TrimSpace(sb.String()), nil
 }

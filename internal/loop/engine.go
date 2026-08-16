@@ -1354,6 +1354,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						// context, block whole-file reads (line-range reads still pass).
 						if pending[idx].tc.Name == "read_file" {
 							if reject := e.guardWholeFileRead(pending[idx].tc.Arguments); reject != "" {
+								if onUpdate != nil {
+									onUpdate(e.state, "⛔ read_file BLOCKED (whole-file read during pre-flight — use packed windows / lsp_scan)")
+								}
 								pending[idx].output = reject
 								return
 							}
@@ -1384,6 +1387,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					// re-reading files it already has windows for.
 					if pending[i].tc.Name == "read_file" {
 						if reject := e.guardWholeFileRead(pending[i].tc.Arguments); reject != "" {
+							if onUpdate != nil {
+								onUpdate(e.state, "⛔ read_file BLOCKED (whole-file read during pre-flight — use packed windows / lsp_scan)")
+							}
 							pending[i].output = reject
 							continue
 						}
@@ -2024,7 +2030,7 @@ func readLinesWindow(path string, lo, hi int) string {
 		if n > hi {
 			break
 		}
-		sb.WriteString(fmt.Sprintf("%d: %s\n", n, sc.Text()))
+		fmt.Fprintf(&sb, "%d: %s\n", n, sc.Text())
 	}
 	if sb.Len() == 0 {
 		return ""

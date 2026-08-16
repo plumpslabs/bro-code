@@ -241,9 +241,10 @@ func stripJSONComments(input string) string {
 				escaped = false
 				continue
 			}
-			if c == '\\' {
+			switch c {
+			case '\\':
 				escaped = true
-			} else if c == '"' {
+			case '"':
 				inString = false
 			}
 			continue

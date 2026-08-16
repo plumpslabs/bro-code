@@ -121,7 +121,7 @@ func (s *Store) Save() error {
 			if lines >= maxRetainLines {
 				break
 			}
-			sb.WriteString("- " + f + "\n")
+			sb.WriteString("- ");sb.WriteString(f);sb.WriteString("\n")
 			lines++
 		}
 		sb.WriteString("\n")

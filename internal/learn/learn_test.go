@@ -62,7 +62,7 @@ func TestObserveOverflowDropsRatio(t *testing.T) {
 func TestLearnerPersists(t *testing.T) {
 	p := tmpPath(t)
 	l := NewLearner(p)
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		l.ObserveTurn(0.95)
 	}
 	if err := l.Save(); err != nil {

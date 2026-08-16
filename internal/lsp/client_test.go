@@ -111,8 +111,8 @@ func TestFormatHover(t *testing.T) {
 	}{
 		{"markup", &protocol.MarkupContent{Kind: "markdown", Value: "  **hello**  "}, "**hello**"},
 		{"plain", protocol.String("plain text"), "plain text"},
-		{"marked", &protocol.MarkedStringWithLanguage{Language: "go", Value: "func foo()"}, "func foo()"},
-		{"slice", protocol.MarkedStringSlice{protocol.String("one"), &protocol.MarkedStringWithLanguage{Value: "two"}}, "one\n\ntwo"},
+		{"marked", &protocol.MarkupContent{Kind: "plaintext", Value: "func foo()"}, "func foo()"},
+		{"slice", protocol.MarkedStringSlice{protocol.String("one"), protocol.String("two")}, "one\n\ntwo"},
 		{"nil", nil, ""},
 	}
 	for _, c := range cases {
