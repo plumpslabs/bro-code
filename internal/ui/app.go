@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -321,6 +322,11 @@ type Model struct {
 	// between compact per-file rows and the full +/- diff (ctrl+f).
 	filesExpanded bool
 
+	// activityLog, when set (via the --log flag), receives a real-time stream of
+	// engine activity (phase transitions + status) so the user can `tail -f` it in
+	// another terminal to see what BroCode is doing during a (possibly slow) turn.
+	activityLog io.Writer
+
 	// mouseMode toggles between "SELECT" (native mouse text selection) and
 	// "SCROLL" (mouse wheel viewport scrolling) via ctrl+m. Defaults to SCROLL
 	// so the wheel works out of the box.
@@ -455,6 +461,10 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 			if m.quitting {
 				return
 			}
+			if m.activityLog != nil {
+				ts := time.Now().Format("15:04:05")
+				fmt.Fprintf(m.activityLog, "[%s] %s %s\n", ts, phaseBadge(state), info)
+			}
 			if m.prog != nil {
 				m.prog.Send(stepProgressMsg{state: state, info: info})
 			}
@@ -531,6 +541,7 @@ func NewApp(
 	scoutMgr *subagent.ScoutManager,
 	budgetUSD float64,
 	previousPrompts []string,
+	activityLog io.Writer,
 	initialMsgs ...string,
 ) Model {
 	ti := textarea.New()
@@ -662,6 +673,7 @@ func NewApp(
 		askViewport:      viewport.New(),
 		sessionsViewport: viewport.New(),
 		mcpSummary:       summarizeMCP(mcpMgr),
+		activityLog:      activityLog,
 	}
 
 	// Persistent codebase index + checkpoint tool: built/registered once per
@@ -671,6 +683,16 @@ func NewApp(
 	m.tools.Register(&tool.CodeLocateTool{Index: m.globalIndex})
 	m.tools.Register(&tool.CheckpointTool{})
 	m.tools.Register(&tool.RunTestsTool{Plan: loop.TestCommandPlan})
+
+	// A restored session already carries FILES: change summaries — show them
+	// expanded so the user immediately sees what was edited/created/deleted
+	// without pressing ctrl+f.
+	for _, msg := range msgs {
+		if strings.HasPrefix(msg, "FILES:\n") {
+			m.filesExpanded = true
+			break
+		}
+	}
 
 	m.modelOptions = provider.DiscoverModels(cfg)
 	m.modelListCache = nil
@@ -2168,6 +2190,29 @@ func (m *Model) applySelectedSession() {
 				// paired with their results, and render tool-call-only turns as
 				// compact summaries instead of raw JSON.
 				m.appendMessages(bcontext.RestoreSession(m.context, events)...)
+				// Replay each turn's edit/create/delete record (persisted as a
+				// "file_changes" event) so the user still sees exactly which files
+				// were touched — the live FILES:/DIFF: chat entries are in-memory
+				// only and would otherwise vanish on reopen.
+				for _, ev := range events {
+					if ev.Type != "file_changes" {
+						continue
+					}
+					var ch []tool.FileChange
+					if json.Unmarshal([]byte(ev.PayloadJSON), &ch) == nil {
+						if files := tool.FileChangesMessage(ch); files != "" {
+							m.appendMessages(files)
+						}
+					}
+				}
+				// Show the restored FILES: change summaries expanded so the user
+				// sees what was edited/created/deleted without pressing ctrl+f.
+				for _, msg := range m.messages {
+					if strings.HasPrefix(msg, "FILES:\n") {
+						m.filesExpanded = true
+						break
+					}
+				}
 			}
 		}
 		// Invalidate the rendered-log cache so the viewport re-renders with the

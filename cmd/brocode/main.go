@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ func main() {
 	flagReplay := flag.String("replay", "", "Replay a session's stored trajectory to stdout and exit (no LLM, no TUI)")
 	flagBudget := flag.Float64("budget", 0, "Per-task cost cap in USD — the turn stops gracefully once estimated spend exceeds it (0 = unlimited)")
 	flagBench := flag.String("bench", "", "Run the benchmark harness on a JSON manifest of cases (file path or single case object) and exit")
+	flagLog := flag.String("log", "", "Write a real-time activity log to this file (use `tail -f` in another terminal to monitor what BroCode is doing)")
 	flag.Parse()
 
 	// 0. Replay mode is fully offline: render the session's chronological
@@ -183,6 +185,21 @@ func main() {
 			// events), re-pairs tool results with their calls, and renders
 			// tool-call-only turns as compact summaries instead of raw JSON.
 			initialMessages = append(initialMessages, bcontext.RestoreSession(ctxMgr, events)...)
+			// Replay each turn's edit/create/delete record (persisted as a
+			// "file_changes" event) so the resumed session still shows exactly
+			// which files were touched — the live FILES:/DIFF: chat entries are
+			// in-memory only and would otherwise vanish on reopen.
+			for _, ev := range events {
+				if ev.Type != "file_changes" {
+					continue
+				}
+				var ch []tool.FileChange
+				if json.Unmarshal([]byte(ev.PayloadJSON), &ch) == nil {
+					if files := tool.FileChangesMessage(ch); files != "" {
+						initialMessages = append(initialMessages, files)
+					}
+				}
+			}
 		} else {
 			initialMessages = append(initialMessages, fmt.Sprintf("⚡ Continued session %s.", sessionID))
 		}
@@ -248,7 +265,20 @@ func main() {
 	// stdout instead split a resumed session into two disconnected regions —
 	// old chat stuck in the OS scrollback, new chat in the TUI viewport — so
 	// the newest content appeared to detach from the conversation.
-	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr, *flagBudget, previousPrompts, initialMessages...)
+	// 8.5 If --log is set, open the activity log so the user can `tail -f` it in
+	// another terminal to watch what BroCode is doing during a (possibly slow) turn.
+	var activityLog io.Writer
+	if *flagLog != "" {
+		if lf, lerr := os.OpenFile(*flagLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); lerr == nil {
+			defer lf.Close()
+			activityLog = lf
+			fmt.Fprintf(lf, "=== BroCode activity log %s ===\n", time.Now().Format(time.RFC3339))
+		} else {
+			fmt.Fprintf(os.Stderr, "⚠️ --log: could not open %s: %v\n", *flagLog, lerr)
+		}
+	}
+
+	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr, *flagBudget, previousPrompts, activityLog, initialMessages...)
 	p := tea.NewProgram(&appModel)
 	appModel.SetProgram(p)
 

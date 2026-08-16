@@ -1081,22 +1081,46 @@ func TestLooksLikeLSPFixTaskLanguageAgnostic(t *testing.T) {
 		"baiki deprecated API di client.go",
 		"beresin lint warnings",
 		"bersihkan warnings",
+		// Check/verify prompts mentioning diagnostics must also trigger pre-flight
+		// (otherwise the model re-reads whole files just to verify status).
+		"cek lagi apkah smua warning udh di solved?",
+		"check if all errors are resolved",
+		"verify the lint warnings are gone",
 	}
 	for _, q := range yes {
 		if !looksLikeLSPFixTask(q) {
 			t.Errorf("expected LSP-fix intent for %q", q)
 		}
 	}
-	// Still must NOT fire on plain build/question prompts.
+	// Still must NOT fire on plain build/question prompts (no fix/check verb with
+	// a diagnostic noun, or no diagnostic noun at all).
 	no := []string{
 		"implement a login endpoint",
 		"jelaskan cara kerja cache",
 		"build a caching layer",
+		"why did this error happen", // question, no fix/check verb
 	}
 	for _, q := range no {
 		if looksLikeLSPFixTask(q) {
 			t.Errorf("did NOT expect LSP-fix intent for %q", q)
 		}
+	}
+}
+
+func TestGuardWholeFileRead(t *testing.T) {
+	e := &Engine{}
+	// No pre-flight diagnostics -> whole-file reads allowed.
+	if e.guardWholeFileRead(`{"path":"x.go"}`) != "" {
+		t.Fatal("whole-file read must be allowed when no pre-flight block is present")
+	}
+	e.preflightActive = true
+	// Whole-file read blocked while pre-flight diagnostics are in context.
+	if got := e.guardWholeFileRead(`{"path":"x.go"}`); got == "" {
+		t.Fatal("whole-file read must be blocked during pre-flight")
+	}
+	// Line-range read (start_line present) is genuine progress -> allowed.
+	if got := e.guardWholeFileRead(`{"path":"x.go","start_line":1,"end_line":3}`); got != "" {
+		t.Fatalf("line-range read must be allowed, got block: %q", got)
 	}
 }
 

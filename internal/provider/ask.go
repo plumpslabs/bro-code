@@ -138,7 +138,7 @@ func formatAskResults(results []AskResult) string {
 		}
 		sb.WriteString("   Answer: ");sb.WriteString(answer);sb.WriteString("\n")
 		if r.Custom != "" {
-			sb.WriteString("   Custom: " + r.Custom + "\n")
+			sb.WriteString("   Custom: ");sb.WriteString(r.Custom);sb.WriteString("\n")
 		}
 	}
 	return strings.TrimSpace(sb.String())

@@ -563,7 +563,7 @@ func TestSessionsDeleteWithConfirm(t *testing.T) {
 	}
 
 	ctx := bcontext.NewManager("test-sess", st, 128000)
-	m := NewApp(provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, nil, "⚡ test")
+	m := NewApp(provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, nil, nil, "⚡ test")
 
 	_, _ = m.handleSlashCommand("/sessions")
 	if !m.showSessions || len(m.sessionList) != 2 {
@@ -938,7 +938,7 @@ func newTestApp() Model {
 	cfg := provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}
 	p := provider.DetectedProvider{}
 	ctx := bcontext.NewManager("test-sess", nil, 128000)
-	return NewApp(cfg, p, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, nil, "⚡ test")
+	return NewApp(cfg, p, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, nil, nil, "⚡ test")
 }
 
 func longAnswer(n int) string {
@@ -980,7 +980,7 @@ func splitLines(s string) []string {
 func TestNewAppSeedsPromptHistory(t *testing.T) {
 	ctx := bcontext.NewManager("test-sess", nil, 128000)
 	seeded := []string{"first prompt", "second prompt"}
-	tmp := NewApp(provider.AppConfig{}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, seeded, "⚡ test")
+	tmp := NewApp(provider.AppConfig{}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, seeded, nil, "⚡ test")
 	m := &tmp
 	if len(m.promptHistory) != 2 {
 		t.Fatalf("promptHistory should be seeded with 2 prompts, got %d", len(m.promptHistory))

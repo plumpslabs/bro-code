@@ -39,7 +39,7 @@ func TestObserveTurnNudgesUpWhenCold(t *testing.T) {
 		l.ObserveTurn(0.95)
 	}
 	low := l.CompactionRatio()
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		l.ObserveTurn(0.10)
 	}
 	if got := l.CompactionRatio(); got <= low {

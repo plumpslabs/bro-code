@@ -348,7 +348,7 @@ func TestDiffTouchedLines(t *testing.T) {
 	}
 	// 40-line replacement → ~80 touched lines (40 removed + 40 added) → high complexity.
 	bigA, bigB := "", ""
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		bigA += fmt.Sprintf("_ = %d\n", i)
 		bigB += fmt.Sprintf("_ = %d // v2\n", i)
 	}

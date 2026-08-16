@@ -143,6 +143,11 @@ type Engine struct {
 	// instead of spending tool rounds discovering them. Empty unless the task
 	// looks like a diagnostic/LSP-fix and an LSP server is available.
 	preflightBlock string
+	// preflightActive mirrors "preflightBlock != \"\"" but is set once at turn
+	// start; while true, whole-file read_file calls are blocked (see
+	// guardWholeFileRead) so the model uses the packed windows instead of
+	// re-reading entire files.
+	preflightActive bool
 	// preflightAutoFix holds the result of auto-fixing safe diagnostics at turn
 	// start (lsp_autofix), so the model only handles the MANUAL ones and the task
 	// stays small enough to finish within the tool budget instead of looping.
@@ -778,6 +783,11 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 		}
 	}
+	// While pre-flight diagnostics are in context, whole-file reads are blocked:
+	// the model already has every diagnostic's code window, so re-reading a whole
+	// file is pure waste (tokens + latency). It must fix/verify from the packed
+	// windows or re-run lsp_scan instead.
+	e.preflightActive = e.preflightBlock != ""
 	// Plan-then-act gate: for a multi-step implementation task, force a read-only
 	// PLAN pass first — the model researches and proposes a plan, then confirms via
 	// ask_user before any file is mutated. Approval (detected on the ask_user
@@ -1340,6 +1350,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 							pending[idx].output = "Tool call cancelled: " + ctx.Err().Error()
 							return
 						}
+						// Deterministic guardrail: while pre-flight diagnostics are in
+						// context, block whole-file reads (line-range reads still pass).
+						if pending[idx].tc.Name == "read_file" {
+							if reject := e.guardWholeFileRead(pending[idx].tc.Arguments); reject != "" {
+								pending[idx].output = reject
+								return
+							}
+						}
 						out, err := e.tools.Execute(ctx, pending[idx].tc.Name, pending[idx].tc.Arguments)
 						if err != nil {
 							out = fmt.Sprintf("Tool error: %v", err)
@@ -1360,6 +1378,15 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				for i := range pending {
 					if !pending[i].exec || isParallelReadOnly(pending[i].tc.Name) {
 						continue
+					}
+					// Deterministic guardrail: while pre-flight diagnostics are in
+					// context, block whole-file reads so the model can't waste turns
+					// re-reading files it already has windows for.
+					if pending[i].tc.Name == "read_file" {
+						if reject := e.guardWholeFileRead(pending[i].tc.Arguments); reject != "" {
+							pending[i].output = reject
+							continue
+						}
 					}
 					out, err := e.tools.Execute(ctx, pending[i].tc.Name, pending[i].tc.Arguments)
 					if err != nil {
@@ -1721,7 +1748,7 @@ Engine Mode Rules (%s):
 8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth and run lsp_scan at most once per task (and call it ONCE at the START of any "find/fix warnings/lint" task — that IS your linter: gopls already covers go vet + type errors + deprecated + unused). NEVER go install external linters (golangci-lint/staticcheck/revive/eslint) mid-task — they are redundant with LSP and network-heavy; if LSP is unavailable, ask the user to run /lsp-install or fall back to the project's own go vet/go build. lsp_rename is the right tool for project-wide symbol renames, lsp_fix auto-applies quick-fixes (imports, organize), and lsp_symbols/lsp_outline find symbols by name without guessing a cursor position. LSP diagnostics also run automatically on your edited files after verification.
 9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.
  10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.
- 11. ANTI-LOOP EFFICIENCY (critical): do NOT re-read a file you have already seen, and do NOT keep opening "one more section" hoping for context — once you have enough to act, ACT. When a PRE-GATHERED LSP DIAGNOSTICS block is present, the diagnostics AND their code windows are already in context: fix each item directly with edit_file(start_line,end_line)/lsp_fix, do NOT call lsp_scan again, and do NOT read whole files. For any task, batch all edits, then run verification ONCE (the project's own go build/vet/test, or tsc --noEmit). STOP after that single verification pass — re-running the same checks repeatedly is a loop, not progress.
+ 11. ANTI-LOOP EFFICIENCY (critical): do NOT re-read a file you have already seen, and do NOT keep opening "one more section" hoping for context — once you have enough to act, ACT. When a PRE-GATHERED LSP DIAGNOSTICS block is present, the diagnostics AND their code windows are already in context: fix each item DIRECTLY with edit_file(start_line,end_line)/lsp_fix — you must NOT call read_file for any item you already have a window for, and you must NOT call lsp_scan again. Whole-file reads are forbidden while that block is present. For any task, batch all edits, then run verification ONCE (the project's own go build/vet/test, or tsc --noEmit). STOP after that single verification pass — re-running the same checks repeatedly is a loop, not progress.
  12. PLAN-THEN-ACT (multi-step tasks): for an implementation task the engine first runs a read-only PLAN pass and asks you to confirm before any edit. When you are in PLAN MODE, follow its instructions — research, propose a concise plan, then ask_user to confirm. After approval, execute that agreed plan; do NOT silently re-plan or re-decide architecture mid-execution. If you discover the plan is wrong, surface it and re-confirm rather than wandering.`
 	}
 	return sysPrompt
@@ -1874,17 +1901,28 @@ func looksLikeLSPFixTask(query string) bool {
 		strings.Contains(q, "deprecat") {
 		return true
 	}
-	// "(fix|clean|resolve|perbaiki|...) ... (warning|error|deprecat|lint)".
-	// Language-agnostic: covers English AND Indonesian fix prompts (perbaiki,
+	// "(fix|clean|resolve|perbaiki|...) ... (warning|error|deprecat|lint)" OR
+	// a check/verify prompt ("cek/check/verify ... warning|error|...") — both mean
+	// the engine should proactively scan and pack diagnostics so the model fixes
+	// or verifies in place instead of re-reading whole files.
+	// Language-agnostic: covers English AND Indonesian prompts (perbaiki, cek,
 	// betulkan, baiki, beresin, benerin, bersihkan, hapus, ganti) so pre-flight
 	// LSP packing fires regardless of the user's language.
 	fixVerbs := []string{"fix", "clean", "resolve", "repair", "perbaiki", "betulkan",
 		"baiki", "beresin", "benerin", "bersihkan", "hapus", "ganti", "update"}
+	checkVerbs := []string{"cek", "check", "verify", "verifikasi", "solved", "fixed",
+		"resolved", "udah", "sudah", "masih", "status", "already"}
 	diagNouns := []string{"warning", "error", "deprecat", "lint", "linter"}
-	hasVerb, hasNoun := false, false
+	hasFix, hasCheck, hasNoun := false, false, false
 	for _, v := range fixVerbs {
 		if strings.Contains(q, v) {
-			hasVerb = true
+			hasFix = true
+			break
+		}
+	}
+	for _, v := range checkVerbs {
+		if strings.Contains(q, v) {
+			hasCheck = true
 			break
 		}
 	}
@@ -1894,7 +1932,7 @@ func looksLikeLSPFixTask(query string) bool {
 			break
 		}
 	}
-	return hasVerb && hasNoun
+	return hasNoun && (hasFix || hasCheck)
 }
 
 // preflightLSP runs lsp_scan proactively and packs the result — plus the exact
@@ -1919,7 +1957,7 @@ func (e *Engine) preflightLSP(ctx context.Context) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("PRE-GATHERED LSP DIAGNOSTICS (already scanned for you — do NOT call lsp_scan again; target each item with read_file(start_line,end_line) then fix):\n\n")
+	sb.WriteString("PRE-GATHERED LSP DIAGNOSTICS (already scanned for you — do NOT call lsp_scan again). The exact code window around each item is shown below, so you already have the file:line AND the lines to change. FIX EACH ITEM IN PLACE: use edit_file(start_line,end_line) or lsp_fix DIRECTLY — do NOT read the file first. If the request is only to CHECK whether warnings/errors are resolved, just report what this scan shows (resolved vs remaining) — do NOT read files to verify; the scan IS the source of truth. Batch all fixes in one message, then verify ONCE.\n\n")
 	sb.WriteString(out)
 
 	// Pack the actual code around each diagnostic so the model can fix in place
@@ -1958,7 +1996,7 @@ func (e *Engine) preflightLSP(ctx context.Context) string {
 		if win == "" {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("\n--- %s:%d ---\n%s\n", curFile, lineNo, win))
+		fmt.Fprintf(&sb, "\n--- %s:%d ---\n%s\n", curFile, lineNo, win)
 	}
 	return sb.String()
 }
@@ -2020,6 +2058,21 @@ func (e *Engine) lastChangeDiff(path string) string {
 		return strings.TrimRight(raw, "\n")
 	}
 	return ""
+}
+
+// guardWholeFileRead returns a non-empty rejection message when a read_file call
+// would read an ENTIRE file (no start_line) while pre-flight diagnostics are in
+// context. Re-reading a whole file then is pure waste — the model already has the
+// diagnostic code windows, so it must fix/verify from those or re-run lsp_scan.
+// A line-range read (start_line present) is allowed: it's genuine progress.
+func (e *Engine) guardWholeFileRead(argsJSON string) string {
+	if !e.preflightActive {
+		return ""
+	}
+	if strings.Contains(argsJSON, "start_line") {
+		return ""
+	}
+	return "WHOLE-FILE READ BLOCKED: you already have the exact code windows for every diagnostic in the PRE-GATHERED LSP DIAGNOSTICS block — re-reading the whole file wastes tokens and turns. Fix each item in place with edit_file(start_line,end_line) or lsp_fix, or re-run lsp_scan to verify. Do NOT read the entire file."
 }
 
 // looksLikeImplTask reports whether a user query is a multi-step implementation

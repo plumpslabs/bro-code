@@ -599,7 +599,7 @@ func (m *Manager) Diagnostics(ctx context.Context, path string) (string, error) 
 	var sb strings.Builder
 	for i, d := range diags {
 		if i >= maxDiagsPerFile {
-			sb.WriteString(fmt.Sprintf("... and %d more diagnostics\n", len(diags)-i))
+			fmt.Fprintf(&sb, "... and %d more diagnostics\n", len(diags)-i)
 			break
 		}
 		sb.WriteString(formatDiagnostic(d) + "\n")
