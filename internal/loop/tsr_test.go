@@ -393,6 +393,33 @@ func TestLooksLikeProvidedRepro(t *testing.T) {
 	}
 }
 
+// TestReproGateNotArmedForDiagnostics verifies the TSR REPRODUCE gate is NOT
+// armed for compile-time diagnostic tasks (warnings/errors/lint). Those are
+// detected by the LSP scan, so forcing a reproduce round only makes the agent
+// spin (go test / go vet) before it edits. Genuine runtime bugs still arm it.
+func TestReproGateNotArmedForDiagnostics(t *testing.T) {
+	cases := []struct {
+		query     string
+		shouldArm bool
+	}{
+		{"fix all warnings", false},
+		{"fix the errors in the lsp client", false},
+		{"perbaiki deprecated function", false},
+		{"clean up lint issues", false},
+		{"the handler panics on nil input", true},   // runtime bug
+		{"login is broken and crashes", true},        // runtime bug
+		{"gagal login, tidak jalan", true},          // runtime bug (Indonesian)
+		{"refactor the auth module", false},         // feature, not a bug
+	}
+	for _, c := range cases {
+		arm := looksLikeBugFixTask(c.query) && !looksLikeLSPFixTask(c.query)
+		if arm != c.shouldArm {
+			t.Errorf("repro gate for %q = %v, want %v (bugFix=%v lspFix=%v)",
+				c.query, arm, c.shouldArm, looksLikeBugFixTask(c.query), looksLikeLSPFixTask(c.query))
+		}
+	}
+}
+
 func TestLooksLikeFailure(t *testing.T) {
 	if !looksLikeFailure("Command failed with error: exit status 1") {
 		t.Error("expected bash failure output to be a failure")

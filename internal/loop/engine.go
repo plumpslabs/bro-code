@@ -835,10 +835,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		if err := e.context.AppendUserMessage(userQuery); err != nil {
 			return "", err
 		}
-		// TSR REPRODUCE gate: arm only when the task looks like a bug fix AND
-		// there is a verification command to reproduce it with. If the user
-		// already pasted the error/stack trace, treat the repro as provided.
-		e.reproGateArmed = looksLikeBugFixTask(userQuery)
+		// TSR REPRODUCE gate: arm only when the task looks like a genuine RUNTIME
+		// bug fix (panic/crash/regression/"not working") that must be reproduced
+		// before fixing. Diagnostic/LSP-fix tasks (warnings, errors, lint,
+		// deprecations) are COMPILE-TIME — the LSP scan IS the source of truth,
+		// so arming the gate would only force a pointless reproduce round that
+		// makes the agent spin (go test / go vet) before it even edits. If the
+		// user already pasted the error/stack trace, treat the repro as provided.
+		e.reproGateArmed = looksLikeBugFixTask(userQuery) && !looksLikeLSPFixTask(userQuery)
 		if looksLikeProvidedRepro(userQuery) {
 			e.reproEstablished = true
 		}
