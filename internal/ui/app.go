@@ -229,6 +229,10 @@ type Model struct {
 
 	// Spinner animation state
 	spinnerIdx int
+	// turnStart marks when the current busy phase (turn or slash scan) began,
+	// so the activity slot can show an elapsed timer and the user can tell a
+	// slow generation apart from a real hang.
+	turnStart time.Time
 
 	// Live token streaming state
 	streaming     bool
@@ -414,6 +418,7 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 	m.filesExpanded = false
 	m.appendMessages("YOU:\n" + userQuery)
 	m.status = "Thinking..."
+	m.turnStart = time.Now()
 	// Clear any stale streaming state from a previous interrupted turn.
 	m.streaming = false
 	m.pendingStream = ""
@@ -1707,6 +1712,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		fixMode := len(parts) > 1 && strings.TrimSpace(parts[1]) == "fix"
 		cwd, _ := os.Getwd()
 		m.status = "Scanning project diagnostics..."
+		m.turnStart = time.Now()
 		lsp := m.lspMgr
 		return m, tea.Batch(tickCmd(), func() tea.Msg {
 			out, err := lsp.ScanDiagnostics(context.Background(), cwd)
@@ -1748,6 +1754,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 		m.appendNote(sb.String())
 		m.status = "Installing language servers..."
+		m.turnStart = time.Now()
 		lsp := m.lspMgr
 		return m, tea.Batch(tickCmd(), func() tea.Msg {
 			return diagnoseResultMsg(runLSPInstalls(lsp, lang))
@@ -2719,7 +2726,12 @@ func (m *Model) buildLogChrome() (string, int) {
 	if m.status != "Ready" && m.status != "Failed" {
 		spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 		frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
-		sb.WriteString(spinnerStyle.Render(frame+" "+m.status) + "\n")
+		elapsed := ""
+		if !m.turnStart.IsZero() {
+			d := time.Since(m.turnStart)
+			elapsed = fmt.Sprintf("  ⏱ %d:%02d", int(d.Minutes()), int(d.Seconds())%60)
+		}
+		sb.WriteString(spinnerStyle.Render(frame+" "+m.status+elapsed) + "\n")
 		actStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 		for _, act := range m.activity {
 			sb.WriteString(actStyle.Render("  · "+act) + "\n")
