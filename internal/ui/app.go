@@ -66,6 +66,7 @@ func renderMarkdown(text string, wrap int) string {
 		r, _ = glamour.NewTermRenderer(
 			glamour.WithStandardStyle("dark"),
 			glamour.WithWordWrap(wrap),
+			glamour.WithPreservedNewLines(),
 		)
 		mdRenderers.m[wrap] = r
 	}
@@ -387,6 +388,17 @@ func (m *Model) appendMessages(msgs ...string) {
 			m.trimNoticeShown = true
 			m.messages[0] = "… older messages pruned from this view (kept in session history) — /sessions to browse …"
 		}
+	}
+}
+
+// appendNote adds a UI/informational message to the chat AND persists it as a
+// system_msg event so slash-command output (e.g. /help, /diagnose) survives a
+// -c resume instead of disappearing on reload. Transient confirmations (copy,
+// mouse mode, interrupts) should keep using appendMessages directly.
+func (m *Model) appendNote(text string) {
+	m.appendMessages(text)
+	if m.context != nil {
+		_ = m.context.AppendSystemNote(text)
 	}
 }
 
@@ -1071,15 +1083,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case diagnoseResultMsg:
-		m.appendMessages(string(msg))
+		m.appendNote(string(msg))
 		m.status = "Ready"
 
 	case diagnoseFixMsg:
 		diag := string(msg)
-		m.appendMessages(diag)
+		m.appendNote(diag)
 		// Nothing to fix — don't spawn a pointless turn.
 		if strings.Contains(diag, "No diagnostics found") {
-			m.appendMessages("✅ Tidak ada diagnostik untuk diperbaiki.")
+			m.appendNote("✅ Tidak ada diagnostik untuk diperbaiki.")
 			m.status = "Ready"
 			return m, nil
 		}
@@ -1660,7 +1672,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.appendMessages("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/diagnose fix - Scan, then auto-fix all safe warnings/errors via the agent\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
+		m.appendNote("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/diagnose fix - Scan, then auto-fix all safe warnings/errors via the agent\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
 
 	case "/miner":
 		// Jump straight into MINER mode so the next prompt is a knowledge
@@ -1668,7 +1680,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.mode = "MINER"
 		m.engine.SetMode(m.mode)
 		m.persistMode()
-		m.appendMessages("⛏️ MINER mode active — explore the codebase and I'll persist verified knowledge (architecture, build commands, conventions, decisions, gotchas) into project memory. Shift+Tab to switch back to BUILDER.")
+		m.appendNote("⛏️ MINER mode active — explore the codebase and I'll persist verified knowledge (architecture, build commands, conventions, decisions, gotchas) into project memory. Shift+Tab to switch back to BUILDER.")
 
 	case "/memory":
 		if m.memStore != nil {
@@ -1696,7 +1708,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		cwd, _ := os.Getwd()
 		m.status = "Scanning project diagnostics..."
 		lsp := m.lspMgr
-		return m, func() tea.Msg {
+		return m, tea.Batch(tickCmd(), func() tea.Msg {
 			out, err := lsp.ScanDiagnostics(context.Background(), cwd)
 			if err != nil {
 				return diagnoseResultMsg("❌ Diagnose failed: " + err.Error())
@@ -1706,7 +1718,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			}
 			out += "\n\n💡 Ketik `/diagnose fix` untuk BroCode langsung memperbaiki semua warning/error di atas secara otomatis."
 			return diagnoseResultMsg(out)
-		}
+		})
 
 	case "/lsp-install":
 		if m.lspMgr == nil {
@@ -1734,15 +1746,15 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		for l, c := range hints {
 			sb.WriteString(fmt.Sprintf("\n  %-10s %s", l, c))
 		}
-		m.appendMessages(sb.String())
+		m.appendNote(sb.String())
 		m.status = "Installing language servers..."
 		lsp := m.lspMgr
-		return m, func() tea.Msg {
+		return m, tea.Batch(tickCmd(), func() tea.Msg {
 			return diagnoseResultMsg(runLSPInstalls(lsp, lang))
-		}
+		})
 
 	case "/mcp":
-		m.appendMessages(m.mcpStatus())
+		m.appendNote(m.mcpStatus())
 
 	case "/mcp-reload":
 		if m.mcpMgr != nil {
@@ -1753,7 +1765,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				m.tools.Register(mt)
 			}
 			m.rebuildEngine()
-			m.appendMessages(m.mcpStatus())
+			m.appendNote(m.mcpStatus())
 		} else {
 			m.appendMessages("⚠️ MCP manager not initialized.")
 		}

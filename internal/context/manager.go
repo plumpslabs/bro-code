@@ -171,6 +171,22 @@ func (m *Manager) AppendAssistantTurn(mode, model, reasoning, content string, to
 	return nil
 }
 
+// AppendSystemNote records a UI/informational message (slash-command output
+// such as /help or /diagnose) to the session store so it survives a -c resume.
+// These are not part of the LLM conversation — only the visible chat history —
+// which is why the engine's AppendUserMessage/AppendAssistantTurn do not cover
+// them and they previously vanished when a session was reloaded.
+func (m *Manager) AppendSystemNote(content string) error {
+	if m.store == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	payload, _ := json.Marshal(provider.Message{Role: "system", Content: content})
+	_, err := m.store.AppendEvent(m.sessionID, "system_msg", string(payload), 0)
+	return err
+}
+
 // ImportUserMessage restores a user message into memory (tokens counted)
 // WITHOUT re-persisting it to the store. Used when replaying a session's
 // events so resuming never duplicates history.
@@ -427,6 +443,12 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 				text = ExtractEventContent(ev.PayloadJSON)
 			}
 			m.ImportToolResult(msg.ToolCallID, text)
+		case "system_msg":
+			text := msg.Content
+			if text == "" {
+				text = ExtractEventContent(ev.PayloadJSON)
+			}
+			display = append(display, text)
 		}
 		restored++
 	}

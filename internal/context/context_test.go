@@ -2,12 +2,49 @@ package context
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/store"
 )
+
+func TestAppendSystemNotePersistsAndRestores(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewStore(filepath.Join(dir, "store.db"))
+	if err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	if err := st.CreateSession("sess-note", dir); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	mgr := NewManager("sess-note", st, 128000)
+
+	if err := mgr.AppendSystemNote("📖 Commands:\n/help — show commands"); err != nil {
+		t.Fatalf("AppendSystemNote: %v", err)
+	}
+
+	events, err := st.GetSessionEvents("sess-note")
+	if err != nil {
+		t.Fatalf("GetSessionEvents: %v", err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Type == "system_msg" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a system_msg event to be persisted, got: %+v", events)
+	}
+
+	display := RestoreSession(mgr, events)
+	joined := strings.Join(display, "\n")
+	if !strings.Contains(joined, "📖 Commands:") {
+		t.Errorf("expected system note rendered in restored display, got: %v", joined)
+	}
+}
 
 func TestTruncateToolOutput(t *testing.T) {
 	short := "hello world"
