@@ -562,7 +562,7 @@ func TestSessionsDeleteWithConfirm(t *testing.T) {
 	}
 
 	ctx := bcontext.NewManager("test-sess", st, 128000)
-	m := NewApp(provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, "⚡ test")
+	m := NewApp(provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, nil, "⚡ test")
 
 	_, _ = m.handleSlashCommand("/sessions")
 	if !m.showSessions || len(m.sessionList) != 2 {
@@ -937,7 +937,7 @@ func newTestApp() Model {
 	cfg := provider.AppConfig{Providers: map[string]provider.CustomProviderConfig{}}
 	p := provider.DetectedProvider{}
 	ctx := bcontext.NewManager("test-sess", nil, 128000)
-	return NewApp(cfg, p, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, "⚡ test")
+	return NewApp(cfg, p, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, nil, "⚡ test")
 }
 
 func longAnswer(n int) string {
@@ -970,4 +970,28 @@ func splitLines(s string) []string {
 	}
 	out = append(out, s[start:])
 	return out
+}
+
+// TestNewAppSeedsPromptHistory verifies that prompts passed in from a resumed
+// session are loaded into the up/down prompt-history (so ArrowUp recalls them),
+// not just the live chat log. This is what makes `brocode -c` recall previous
+// prompts even before anything is typed this run.
+func TestNewAppSeedsPromptHistory(t *testing.T) {
+	ctx := bcontext.NewManager("test-sess", nil, 128000)
+	seeded := []string{"first prompt", "second prompt"}
+	tmp := NewApp(provider.AppConfig{}, provider.DetectedProvider{}, "test-model", nil, tool.NewRegistry(), ctx, nil, nil, nil, 0, seeded, "⚡ test")
+	m := &tmp
+	if len(m.promptHistory) != 2 {
+		t.Fatalf("promptHistory should be seeded with 2 prompts, got %d", len(m.promptHistory))
+	}
+	if m.historyIdx != 2 {
+		t.Fatalf("historyIdx should point past the end (2), got %d", m.historyIdx)
+	}
+	// ArrowUp should recall the most recent seeded prompt.
+	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyUp}); err != nil {
+		t.Fatalf("ArrowUp update failed: %v", err)
+	}
+	if m.promptInput.Value() != "second prompt" {
+		t.Fatalf("ArrowUp should recall last prompt, got %q", m.promptInput.Value())
+	}
 }

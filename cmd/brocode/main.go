@@ -148,6 +148,10 @@ func main() {
 	}
 	ctxMgr := bcontext.NewManager(sessionID, st, maxWindow)
 	var initialMessages []string
+	// previousPrompts seeds the TUI's up/down prompt-history with the user
+	// prompts from the resumed session, so ArrowUp recalls earlier prompts
+	// even before anything is typed this run.
+	var previousPrompts []string
 
 	if shouldContinue && st != nil {
 		// Old resume logic re-persisted the whole log on every `-c`, leaving
@@ -158,6 +162,21 @@ func main() {
 		}
 		events, err := st.GetSessionEvents(sessionID)
 		if err == nil && len(events) > 0 {
+			// Reconstruct the user-facing prompt history from user_msg events
+			// (engine-injected reminders like loop guards are filtered out).
+			for _, ev := range events {
+				if ev.Type != "user_msg" {
+					continue
+				}
+				var msg provider.Message
+				if e := json.Unmarshal([]byte(ev.PayloadJSON), &msg); e != nil || msg.Content == "" {
+					continue
+				}
+				if bcontext.IsEngineReminder(msg.Content) {
+					continue
+				}
+				previousPrompts = append(previousPrompts, msg.Content)
+			}
 			initialMessages = append(initialMessages, fmt.Sprintf("✅ Resumed session %s (%d events total)", sessionID, len(events)))
 			// RestoreSession replays only the newest events that fit ~80% of the
 			// context window (a session can accumulate thousands of tool-result
@@ -229,7 +248,7 @@ func main() {
 	// stdout instead split a resumed session into two disconnected regions —
 	// old chat stuck in the OS scrollback, new chat in the TUI viewport — so
 	// the newest content appeared to detach from the conversation.
-	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr, *flagBudget, initialMessages...)
+	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr, *flagBudget, previousPrompts, initialMessages...)
 	p := tea.NewProgram(&appModel)
 	appModel.SetProgram(p)
 

@@ -493,6 +493,7 @@ func NewApp(
 	lspMgr *lsp.Manager,
 	scoutMgr *subagent.ScoutManager,
 	budgetUSD float64,
+	previousPrompts []string,
 	initialMsgs ...string,
 ) Model {
 	ti := textarea.New()
@@ -613,8 +614,11 @@ func NewApp(
 		connectNameInput:    cni,
 		connectBaseURLInput: cbi,
 		connectModelsInput:  cmi,
-		promptHistory:       []string{},
-		historyIdx:          0,
+		// Seed the up/down prompt-history with prompts from a resumed session
+		// so ArrowUp recalls previous prompts even before anything is typed
+		// this run (see CLI: -c / -continue / -session).
+		promptHistory: previousPrompts,
+		historyIdx:    len(previousPrompts),
 		ask:                 brk,
 		fileConfirm:         fbrk,
 		askCustomInput:      aci, logViewport: viewport.New(),
@@ -1082,13 +1086,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "Fixing diagnostics..."
 		// Hand the LSP findings straight to the agent: fix every safe issue
 		// (lsp_fix for quick-fixes, edit_file for deprecated/unused, lsp_rename
-		// for renames) without asking, then verify.
-		prompt := "Berdasarkan diagnostik LSP di atas, PERBAIKI semua warning dan error yang aman secara otomatis tanpa bertanya:\n\n" +
-			"- Gunakan lsp_fix untuk quick-fix (auto-import, organize imports).\n" +
-			"- Gunakan edit_file untuk deprecated API, unused imports/symbols, dan perbaikan manual lainnya.\n" +
-			"- Gunakan lsp_rename untuk rename simbol yang konsisten project-wide.\n" +
-			"- Setelah selesai, verifikasi dengan `go build ./... && go vet ./...` atau panggil lsp_scan sekali. Jangan ubah behavior—hanya bersihkan warning.\n" +
-			"- Prioritaskan perubahan aman; kalau ada yang butuh keputusan desain, skip dan sebutkan di jawaban."
+		// for renames) without asking, then verify. Kept in English like the
+		// rest of the engine's auto-prompts for consistency and best LLM behavior.
+		prompt := "Based on the LSP diagnostics above, FIX all safe warnings and errors automatically without asking:\n\n" +
+			"- Use lsp_fix for quick-fixes (auto-import, organize imports).\n" +
+			"- Use edit_file for deprecated APIs, unused imports/symbols, and other manual fixes.\n" +
+			"- Use lsp_rename for project-wide symbol renames.\n" +
+			"- After finishing, verify with `go build ./... && go vet ./...` or call lsp_scan once. Do NOT change behavior—only clean up warnings.\n" +
+			"- Prioritize safe changes; if something needs a design decision, skip it and mention it in your answer."
 		return m.startTurn(prompt)
 
 	case statusUpdateMsg:

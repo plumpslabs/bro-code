@@ -448,6 +448,11 @@ func isEngineReminder(text string) bool {
 	return false
 }
 
+// IsEngineReminder is the exported form of isEngineReminder, used by callers
+// outside this package (e.g. the CLI) that need to filter out engine-injected
+// user_msg events when reconstructing user-facing history.
+func IsEngineReminder(text string) bool { return isEngineReminder(text) }
+
 // compactToolSummary renders a single compact 1-line process summary for tool calls.
 func compactToolSummary(tools []string) string {
 	if len(tools) == 0 {
