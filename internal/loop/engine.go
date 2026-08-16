@@ -786,7 +786,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// 1. Thinking State
 		e.state = StateThinking
 		if onUpdate != nil {
-			onUpdate(e.state, fmt.Sprintf("Turn %d reasoning...", iteration))
+			onUpdate(e.state, fmt.Sprintf("Turn %d/%d reasoning...", iteration, e.maxIterations))
 		}
 
 		currentMode := e.Mode()
