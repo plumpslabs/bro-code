@@ -151,9 +151,9 @@ type Engine struct {
 	// looks like a diagnostic/LSP-fix and an LSP server is available.
 	preflightBlock string
 	// preflightActive mirrors "preflightBlock != \"\"" but is set once at turn
-	// start; while true, whole-file read_file calls are blocked (see
-	// guardWholeFileRead) so the model uses the packed windows instead of
-	// re-reading entire files.
+	// start; while true, read_file on already-packed files and lsp_scan re-calls
+	// are blocked (see guardPreflightRedundant) so the model uses the packed
+	// windows instead of re-reading/re-scanning.
 	preflightActive bool
 	// preflightAutoFix holds the result of auto-fixing safe diagnostics at turn
 	// start (lsp_autofix), so the model only handles the MANUAL ones and the task
