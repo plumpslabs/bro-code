@@ -1092,7 +1092,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			"- Use lsp_fix for quick-fixes (auto-import, organize imports).\n" +
 			"- Use edit_file for deprecated APIs, unused imports/symbols, and other manual fixes.\n" +
 			"- Use lsp_rename for project-wide symbol renames.\n" +
-			"- After finishing, verify with `go build ./... && go vet ./...` or call lsp_scan once. Do NOT change behavior—only clean up warnings.\n" +
+			"- After finishing, re-run lsp_scan to confirm the diagnostics are resolved. If the project has an obvious build/test CLI (its language's standard toolchain), run it too — but do NOT assume any specific one. Do NOT change behavior—only clean up warnings.\n" +
 			"- Prioritize safe changes; if something needs a design decision, skip it and mention it in your answer."
 		return m.startTurn(prompt)
 
