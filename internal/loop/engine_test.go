@@ -1022,3 +1022,52 @@ func TestBuildSystemPromptIncludesPreflight(t *testing.T) {
 		t.Errorf("preflight block missing on iteration 2")
 	}
 }
+
+// TestLooksLikeImplTask verifies the plan-then-act trigger fires on clearly
+// multi-step build/implement phrasing but NOT on read/question prompts, single-shot
+// fixes, or small single-file edits (which run with minimal ceremony).
+func TestLooksLikeImplTask(t *testing.T) {
+	yes := []string{
+		"implement a login endpoint",
+		"build a caching layer for the API",
+		"create a new user service",
+		"scaffold a new Go package",
+		"set up a CI pipeline",
+		"introduce a rate-limiting middleware",
+	}
+	for _, q := range yes {
+		if !looksLikeImplTask(q) {
+			t.Errorf("expected impl intent for %q", q)
+		}
+	}
+	no := []string{
+		"explain how the cache works",
+		"what does read_file do?",
+		"show me the parser",
+		"fix all the lint warnings",            // handled by pre-flight, not plan
+		"add a small helper",                   // small edit: runs directly
+		"refactor main.go to add a small helper", // single-file: runs directly
+		"list the files in internal/loop",
+		"how do I run the tests?",
+	}
+	for _, q := range no {
+		if looksLikeImplTask(q) {
+			t.Errorf("did NOT expect impl intent for %q", q)
+		}
+	}
+}
+
+// TestPlanModeDirectiveInSystemPrompt verifies the PLAN MODE guard text is
+// injected into the first prompt when the engine is gating an implementation task.
+func TestPlanModeDirectiveInSystemPrompt(t *testing.T) {
+	ctxMgr := bcontext.NewManager("sess", nil, 128000)
+	eng := NewEngine(&mockAdapter{}, tool.NewRegistry(), ctxMgr, "test-model")
+	eng.planMode = true
+	prompt := eng.buildSystemPrompt("BUILDER", 1, nil)
+	if !strings.Contains(prompt, "PLAN MODE") {
+		t.Errorf("expected PLAN MODE directive in system prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "ask_user") {
+		t.Errorf("expected plan-mode to instruct ask_user confirmation")
+	}
+}

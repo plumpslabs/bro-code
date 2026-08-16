@@ -20,6 +20,7 @@ func RegisterTools(r *tool.Registry, m *Manager) {
 	r.Register(&DiagnosticsTool{m: m})
 	r.Register(&ScanTool{m: m})
 	r.Register(&FixTool{m: m})
+	r.Register(&AutoFixTool{m: m})
 	r.Register(&RenameTool{m: m})
 	r.Register(&SymbolsTool{m: m})
 	r.Register(&OutlineTool{m: m})
@@ -198,6 +199,63 @@ func (t *FixTool) Execute(ctx context.Context, argsJSON string) (string, error) 
 		return "", fmt.Errorf("path is required")
 	}
 	return t.m.CodeAction(ctx, args.Path)
+}
+
+// AutoFixTool — apply all auto-fixable quick-fixes across the project in one shot.
+type AutoFixTool struct{ m *Manager }
+
+func (t *AutoFixTool) Name() string { return "lsp_autofix" }
+func (t *AutoFixTool) Description() string {
+	return "Apply ALL auto-fixable language-server quick-fixes (imports, organize-imports, trivial rewrites) across the project — or one file — in a SINGLE call, instead of invoking lsp_fix per file. Use at the END of a 'fix warnings/lint' task after your edits, or to batch-clear fixable diagnostics repo-wide. This is a repo-wide MUTATING action; the project's own checks still verify the result. Pass target \"all\" (default) or a specific file path."
+}
+func (t *AutoFixTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"target": map[string]any{"type": "string", "description": "Scope of the fix: \"all\" (default) to fix every file with diagnostics, or a specific file path to fix just that file"},
+		},
+	}
+}
+func (t *AutoFixTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Target string `json:"target"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	if args.Target != "" && args.Target != "all" {
+		abs, err := filepath.Abs(args.Target)
+		if err != nil {
+			return "", err
+		}
+		c, err := t.m.clientFor(ctx, abs)
+		if err != nil {
+			return "", err
+		}
+		text, err := textAt(abs)
+		if err != nil {
+			return "", err
+		}
+		if err := c.ensureOpen(ctx, abs, text); err != nil {
+			return "", err
+		}
+		if err := t.m.waitForDiagnostics(ctx, diagSettle); err != nil {
+			return "", err
+		}
+		applied, summary, ferr := t.m.autoFixFile(ctx, c, abs, text)
+		if ferr != nil {
+			return "", ferr
+		}
+		if applied == 0 {
+			return "✅ No auto-fixable diagnostics in " + args.Target, nil
+		}
+		return fmt.Sprintf("🔧 %s: %d fix(es) applied\n%s", args.Target, applied, summary), nil
+	}
+	abs, err := filepath.Abs(".")
+	if err != nil {
+		return "", err
+	}
+	return t.m.AutoFixAll(ctx, abs)
 }
 
 // RenameTool — semantic rename across the project.

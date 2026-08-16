@@ -1025,6 +1025,158 @@ func (m *Manager) CodeAction(ctx context.Context, path string) (string, error) {
 	return fmt.Sprintf("Code action %q applied.\n%s", chosen.Title, applied), nil
 }
 
+// fixSettle is a short wait between applying one quick-fix and re-reading the
+// server's diagnostics, so the next iteration sees the post-fix state.
+var fixSettle = 600 * time.Millisecond
+
+// autoFixFile applies every auto-applicable code action the server offers for a
+// file, in a bounded loop. Each iteration re-reads the current diagnostics and
+// prefers the server's "preferred" action; the loop stops when no editable
+// action remains, when the same action repeats (no progress), or at maxActions.
+func (m *Manager) autoFixFile(ctx context.Context, c *Client, path, text string) (applied int, summary string, err error) {
+	const maxActions = 12
+	lastTitle := ""
+	for i := 0; i < maxActions; i++ {
+		if ctx.Err() != nil {
+			return applied, summary, ctx.Err()
+		}
+		u := uri.File(filepath.Clean(path)).String()
+		c.mu.Lock()
+		diags := append([]protocol.Diagnostic(nil), c.pushed[u]...)
+		c.mu.Unlock()
+
+		params := protocol.CodeActionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(filepath.Clean(path))},
+			Range: protocol.Range{
+				Start: protocol.Position{Line: 0, Character: 0},
+				End:   protocol.Position{Line: uint32(strings.Count(text, "\n")), Character: 0},
+			},
+			Context: protocol.CodeActionContext{Diagnostics: diags},
+		}
+		var actions []protocol.CodeAction
+		if _, callErr := c.conn.Call(ctx, "textDocument/codeAction", params, &actions); callErr != nil {
+			return applied, summary, callErr
+		}
+		var editable []protocol.CodeAction
+		for _, a := range actions {
+			if a.Edit != nil {
+				editable = append(editable, a)
+			}
+		}
+		if len(editable) == 0 {
+			break
+		}
+		chosen := editable[0]
+		for _, a := range editable {
+			if a.IsPreferred != nil && *a.IsPreferred {
+				chosen = a
+				break
+			}
+		}
+		// No progress: the same action keeps being offered -> stop to avoid a loop.
+		if chosen.Title == lastTitle {
+			break
+		}
+		res, applyErr := applyWorkspaceEdit(chosen.Edit)
+		if applyErr != nil {
+			return applied, summary, fmt.Errorf("applying code action %q: %w", chosen.Title, applyErr)
+		}
+		lastTitle = chosen.Title
+		applied++
+		summary += fmt.Sprintf("  • %s\n%s", chosen.Title, res)
+		// Re-read file + let the server republish diagnostics before next pass.
+		if nt, rerr := textAt(path); rerr == nil {
+			text = nt
+		}
+		_ = m.waitForDiagnostics(ctx, fixSettle)
+	}
+	return applied, summary, nil
+}
+
+// AutoFixAll applies all auto-fixable quick-fixes across every file that has
+// diagnostics, in a single call (one language-server session, one settle). This
+// is the "batch clear" counterpart to lsp_fix: instead of calling lsp_fix per
+// file, the engine fixes the whole project in one shot. Returns a per-file
+// summary of what was applied.
+func (m *Manager) AutoFixAll(ctx context.Context, root string) (string, error) {
+	files := collectSupportedFiles(root, scanMaxFiles)
+	if len(files) == 0 {
+		return "No supported source files found (no language server available for this project).", nil
+	}
+	opened := make(map[string]string, len(files)) // uri → path
+	clients := make(map[string]*Client, len(files))
+	for _, f := range files {
+		c, err := m.clientFor(ctx, f)
+		if err != nil {
+			continue
+		}
+		text, err := textAt(f)
+		if err != nil {
+			continue
+		}
+		if err := c.ensureOpen(ctx, f, text); err != nil {
+			continue
+		}
+		u := uri.File(filepath.Clean(f)).String()
+		opened[u] = f
+		clients[u] = c
+	}
+	if len(opened) == 0 {
+		return "No language server available to auto-fix diagnostics.", nil
+	}
+	if err := m.waitForDiagnostics(ctx, scanSettle); err != nil {
+		return "", ctx.Err()
+	}
+
+	type target struct {
+		rel  string
+		path string
+		c    *Client
+	}
+	var targets []target
+	for u, f := range opened {
+		c := clients[u]
+		c.mu.Lock()
+		n := len(c.pushed[u])
+		c.mu.Unlock()
+		if n == 0 {
+			continue
+		}
+		rel, err := filepath.Rel(root, f)
+		if err != nil {
+			rel = f
+		}
+		targets = append(targets, target{rel, f, c})
+	}
+	if len(targets) == 0 {
+		return "✅ No diagnostics to auto-fix in the scanned files.", nil
+	}
+
+	var sb strings.Builder
+	totalApplied, filesFixed := 0, 0
+	for _, t := range targets {
+		text, err := textAt(t.path)
+		if err != nil {
+			continue
+		}
+		applied, summary, ferr := m.autoFixFile(ctx, t.c, t.path, text)
+		if ferr != nil {
+			sb.WriteString(fmt.Sprintf("⚠ %s: error — %v\n", t.rel, ferr))
+			continue
+		}
+		if applied > 0 {
+			filesFixed++
+			totalApplied += applied
+			sb.WriteString(fmt.Sprintf("🔧 %s: %d fix(es) applied\n%s\n", t.rel, applied, summary))
+		}
+	}
+	if filesFixed == 0 {
+		return "✅ No auto-fixable diagnostics found (remaining issues need manual edits).", nil
+	}
+	fmt.Fprintf(&sb, "\nAuto-fixed %d issue(s) across %d file(s). Run the project's own checks to verify, then lsp_scan again if anything remains.\n", totalApplied, filesFixed)
+	return sb.String(), nil
+}
+
 // Rename renames the symbol under the cursor across the whole project using
 // the server's semantic rename, applying the resulting edits to disk. The
 // verification ladder catches anything the rename missed. Returns a per-file

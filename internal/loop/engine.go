@@ -146,6 +146,13 @@ type Engine struct {
 	// repoRoot anchors relative paths from pre-flight diagnostics back to real
 	// files so their code windows can be read.
 	repoRoot string
+	// planMode enforces a read-only PLAN pass for multi-step implementation tasks:
+	// the model researches and proposes a plan, then confirms via ask_user before
+	// any file is mutated. planApproved flips the session to BUILDER once approved.
+	// planGateEnabled toggles the whole behavior (on by default).
+	planMode         bool
+	planApproved     bool
+	planGateEnabled  bool
 	// Adaptive routing state: primaryID/primaryProtocol identify the active
 	// provider for health tracking and cross-vendor confirmation; health is the
 	// per-provider circuit breaker; fallbackPolicy is the user's routing
@@ -617,6 +624,7 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		health:            newProviderHealth(),
 		fallbackPolicy:    FallbackAuto,
 		repoRoot:          tools.RepoRoot(),
+		planGateEnabled:  true,
 	}
 }
 
@@ -740,6 +748,20 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			if onUpdate != nil {
 				onUpdate(e.state, "📡 Pre-flight: scanned LSP diagnostics & packed context")
 			}
+		}
+	}
+	// Plan-then-act gate: for a multi-step implementation task, force a read-only
+	// PLAN pass first — the model researches and proposes a plan, then confirms via
+	// ask_user before any file is mutated. Approval (detected on the ask_user
+	// result) flips the session to BUILDER. Toggled by planGateEnabled; off once
+	// planApproved for the session, and never applied to read/question prompts or
+	// non-BUILDER modes.
+	e.planMode = false
+	if e.planGateEnabled && !e.planApproved && e.mode == "BUILDER" && looksLikeImplTask(userQuery) {
+		e.planMode = true
+		e.tools.SetExecutionPolicy(true, false) // read-only; research only
+		if onUpdate != nil {
+			onUpdate(e.state, "📋 Plan mode: researching & drafting plan (no edits until you approve)")
 		}
 	}
 	defer func() { e.progressHandler = nil }()
@@ -1295,6 +1317,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 					pending[i].output = out
 
+					// Plan-then-act: the user approving the plan (any ask_user result
+					// containing "approve") flips the session from read-only PLAN to
+					// BUILDER, restoring mutating tools for the execution phase.
+					if e.planMode && pending[i].tc.Name == "ask_user" && strings.Contains(strings.ToLower(out), "approve") {
+						e.planApproved = true
+						e.planMode = false
+						e.tools.SetExecutionPolicy(false, false) // restore BUILDER
+						if onUpdate != nil {
+							onUpdate(e.state, "✅ Plan approved — switching to BUILDER to implement")
+						}
+					}
+
 					// Track files the model edited so the native convention checker
 					// can review them (debug leftovers, markers, type safety,
 					// duplicate symbols) before the turn is declared done.
@@ -1577,6 +1611,16 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 	if e.preflightBlock != "" && iteration == 1 {
 		sysPrompt += "\n\n" + e.preflightBlock
 	}
+	// Plan-then-act: when gating an implementation task, this turn is a read-only
+	// PLAN pass. The model researches and proposes a plan, then must confirm via
+	// ask_user (whose "Approve" result flips the session to BUILDER) before edits.
+	// Mutating tools are structurally blocked while planMode is set, so this is a
+	// hard guard, not just a suggestion.
+	if e.planMode {
+		sysPrompt += `
+
+📋 PLAN MODE (this turn is a read-only PLANNING pass): For this implementation task, RESEARCH the codebase with read-only tools (read_file, code_locate, grep, glob, lsp_* inspect tools), then output a concise numbered implementation plan. BEFORE any file is edited you MUST call ask_user to confirm it, with options: "Approve & build", "Revise plan", "Cancel". Do NOT call any mutating tool (write_file, edit_file, delete_file, lsp_fix, lsp_autofix, lsp_rename) — they are blocked until the plan is approved. Once the user picks "Approve & build", you may implement in the next step.`
+	}
 	sysPrompt += fmt.Sprintf(`
 🔥 ACTIVE ENGINE MODE: %s (%s).
 CRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as PLANNER or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY. You are NOW operating strictly in %s mode.
@@ -1614,7 +1658,8 @@ Engine Mode Rules (%s):
 8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth and run lsp_scan at most once per task (and call it ONCE at the START of any "find/fix warnings/lint" task — that IS your linter: gopls already covers go vet + type errors + deprecated + unused). NEVER go install external linters (golangci-lint/staticcheck/revive/eslint) mid-task — they are redundant with LSP and network-heavy; if LSP is unavailable, ask the user to run /lsp-install or fall back to the project's own go vet/go build. lsp_rename is the right tool for project-wide symbol renames, lsp_fix auto-applies quick-fixes (imports, organize), and lsp_symbols/lsp_outline find symbols by name without guessing a cursor position. LSP diagnostics also run automatically on your edited files after verification.
 9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.
  10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.
- 11. ANTI-LOOP EFFICIENCY (critical): do NOT re-read a file you have already seen, and do NOT keep opening "one more section" hoping for context — once you have enough to act, ACT. When a PRE-GATHERED LSP DIAGNOSTICS block is present, the diagnostics AND their code windows are already in context: fix each item directly with edit_file(start_line,end_line)/lsp_fix, do NOT call lsp_scan again, and do NOT read whole files. For any task, batch all edits, then run verification ONCE (the project's own go build/vet/test, or tsc --noEmit). STOP after that single verification pass — re-running the same checks repeatedly is a loop, not progress.`
+ 11. ANTI-LOOP EFFICIENCY (critical): do NOT re-read a file you have already seen, and do NOT keep opening "one more section" hoping for context — once you have enough to act, ACT. When a PRE-GATHERED LSP DIAGNOSTICS block is present, the diagnostics AND their code windows are already in context: fix each item directly with edit_file(start_line,end_line)/lsp_fix, do NOT call lsp_scan again, and do NOT read whole files. For any task, batch all edits, then run verification ONCE (the project's own go build/vet/test, or tsc --noEmit). STOP after that single verification pass — re-running the same checks repeatedly is a loop, not progress.
+ 12. PLAN-THEN-ACT (multi-step tasks): for an implementation task the engine first runs a read-only PLAN pass and asks you to confirm before any edit. When you are in PLAN MODE, follow its instructions — research, propose a concise plan, then ask_user to confirm. After approval, execute that agreed plan; do NOT silently re-plan or re-decide architecture mid-execution. If you discover the plan is wrong, surface it and re-confirm rather than wandering.`
 	}
 	return sysPrompt
 }
@@ -1879,6 +1924,38 @@ func atoiSafe(s string) int {
 		n = n*10 + int(c-'0')
 	}
 	return n
+}
+
+// looksLikeImplTask reports whether a user query is a multi-step implementation
+// task that benefits from a PLAN pass before any edits — so the engine can gate
+// it behind plan-then-act. Pure read/question prompts and single-shot lint-fix
+// tasks (handled by pre-flight) are deliberately excluded.
+func looksLikeImplTask(query string) bool {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" || strings.HasSuffix(q, "?") {
+		return false
+	}
+	// Pure read/question phrasing -> not an implementation task.
+	readPrefixes := []string{"explain", "what", "how", "why", "show", "describe",
+		"where", "when", "who", "list", "summar", "find", "search", "which",
+		"tell me", "does ", "is ", "are ", "can you explain"}
+	for _, w := range readPrefixes {
+		if strings.HasPrefix(q, w) {
+			return false
+		}
+	}
+	// Multi-step build/implement intent. Deliberately excludes "add", "refactor",
+	// "fix", "support" — those are often single-file/small edits that B5
+	// (proportionality) says should run with minimal ceremony, not a plan gate.
+	implWords := []string{"implement", "build a", "build the", "create",
+		"scaffold", "set up", "new feature", "new module", "new service",
+		"new endpoint", "migrate", "introduce"}
+	for _, w := range implWords {
+		if strings.Contains(q, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // finalSynth is the graceful turn-abort path (max iterations or cost budget

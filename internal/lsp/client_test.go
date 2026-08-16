@@ -851,3 +851,13 @@ func TestLSPOutline(t *testing.T) {
 		}
 	}
 }
+
+// TestAutoFixToolRegistered verifies the batch auto-fix tool is wired into the
+// registry (the "one shot, not per-file" companion to lsp_fix).
+func TestAutoFixToolRegistered(t *testing.T) {
+	r := tool.NewRegistry()
+	RegisterTools(r, nil)
+	if r.ToolByName("lsp_autofix") == nil {
+		t.Fatal("lsp_autofix not registered")
+	}
+}
