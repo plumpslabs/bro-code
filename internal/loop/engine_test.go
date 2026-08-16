@@ -1107,20 +1107,32 @@ func TestLooksLikeLSPFixTaskLanguageAgnostic(t *testing.T) {
 	}
 }
 
-func TestGuardWholeFileRead(t *testing.T) {
+func TestGuardPreflightRedundant(t *testing.T) {
 	e := &Engine{}
-	// No pre-flight diagnostics -> whole-file reads allowed.
-	if e.guardWholeFileRead(`{"path":"x.go"}`) != "" {
-		t.Fatal("whole-file read must be allowed when no pre-flight block is present")
+	// No pre-flight diagnostics -> reads and lsp_scan allowed.
+	if e.guardPreflightRedundant("read_file", `{"path":"x.go"}`) != "" {
+		t.Fatal("read must be allowed when no pre-flight block is present")
 	}
+	if e.guardPreflightRedundant("lsp_scan", `{}`) != "" {
+		t.Fatal("lsp_scan must be allowed when no pre-flight block is present")
+	}
+	// Pre-flight diagnostics present, but the read target is NOT in them -> allowed.
 	e.preflightActive = true
-	// Whole-file read blocked while pre-flight diagnostics are in context.
-	if got := e.guardWholeFileRead(`{"path":"x.go"}`); got == "" {
-		t.Fatal("whole-file read must be blocked during pre-flight")
+	e.preflightBlock = "PRE-GATHERED LSP DIAGNOSTICS\ninternal/lsp/client.go:10: unused"
+	if got := e.guardPreflightRedundant("read_file", `{"path":"other.go"}`); got != "" {
+		t.Fatalf("read of a file NOT in the packed diagnostics must be allowed, got block: %q", got)
 	}
-	// Line-range read (start_line present) is genuine progress -> allowed.
-	if got := e.guardWholeFileRead(`{"path":"x.go","start_line":1,"end_line":3}`); got != "" {
-		t.Fatalf("line-range read must be allowed, got block: %q", got)
+	// Reading a file whose diagnostics are already packed -> blocked (whole-file).
+	if got := e.guardPreflightRedundant("read_file", `{"path":"internal/lsp/client.go"}`); got == "" {
+		t.Fatal("read of a packed diagnostic file must be blocked")
+	}
+	// Line-range read of a packed diagnostic file -> ALSO blocked (window is packed).
+	if got := e.guardPreflightRedundant("read_file", `{"path":"internal/lsp/client.go","start_line":1,"end_line":3}`); got == "" {
+		t.Fatal("line-range read of a packed diagnostic file must be blocked")
+	}
+	// Redundant lsp_scan re-call -> blocked.
+	if got := e.guardPreflightRedundant("lsp_scan", `{}`); got == "" {
+		t.Fatal("redundant lsp_scan after pre-flight must be blocked")
 	}
 }
 

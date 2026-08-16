@@ -866,7 +866,7 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 	fmt.Fprintf(&sb, "🧹 Project diagnostics scan (%d files, %d issues shown):\n", len(opened), totalDiags)
 	fmt.Fprintf(&sb, "  ✗ %d errors · ⚠ %d warnings · ♻ %d deprecated\n", totalErrs, totalWarns, totalDeps)
 	if totalDiags >= scanMaxLines {
-		sb.WriteString(fmt.Sprintf("  (capped at %d issues — fix these, then re-scan)\n", scanMaxLines))
+		fmt.Fprintf(&sb, "  (capped at %d issues — fix these, then re-scan)\n", scanMaxLines)
 	}
 	sb.WriteString("\n")
 	sb.WriteString(strings.Join(out, "\n"))

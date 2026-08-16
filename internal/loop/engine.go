@@ -1362,11 +1362,12 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 							return
 						}
 						// Deterministic guardrail: while pre-flight diagnostics are in
-						// context, block whole-file reads (line-range reads still pass).
-						if pending[idx].tc.Name == "read_file" {
-							if reject := e.guardWholeFileRead(pending[idx].tc.Arguments); reject != "" {
+						// context, block reads of files already packed + redundant
+						// lsp_scan re-calls (the model must fix in place instead).
+						if pending[idx].tc.Name == "read_file" || pending[idx].tc.Name == "lsp_scan" {
+							if reject := e.guardPreflightRedundant(pending[idx].tc.Name, pending[idx].tc.Arguments); reject != "" {
 								if onUpdate != nil {
-									onUpdate(e.state, "⛔ read_file BLOCKED (whole-file read during pre-flight — use packed windows / lsp_scan)")
+									onUpdate(e.state, "⛔ "+reject)
 								}
 								pending[idx].output = reject
 								return
@@ -1394,12 +1395,12 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						continue
 					}
 					// Deterministic guardrail: while pre-flight diagnostics are in
-					// context, block whole-file reads so the model can't waste turns
-					// re-reading files it already has windows for.
-					if pending[i].tc.Name == "read_file" {
-						if reject := e.guardWholeFileRead(pending[i].tc.Arguments); reject != "" {
+					// context, block reads of files already packed + redundant
+					// lsp_scan re-calls (the model must fix in place instead).
+					if pending[i].tc.Name == "read_file" || pending[i].tc.Name == "lsp_scan" {
+						if reject := e.guardPreflightRedundant(pending[i].tc.Name, pending[i].tc.Arguments); reject != "" {
 							if onUpdate != nil {
-								onUpdate(e.state, "⛔ read_file BLOCKED (whole-file read during pre-flight — use packed windows / lsp_scan)")
+								onUpdate(e.state, "⛔ "+reject)
 							}
 							pending[i].output = reject
 							continue
@@ -2077,19 +2078,34 @@ func (e *Engine) lastChangeDiff(path string) string {
 	return ""
 }
 
-// guardWholeFileRead returns a non-empty rejection message when a read_file call
-// would read an ENTIRE file (no start_line) while pre-flight diagnostics are in
-// context. Re-reading a whole file then is pure waste — the model already has the
-// diagnostic code windows, so it must fix/verify from those or re-run lsp_scan.
-// A line-range read (start_line present) is allowed: it's genuine progress.
-func (e *Engine) guardWholeFileRead(argsJSON string) string {
+// guardPreflightRedundant returns a non-empty rejection when a tool call is
+// redundant with the pre-flight diagnostics already packed into context:
+//   - read_file on a file whose diagnostics + code window are ALREADY in the
+//     PRE-GATHERED LSP DIAGNOSTICS block (whether whole-file or line-range — the
+//     window is already there, so any re-read is pure waste that makes the agent
+//     spin instead of fixing);
+//   - lsp_scan called AGAIN after pre-flight already scanned and packed results.
+//
+// The model must fix in place (edit_file/lsp_fix) or re-run lsp_scan ONLY when it
+// genuinely needs a fresh scan — not re-read/re-scan what it was already given.
+func (e *Engine) guardPreflightRedundant(name, argsJSON string) string {
 	if !e.preflightActive {
 		return ""
 	}
-	if strings.Contains(argsJSON, "start_line") {
-		return ""
+	switch name {
+	case "read_file":
+		var m map[string]any
+		if json.Unmarshal([]byte(argsJSON), &m) == nil {
+			if p, _ := m["path"].(string); p != "" {
+				if strings.Contains(e.preflightBlock, p) {
+					return "READ BLOCKED: " + p + " already has its diagnostics + code window packed in PRE-GATHERED LSP DIAGNOSTICS — re-reading it wastes tokens and turns. Fix in place with edit_file(start_line,end_line) or lsp_fix, or re-run lsp_scan to verify. Do NOT read this file again."
+				}
+			}
+		}
+	case "lsp_scan":
+		return "lsp_scan already ran during pre-flight and its result is packed in PRE-GATHERED LSP DIAGNOSTICS — do NOT scan again. Fix the listed items in place with edit_file/lsp_fix."
 	}
-	return "WHOLE-FILE READ BLOCKED: you already have the exact code windows for every diagnostic in the PRE-GATHERED LSP DIAGNOSTICS block — re-reading the whole file wastes tokens and turns. Fix each item in place with edit_file(start_line,end_line) or lsp_fix, or re-run lsp_scan to verify. Do NOT read the entire file."
+	return ""
 }
 
 // looksLikeImplTask reports whether a user query is a multi-step implementation
@@ -2310,20 +2326,20 @@ func compactionTranscript(msgs []provider.Message) string {
 		if m.ToolCallID != "" {
 			role = "tool_result"
 		}
-		part := role + ": "
+		var part strings.Builder; part.WriteString(role + ": ")
 		if m.Content != "" {
-			part += m.Content
+			part.WriteString(m.Content)
 		}
 		if len(m.ToolCalls) > 0 {
 			for _, tc := range m.ToolCalls {
-				part += fmt.Sprintf("\n  [tool_call %s(%s)]", tc.Name, tc.Arguments)
+				part.WriteString(fmt.Sprintf("\n  [tool_call %s(%s)]", tc.Name, tc.Arguments))
 			}
 		}
-		if sb.Len()+len(part) > maxTranscriptChars {
+		if sb.Len()+len(part.String()) > maxTranscriptChars {
 			sb.WriteString("\n...[transcript truncated for compaction]...")
 			break
 		}
-		sb.WriteString(part)
+		sb.WriteString(part.String())
 		sb.WriteString("\n")
 	}
 	return sb.String()

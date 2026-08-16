@@ -158,7 +158,7 @@ func (s *Store) WarmStart() string {
 		}
 		sb.WriteString("## ");sb.WriteString(sec);sb.WriteString("\n")
 		for _, f := range items {
-			sb.WriteString("- " + f + "\n")
+			sb.WriteString("- ");sb.WriteString(f);sb.WriteString("\n")
 		}
 	}
 	out := strings.TrimSpace(sb.String())
