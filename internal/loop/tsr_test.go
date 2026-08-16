@@ -87,7 +87,7 @@ func contextText(ctxMgr *bcontext.Manager) string {
 	var sb strings.Builder
 	for _, m := range ctxMgr.Messages() {
 		if m.Content != "" {
-			sb.WriteString(m.Content + "\n")
+			sb.WriteString(m.Content);sb.WriteString("\n")
 		}
 	}
 	return sb.String()
@@ -256,7 +256,7 @@ func TestVerifierTwoAngleReview(t *testing.T) {
 	// classified high-complexity by the review gate.
 	block := func(marker string) string {
 		var b strings.Builder
-		for i := 0; i < 40; i++ {
+		for i := range 40 {
 			fmt.Fprintf(&b, "\t_ = %d // %s\n", i, marker)
 		}
 		return b.String()

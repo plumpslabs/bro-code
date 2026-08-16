@@ -56,10 +56,7 @@ func (h *providerHealth) recordFailure(id string) {
 	defer h.mu.Unlock()
 	e := h.entry(id)
 	e.failStreak++
-	backoff := cooldownBase * time.Duration(1<<minInt(e.failStreak-1, 6))
-	if backoff > cooldownMax {
-		backoff = cooldownMax
-	}
+	backoff := min(cooldownBase * time.Duration(1<<minInt(e.failStreak-1, 6)), cooldownMax)
 	e.cooldownUntil = h.now().Add(backoff)
 }
 

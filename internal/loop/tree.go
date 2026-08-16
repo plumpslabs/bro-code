@@ -51,8 +51,8 @@ func (td *TreeDebugger) TreeView() string {
 	var sb strings.Builder
 	sb.WriteString("⏳ Time-Travel Debugger Snapshot Tree:\n")
 	for _, s := range td.snapshots {
-		sb.WriteString(fmt.Sprintf("├── Turn #%d [%s]: %s (Edited: %d files)\n",
-			s.TurnIndex, s.State, summarizePrompt(s.Prompt), len(s.Files)))
+		fmt.Fprintf(&sb, "├── Turn #%d [%s]: %s (Edited: %d files)\n",
+	s.TurnIndex, s.State, summarizePrompt(s.Prompt), len(s.Files))
 	}
 	return strings.TrimSpace(sb.String())
 }

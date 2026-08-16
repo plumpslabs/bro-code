@@ -29,7 +29,7 @@ func TestHealthBackoffGrowsAndCaps(t *testing.T) {
 	}
 
 	// Drive the streak up past the cap → cooldown must never exceed cooldownMax.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		now = now.Add(cooldownMax)
 		h.recordFailure("p")
 	}

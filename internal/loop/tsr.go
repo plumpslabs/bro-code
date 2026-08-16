@@ -117,7 +117,7 @@ func verifyErrorSignature(errText string) string {
 	if strings.TrimSpace(errText) == "" {
 		return ""
 	}
-	for _, line := range strings.Split(errText, "\n") {
+	for line := range strings.SplitSeq(errText, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '.' || line[0] == '/' {
 			continue

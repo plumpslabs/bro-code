@@ -143,6 +143,10 @@ type Engine struct {
 	// instead of spending tool rounds discovering them. Empty unless the task
 	// looks like a diagnostic/LSP-fix and an LSP server is available.
 	preflightBlock string
+	// preflightAutoFix holds the result of auto-fixing safe diagnostics at turn
+	// start (lsp_autofix), so the model only handles the MANUAL ones and the task
+	// stays small enough to finish within the tool budget instead of looping.
+	preflightAutoFix string
 	// repoRoot anchors relative paths from pre-flight diagnostics back to real
 	// files so their code windows can be read.
 	repoRoot string
@@ -241,6 +245,11 @@ type Engine struct {
 	// the edited file path — lets the UI refresh the session-wide symbol index
 	// so code_locate stays current instead of serving a stale session-start view.
 	onFileEdited func(path string)
+	// onChange, when set, is called after a write/edit tool succeeds with the file
+	// path and the unified diff of what changed — lets the UI render a live
+	// red/green diff entry in the chat as each edit lands, not just a collapsed
+	// end-of-turn summary.
+	onChange func(path, diff string)
 	// editedFiles tracks the paths the model wrote or edited this turn so the
 	// convention checker can review them before the turn is declared done.
 	editedFiles []string
@@ -499,6 +508,13 @@ func (e *Engine) SetOnFileEdited(fn func(path string)) {
 	e.onFileEdited = fn
 }
 
+// SetOnChange wires a callback invoked whenever a write/edit tool succeeds, with
+// the file path and its unified diff — so the host can render a live red/green
+// diff entry in the chat as each edit lands.
+func (e *Engine) SetOnChange(fn func(path, diff string)) {
+	e.onChange = fn
+}
+
 // SetDiagnosticsChecker wires a native type-error checker (the UI provides
 // one backed by the LSP manager). It runs on edited files after the
 // convention review, catching type errors without waiting for a full build.
@@ -525,8 +541,8 @@ func (e *Engine) localizeVerifyFailure() string {
 	var sb strings.Builder
 	for _, p := range e.editedFiles {
 		if out := e.diagFn(p); out != "" && !strings.HasPrefix(out, "No diagnostics") {
-			sb.WriteString("• " + p + "\n")
-			sb.WriteString(out + "\n")
+			sb.WriteString("• ");sb.WriteString(p);sb.WriteString("\n")
+			sb.WriteString(out);sb.WriteString("\n")
 		}
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
@@ -738,11 +754,23 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			e.maxIterations = 25
 		}
 	}
-	// Pre-flight context packing: for a diagnostic/LSP-fix task, run lsp_scan once
-	// NOW and bundle the diagnostics + code windows into the first prompt, so the
-	// model skips the "scan, then read everything" tool-loop entirely.
+	// Pre-flight context packing: for a diagnostic/LSP-fix task, FIRST auto-fix
+	// the safe (auto-applicable) diagnostics with lsp_autofix so the model is left
+	// with only the MANUAL ones (deprecated APIs, unused symbols) — a much smaller
+	// task that finishes well inside the tool budget instead of looping. Then scan
+	// the (post-autofix) state and pack the remaining diagnostics + code windows
+	// into the first prompt so the model fixes in place instead of re-scanning.
 	e.preflightBlock = ""
+	e.preflightAutoFix = ""
 	if e.lspAvailable > 0 && looksLikeLSPFixTask(userQuery) {
+		if at := e.tools.ToolByName("lsp_autofix"); at != nil {
+			if fr, ferr := at.Execute(ctx, `{"target":"all"}`); ferr == nil && fr != "" {
+				e.preflightAutoFix = fr
+				if onUpdate != nil {
+					onUpdate(e.state, "🤖 Pre-flight: auto-fixed safe diagnostics")
+				}
+			}
+		}
 		if packed := e.preflightLSP(ctx); packed != "" {
 			e.preflightBlock = packed
 			if onUpdate != nil {
@@ -1354,15 +1382,22 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					// Track files the model edited so the native convention checker
 					// can review them (debug leftovers, markers, type safety,
 					// duplicate symbols) before the turn is declared done.
-					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" {
-						if p := extractToolPath(pending[i].tc.Arguments); p != "" {
-							e.editedFiles = append(e.editedFiles, p)
-							// Keep the session symbol index current after real edits.
-							if e.onFileEdited != nil && err == nil {
-								e.onFileEdited(p)
+				if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" {
+					if p := extractToolPath(pending[i].tc.Arguments); p != "" {
+						e.editedFiles = append(e.editedFiles, p)
+						// Keep the session symbol index current after real edits.
+						if e.onFileEdited != nil && err == nil {
+							e.onFileEdited(p)
+						}
+						// Surface a live red/green diff entry in the chat as each edit
+						// lands, so the user sees exactly what changed in real time.
+						if e.onChange != nil && err == nil {
+							if d := e.lastChangeDiff(p); d != "" {
+								e.onChange(p, d)
 							}
 						}
 					}
+				}
 
 					// Lifecycle hook: after tool execution, with the tool's output.
 					e.hookRun(ctx, hooks.EventToolResult, map[string]string{
@@ -1632,6 +1667,12 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 	// prompt stable across later iterations.
 	if e.preflightBlock != "" && iteration == 1 {
 		sysPrompt += "\n\n" + e.preflightBlock
+	}
+	// Pre-flight auto-fix result: the safe diagnostics were ALREADY fixed by the
+	// engine before the turn started, so the model must NOT re-apply them — it only
+	// handles the manual items listed in the diagnostics above.
+	if e.preflightAutoFix != "" && iteration == 1 {
+		sysPrompt += "\n\nPRE-APPLIED AUTO-FIXES (already done by the engine — DO NOT redo):\n" + e.preflightAutoFix
 	}
 	// Plan-then-act: when gating an implementation task, this turn is a read-only
 	// PLAN pass. The model researches and proposes a plan, then must confirm via
@@ -1962,6 +2003,23 @@ func atoiSafe(s string) int {
 		n = n*10 + int(c-'0')
 	}
 	return n
+}
+
+// lastChangeDiff returns the unified diff of the most recent recorded change to
+// path this turn (from the tool layer's change log), so the engine can surface a
+// live red/green diff entry per edit — for both edit_file (surgical) and
+// write_file (new/overwrite) without parsing tool output text.
+func (e *Engine) lastChangeDiff(path string) string {
+	chs := tool.PeekChanges()
+	for i := len(chs) - 1; i >= 0; i-- {
+		if chs[i].Path != path {
+			continue
+		}
+		raw := tool.FileChangesDiff([]tool.FileChange{chs[i]})
+		raw = strings.TrimPrefix(raw, chs[i].Path+"\n")
+		return strings.TrimRight(raw, "\n")
+	}
+	return ""
 }
 
 // looksLikeImplTask reports whether a user query is a multi-step implementation

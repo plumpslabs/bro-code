@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"slices"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -453,11 +454,9 @@ func ResolveModelID(models []string, model string) string {
 	if model == "" {
 		return model
 	}
-	for _, m := range models {
-		if m == model {
+	if slices.Contains(models, model) {
 			return model
 		}
-	}
 	seg := lastSegment(model)
 	if seg != "" {
 		for _, m := range models {

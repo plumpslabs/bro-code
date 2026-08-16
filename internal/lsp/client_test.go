@@ -512,7 +512,7 @@ func TestScanDiagnosticsNoFiles(t *testing.T) {
 func TestFormatLocationsCapped(t *testing.T) {
 	r := protocol.Range{Start: protocol.Position{Line: 0, Character: 0}, End: protocol.Position{Line: 0, Character: 1}}
 	locs := make([]protocol.Location, 0, 100)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		locs = append(locs, protocol.Location{URI: mustFileURI(t, fmt.Sprintf("/tmp/f%d.go", i)), Range: r})
 	}
 	out := formatLocations(locs)
@@ -720,11 +720,9 @@ func TestLSPManagerCloseIdempotent(t *testing.T) {
 	m.Close()
 	m.Close()
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		m.Close()
-	}()
+	})
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()

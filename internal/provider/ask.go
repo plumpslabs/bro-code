@@ -131,12 +131,12 @@ func removeEmptyFences(s string) string {
 func formatAskResults(results []AskResult) string {
 	var sb strings.Builder
 	for i, r := range results {
-		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r.Question))
+		fmt.Fprintf(&sb, "%d. %s\n", i+1, r.Question)
 		answer := strings.Join(r.Answers, "; ")
 		if answer == "" {
 			answer = "(no selection)"
 		}
-		sb.WriteString("   Answer: " + answer + "\n")
+		sb.WriteString("   Answer: ");sb.WriteString(answer);sb.WriteString("\n")
 		if r.Custom != "" {
 			sb.WriteString("   Custom: " + r.Custom + "\n")
 		}

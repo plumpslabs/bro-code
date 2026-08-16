@@ -133,12 +133,10 @@ func IsRetryable(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if _, ok := errors.AsType[net.Error](err); ok {
 		return true
 	}
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
 		return apiErr.StatusCode == 429 || apiErr.StatusCode >= 500
 	}
 	// A stream that died mid-frame (broken pipe / truncated SSE) is transient.

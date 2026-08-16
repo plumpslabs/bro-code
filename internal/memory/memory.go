@@ -77,10 +77,10 @@ func (s *Store) load() {
 		return
 	}
 	var section string
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "## ") {
-			section = strings.TrimPrefix(trimmed, "## ")
+		if after, ok := strings.CutPrefix(trimmed, "## "); ok {
+			section = after
 			s.facts[section] = []string{}
 			continue
 		}

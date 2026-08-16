@@ -272,18 +272,6 @@ func describeVerification() string {
 	return strings.Join(parts, " · ")
 }
 
-// hasFile reports whether path exists as a regular file in cwd.
-func hasFile(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && !st.IsDir()
-}
 
-// hasAnyFile reports whether any of the given paths exists in cwd.
-func hasAnyFile(paths ...string) bool {
-	for _, p := range paths {
-		if hasFile(p) {
-			return true
-		}
-	}
-	return false
-}
+
+

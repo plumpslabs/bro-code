@@ -21,7 +21,7 @@ func TestObserveTurnNudgesDownWhenHot(t *testing.T) {
 	l := NewLearner(tmpPath(t))
 	start := l.CompactionRatio()
 	// Simulate a window running hot (utilization above the target band).
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		l.ObserveTurn(0.95)
 	}
 	if got := l.CompactionRatio(); got >= start {
@@ -35,7 +35,7 @@ func TestObserveTurnNudgesDownWhenHot(t *testing.T) {
 func TestObserveTurnNudgesUpWhenCold(t *testing.T) {
 	l := NewLearner(tmpPath(t))
 	// Push the ratio down first, then feed cold (low-utilization) turns.
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		l.ObserveTurn(0.95)
 	}
 	low := l.CompactionRatio()

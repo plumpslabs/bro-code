@@ -239,7 +239,7 @@ func TestNilStore(t *testing.T) {
 func TestPruneCap(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir)
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		s.Retain("Notes", strings.Repeat("fact ", 40)+string(rune('a'+i%26)))
 	}
 	data, err := os.ReadFile(s.Path())

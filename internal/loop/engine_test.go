@@ -1099,3 +1099,18 @@ func TestLooksLikeLSPFixTaskLanguageAgnostic(t *testing.T) {
 		}
 	}
 }
+
+func TestLastChangeDiff(t *testing.T) {
+	tool.ResetChanges()
+	p := t.TempDir() + "/f.go"
+	tool.RecordChange(tool.FileChange{Path: p, Action: "modified", Old: "a\nb\n", New: "a\nc\n"})
+	e := &Engine{}
+	got := e.lastChangeDiff(p)
+	if !strings.Contains(got, "+c") || !strings.Contains(got, "-b") {
+		t.Fatalf("lastChangeDiff = %q, want +/- markers", got)
+	}
+	// Unknown path -> empty.
+	if e.lastChangeDiff(t.TempDir()+"/nope") != "" {
+		t.Fatal("expected empty diff for unknown path")
+	}
+}

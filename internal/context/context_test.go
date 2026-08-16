@@ -238,7 +238,7 @@ func TestNeedsCompactionEarlyRatio(t *testing.T) {
 		t.Fatal("empty context should not need compaction")
 	}
 	// 550 message tokens + 100 system = 650 > 600 → should compact.
-	for i := 0; i < 55; i++ {
+	for range 55 {
 		_ = mgr.AppendUserMessage("word word word word word word word word word word") // ~10 tokens each
 	}
 	if !mgr.NeedsCompaction() {

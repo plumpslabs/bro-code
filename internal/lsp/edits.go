@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"slices"
 	"fmt"
 	"os"
 	"sort"
@@ -56,7 +57,7 @@ func applyWorkspaceEdit(we *protocol.WorkspaceEdit) (string, error) {
 	for u := range perURI {
 		order = append(order, u)
 	}
-	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	slices.Sort(order)
 
 	var updated []string
 	for _, u := range order {

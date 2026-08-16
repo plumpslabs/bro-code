@@ -9,6 +9,7 @@
 package lsp
 
 import (
+	"slices"
 	"context"
 	"fmt"
 	"io"
@@ -190,12 +191,7 @@ func (m *Manager) ActiveServers() []string {
 }
 
 func containsStr(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }
 
 // Close shuts down all running language servers and stops the idle reaper.
@@ -472,10 +468,7 @@ func textAt(path string) (string, error) {
 // positionFor converts 1-based line/col (as the model thinks) to LSP
 // zero-based Position.
 func positionFor(line, col int) protocol.Position {
-	l := line - 1
-	if l < 0 {
-		l = 0
-	}
+	l := max(line - 1, 0)
 	if col < 1 {
 		col = 1
 	}

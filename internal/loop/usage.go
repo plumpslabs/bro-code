@@ -80,10 +80,10 @@ func (u *UsageTracker) Summary() string {
 	for model, m := range u.models {
 		totalTokens += m.TotalTokens
 		totalCost += m.CostUSD
-		sb.WriteString(fmt.Sprintf("%s: %s tokens (in %s / out %s) — $%.4f\n",
-			model, fmtTokens(m.TotalTokens), fmtTokens(m.PromptTokens), fmtTokens(m.CompletionTokens), m.CostUSD))
+		fmt.Fprintf(&sb, "%s: %s tokens (in %s / out %s) — $%.4f\n",
+	model, fmtTokens(m.TotalTokens), fmtTokens(m.PromptTokens), fmtTokens(m.CompletionTokens), m.CostUSD)
 	}
-	sb.WriteString(fmt.Sprintf("\nTOTAL: %s tokens — $%.4f", fmtTokens(totalTokens), totalCost))
+	fmt.Fprintf(&sb, "\nTOTAL: %s tokens — $%.4f", fmtTokens(totalTokens), totalCost)
 	return strings.TrimSpace(sb.String())
 }
 

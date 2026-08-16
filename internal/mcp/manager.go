@@ -14,6 +14,7 @@
 package mcp
 
 import (
+	"maps"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -148,9 +149,7 @@ func (m *Manager) Errors() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make(map[string]string, len(m.errors))
-	for k, v := range m.errors {
-		out[k] = v
-	}
+	maps.Copy(out, m.errors)
 	return out
 }
 

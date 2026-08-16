@@ -405,8 +405,9 @@ func TestTurnResultAppendsFileSummary(t *testing.T) {
 	tool.RecordChange(tool.FileChange{Path: "src/a.ts", Action: "created", New: "x\ny\n"})
 
 	m.Update(turnResultMsg{content: "done", err: nil, mode: "BUILDER"})
-	if m.filesExpanded {
-		t.Fatal("summary must start collapsed")
+	// The diff is shown by default (no ctrl+f needed); ctrl+f collapses it.
+	if !m.filesExpanded {
+		t.Fatal("summary must start expanded (diff visible without ctrl+f)")
 	}
 	if len(m.messages) == 0 {
 		t.Fatal("no messages appended")
@@ -416,19 +417,19 @@ func TestTurnResultAppendsFileSummary(t *testing.T) {
 		t.Fatalf("expected FILES summary message, got %q", last)
 	}
 
-	// Collapsed render shows the compact row but not the diff body.
-	collapsed := ansiRegex.ReplaceAllString(formatMessage(last, 120, false), "")
-	if !strings.Contains(collapsed, "src/a.ts") {
-		t.Fatalf("collapsed summary missing file row:\n%s", collapsed)
-	}
-	if strings.Contains(collapsed, "+ x") {
-		t.Fatalf("collapsed summary must hide the diff body:\n%s", collapsed)
-	}
-
-	// Expanded render shows the +/- diff lines.
+	// Default (expanded) render shows the +/- diff lines.
 	expanded := ansiRegex.ReplaceAllString(formatMessage(last, 120, true), "")
+	if !strings.Contains(expanded, "src/a.ts") {
+		t.Fatalf("summary missing file row:\n%s", expanded)
+	}
 	if !strings.Contains(expanded, "+ x") {
 		t.Fatalf("expanded summary missing diff lines:\n%s", expanded)
+	}
+
+	// Collapsed render (ctrl+f) hides the diff body but keeps the row.
+	collapsed := ansiRegex.ReplaceAllString(formatMessage(last, 120, false), "")
+	if strings.Contains(collapsed, "+ x") {
+		t.Fatalf("collapsed summary must hide the diff body:\n%s", collapsed)
 	}
 }
 

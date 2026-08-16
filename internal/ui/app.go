@@ -476,6 +476,13 @@ type stepProgressMsg struct {
 	info  string
 }
 type streamChunkMsg string
+// fileDiffMsg carries a live per-edit unified diff from the engine so the chat can
+// show a red/green diff entry as each file is changed (real-time, not just the
+// collapsed end-of-turn FILES summary).
+type fileDiffMsg struct {
+	path string
+	diff string
+}
 
 // phaseBadge returns a short emoji prefix for an engine phase so the live
 // activity slot makes the agent's current state explicit — reasoning vs
@@ -801,6 +808,14 @@ func (m *Model) rebuildEngine() {
 			m.globalIndex.RefreshFile(path)
 		}
 	})
+	// Live red/green diff per edit: when a write/edit tool succeeds, surface the
+	// unified diff as a chat entry in real time so the user sees what changed
+	// (not just the collapsed end-of-turn FILES summary).
+	m.engine.SetOnChange(func(path, diff string) {
+		if m.prog != nil {
+			m.prog.Send(fileDiffMsg{path: path, diff: diff})
+		}
+	})
 	// Available skills (.agents/skills, .brocode/skills, global) are listed in
 	// the system prompt so the model knows what it can load and use — the
 	// general, tool-agnostic standard (never .opencode/ config in the repo).
@@ -1100,7 +1115,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if files := tool.FileChangesMessage(ch); files != "" {
-				m.filesExpanded = false
+				// Show the full +/- diff at turn end without requiring ctrl+f
+				// (the per-edit live DIFF entries already stream during the turn).
+				m.filesExpanded = true
 				m.appendMessages(files)
 			}
 		}
@@ -1142,6 +1159,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Streaming..."
 		}
 		m.pendingStream += string(msg)
+		return m, nil
+
+	case fileDiffMsg:
+		// Live per-edit red/green diff entry in the chat. Kept compact
+		// (file path + collapsed-by-default diff lines) and rendered by
+		// formatMessage, which colorizes the +/- lines.
+		m.appendMessages("DIFF:\n" + msg.path + "\n" + msg.diff)
 		return m, nil
 
 	case diagnoseResultMsg:
@@ -3311,22 +3335,39 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 
 	// File-change summary (see tool.FileChangesMessage): compact per-file rows
 	// by default, full +/- diff when the user pressed ctrl+f.
-	if strings.HasPrefix(msg, "FILES:\n") && strings.Contains(msg, tool.FileChangesSep) {
-		compact, diff, _ := strings.Cut(msg, tool.FileChangesSep)
-		compact = strings.TrimPrefix(compact, "FILES:\n")
-		fileBarStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
-		if width > 0 {
-			fileBarStyle = fileBarStyle.Width(width)
+		if strings.HasPrefix(msg, "FILES:\n") && strings.Contains(msg, tool.FileChangesSep) {
+			compact, diff, _ := strings.Cut(msg, tool.FileChangesSep)
+			compact = strings.TrimPrefix(compact, "FILES:\n")
+			fileBarStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
+			if width > 0 {
+				fileBarStyle = fileBarStyle.Width(width)
+			}
+			labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
+			var body string
+			if filesExpanded {
+				body = compact + "\n\n" + formatDiffLines(diff)
+			} else {
+				body = compact
+			}
+			return fileBarStyle.Render(labelStyle.Render("FILES") + "\n" + body)
 		}
-		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
-		var body string
-		if filesExpanded {
-			body = compact + "\n\n" + formatDiffLines(diff)
-		} else {
-			body = compact
+
+		// Live per-edit diff (engine onChange → fileDiffMsg): show the changed
+		// file path with a red/green unified diff as soon as each edit lands.
+		if strings.HasPrefix(msg, "DIFF:\n") {
+			body := strings.TrimPrefix(msg, "DIFF:\n")
+			path, diff := body, ""
+			if nl := strings.Index(body, "\n"); nl >= 0 {
+				path, diff = body[:nl], body[nl+1:]
+			}
+			diffBarStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
+			if width > 0 {
+				diffBarStyle = diffBarStyle.Width(width)
+			}
+			labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
+			return diffBarStyle.Render(labelStyle.Render("DIFF") + "  " + path + "\n" + formatDiffLines(diff))
 		}
-		return fileBarStyle.Render(labelStyle.Render("FILES") + "\n" + body)
-	}
+
 
 	if strings.HasPrefix(msg, "PROCESS:\n") {
 		content := strings.TrimPrefix(msg, "PROCESS:\n")

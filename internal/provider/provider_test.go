@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"slices"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -677,13 +678,7 @@ func TestMergeModelLists(t *testing.T) {
 
 	// All configured models survive (this is the user's reported bug).
 	for _, want := range configured {
-		found := false
-		for _, m := range merged {
-			if m == want {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(merged, want)
 		if !found {
 			t.Errorf("configured model %q lost in merge: %v", want, merged)
 		}
@@ -707,12 +702,7 @@ func TestMergeModelLists(t *testing.T) {
 }
 
 func containsStr(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }
 
 func TestContextWindowFor(t *testing.T) {

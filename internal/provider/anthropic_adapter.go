@@ -102,10 +102,10 @@ func (a *AnthropicAdapter) Complete(ctx context.Context, req CompletionRequest) 
 	}
 	cache := promptCacheEnabled()
 
-	var systemPrompt string
+	var systemPrompt strings.Builder
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
-			systemPrompt += msg.Content + "\n"
+			systemPrompt.WriteString(msg.Content);systemPrompt.WriteString("\n")
 			continue
 		}
 
@@ -147,7 +147,7 @@ func (a *AnthropicAdapter) Complete(ctx context.Context, req CompletionRequest) 
 	// is byte-identical across every round of a turn, so it is the highest
 	// value cache segment. Without caching it stays a plain string for maximum
 	// gateway compatibility.
-	systemText := strings.TrimSpace(systemPrompt)
+	systemText := strings.TrimSpace(systemPrompt.String())
 	if cache {
 		if systemText != "" {
 			apiReq.System, _ = json.Marshal([]anthropicContentBlock{{

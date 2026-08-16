@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"maps"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,7 +23,7 @@ type ModelLimits struct {
 // CustomModel describes a declared model with optional display name and limits.
 type CustomModel struct {
 	Name   string      `json:"name,omitempty"`
-	Limits ModelLimits `json:"limit,omitempty"`
+	Limits ModelLimits `json:"limit"`
 }
 
 // CustomProviderConfig represents custom user provider overrides.
@@ -161,9 +162,7 @@ func mergeBroCodeConfig(cfg AppConfig, path string) AppConfig {
 	if c.DefaultModel != "" {
 		cfg.DefaultModel = c.DefaultModel
 	}
-	for k, v := range c.Providers {
-		cfg.Providers[k] = v
-	}
+	maps.Copy(cfg.Providers, c.Providers)
 	return cfg
 }
 
