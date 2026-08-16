@@ -1076,13 +1076,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendMessages("⚠️ The model returned an empty response — try rephrasing your request or switching models.")
 			m.status = "Ready"
 		} else if msg.content != "" {
-			// Surface the model's reasoning (thinking) above the answer, like
-			// opencode, so the agent's deliberation is visible — not just the
-			// final text. Falls back to plain content when there is no reasoning.
+			// Render only the final answer into the chat history. The model's
+			// chain-of-thought (reasoning) is shown live in the activity panel,
+			// not here — surfacing it in the transcript clutters the conversation
+			// and duplicates the thinking, so the history stays clean.
 			display := msg.content
-			if r := m.lastAssistantReasoning(); r != "" {
-				display = "💭 " + r + "\n\n" + msg.content
-			}
 			// Stamp the mode the turn ran under ("BROCODE:PLANNER\n...") so
 			// every answer shows which engine mode produced it — the mode badge
 			// is rendered by formatMessage. The active model rides along
@@ -2827,18 +2825,6 @@ func (m *Model) renderPager() string {
 		sb.WriteString(clipToTerminalBounds(m.pagerContent, getTerminalHeight()-4))
 	}
 	return sb.String()
-}
-
-// lastAssistantReasoning returns the reasoning text of the most recent
-// assistant turn stored in the context manager (used to show thinking).
-func (m *Model) lastAssistantReasoning() string {
-	msgs := m.context.Messages()
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == "assistant" && msgs[i].Reasoning != "" {
-			return msgs[i].Reasoning
-		}
-	}
-	return ""
 }
 
 // lastAssistantAnswer returns the text of the most recent assistant answer.
