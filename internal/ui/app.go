@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -812,6 +813,19 @@ func (m *Model) rebuildEngine() {
 	// build; engine is rebuilt on model switches but hooks are cheap to reload.
 	m.engine.SetHooks(hooks.Load(cwd))
 	m.engine.SetScoutManager(m.scoutMgr)
+	// Model routing (P3): route frequent low-stakes compaction summarization to a
+	// cheaper model so the premium model is reserved for synthesis. Opt-in via
+	// env; empty = same model.
+	if cm := os.Getenv("BROCODE_COMPACT_MODEL"); cm != "" {
+		m.engine.SetCompactModel(cm)
+	}
+	// Tool-description lean (P5): trim verbose tool schemas to free window space.
+	// Opt-in via env BROCODE_TOOL_DESC_BUDGET (chars); 0/empty = full descriptions.
+	if bd := os.Getenv("BROCODE_TOOL_DESC_BUDGET"); bd != "" {
+		if n, err := strconv.Atoi(bd); err == nil {
+			m.engine.SetToolDescBudget(n)
+		}
+	}
 }
 
 // intelligenceBlock renders BroCode's native project knowledge (repo map +

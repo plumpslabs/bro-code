@@ -12,11 +12,17 @@ import (
 	"github.com/plumpslabs/bro-code/internal/tokens"
 )
 
-// CompactionSummary follows Section 3.1 5-heading structured format.
+// CompactionSummary follows the structured 6-heading format used for context
+// compaction. The six headings (Goal, Files Touched, Decisions Made, Next
+// Action, Constraints, Last Known State) give a continuing agent everything it
+// needs without re-reading the dropped transcript — Next Action and Constraints
+// are the two that most reduce "lost the thread" regressions after compaction.
 type CompactionSummary struct {
 	Goal           string   `json:"goal"`
 	FilesTouched   []string `json:"files_touched"`
 	DecisionsMade  []string `json:"decisions_made"`
+	NextAction     string   `json:"next_action"`
+	Constraints    string   `json:"constraints"`
 	OpenQuestions  []string `json:"open_questions"`
 	LastKnownState string   `json:"last_known_state"`
 }
@@ -37,6 +43,9 @@ func (cs CompactionSummary) Format() string {
 		fmt.Fprintf(&sb, "- %s\n", d)
 	}
 	sb.WriteString("\n")
+
+	fmt.Fprintf(&sb, "## Next Action\n%s\n\n", cs.NextAction)
+	fmt.Fprintf(&sb, "## Constraints\n%s\n\n", cs.Constraints)
 
 	sb.WriteString("## Open Questions / Pending Work\n")
 	for _, q := range cs.OpenQuestions {
@@ -307,13 +316,24 @@ func (m *Manager) TotalContextTokens() int {
 	return m.totalTokens + m.systemPromptTokens
 }
 
-// NeedsCompaction checks if token usage exceeds 85% of the window. The budget
-// includes the system prompt, so compaction triggers before the real request
-// (system prompt + messages) can overflow the model's context window.
+// compactionRatio is the fraction of the context window at which compaction
+// kicks in. 0.60 (not 0.85) on purpose: research on context engineering shows
+// quality and reliability degrade well before the window is "full" (the
+// "context rot" effect), and compacting earlier keeps each turn's working set
+// small and high-signal. The hard fitMessages() guard still protects against
+// any true overflow regardless of this ratio.
+const compactionRatio = 0.60
+
+// NeedsCompaction checks if token usage exceeds compactionRatio of the window.
+// The budget includes the system prompt, so compaction triggers before the real
+// request (system prompt + messages) can overflow the model's context window.
 func (m *Manager) NeedsCompaction() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.TotalContextTokens() > int(float64(m.maxWindow)*0.85)
+	// Inline the total rather than calling TotalContextTokens(): that helper
+	// re-locks m.mu and this method already holds it (non-reentrant mutex).
+	total := m.totalTokens + m.systemPromptTokens
+	return total > int(float64(m.maxWindow)*compactionRatio)
 }
 
 // Compact performs structured summary compaction.

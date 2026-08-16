@@ -101,6 +101,15 @@ type Engine struct {
 	tools             *tool.Registry
 	context           *bcontext.Manager
 	model             string
+	// compactModel optionally routes the (frequent, low-stakes) compaction
+	// summarization to a cheaper/faster model than the main synthesis model.
+	// Empty = use e.model. This is the model-routing lever: exploration and
+	// housekeeping should not burn the premium model's tokens.
+	compactModel      string
+	// toolDescBudget caps each tool's description length sent in the request
+	// (0 = no trimming). Trimming verbose tool schemas shrinks the per-turn
+	// system payload so more of the window is spent on real task context.
+	toolDescBudget    int
 	mode              string // "BUILDER" or "PLANNER"
 	maxIterations     int
 	baseMaxIterations int
@@ -297,6 +306,21 @@ func (e *Engine) SetHooks(h *hooks.Manager) {
 // result delivery (the scout tool itself then reports an error).
 func (e *Engine) SetScoutManager(sm ScoutDrainer) {
 	e.scouts = sm
+}
+
+// SetCompactModel routes compaction summarization to a (cheaper) model. Empty
+// keeps it on the main synthesis model.
+func (e *Engine) SetCompactModel(m string) {
+	e.compactModel = m
+}
+
+// SetToolDescBudget caps each tool description to n characters in the request
+// (0 = send full descriptions). A lean tool surface frees window space.
+func (e *Engine) SetToolDescBudget(n int) {
+	if n < 0 {
+		n = 0
+	}
+	e.toolDescBudget = n
 }
 
 // Tool-only budget: a model that keeps calling tools without answering is
@@ -873,13 +897,15 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			// blocks the turn.
 			summary, ok := e.modelCompactionSummary(ctx)
 			if !ok {
-				summary = bcontext.CompactionSummary{
-					Goal:           "Continue active conversation",
-					FilesTouched:   []string{"codebase"},
-					DecisionsMade:  []string{"Compacted older context turns to preserve memory window"},
-					OpenQuestions:  []string{"Proceed with user request"},
-					LastKnownState: "Context compacted successfully",
-				}
+			summary = bcontext.CompactionSummary{
+				Goal:           "Continue active conversation",
+				FilesTouched:   []string{"codebase"},
+				DecisionsMade:  []string{"Compacted older context turns to preserve memory window"},
+				NextAction:     "Proceed with the current user request",
+				Constraints:    "Preserve verified facts; do not re-run work already done",
+				OpenQuestions:  []string{"Proceed with user request"},
+				LastKnownState: "Context compacted successfully",
+			}
 			}
 			_ = e.context.Compact(summary)
 			// Auto-extract: durable session context is merged into project
@@ -1481,6 +1507,18 @@ Engine Mode Rules (%s):
 // tools its mode forbids.
 func (e *Engine) toolsForMode(mode string) []provider.ToolDefinition {
 	defs := e.tools.Definitions()
+	// Tool-description lean (P5): trim verbose schemas in every mode so more of
+	// the window is free for real task context. Applied before mode pruning.
+	if e.toolDescBudget > 0 {
+		lean := make([]provider.ToolDefinition, len(defs))
+		for i, d := range defs {
+			if len(d.Description) > e.toolDescBudget {
+				d.Description = strings.TrimSpace(d.Description[:e.toolDescBudget]) + "…"
+			}
+			lean[i] = d
+		}
+		defs = lean
+	}
 	if mode == "BUILDER" {
 		return defs
 	}
@@ -1498,6 +1536,9 @@ func (e *Engine) toolsForMode(mode string) []provider.ToolDefinition {
 	for _, d := range defs {
 		if exclude[d.Name] {
 			continue
+		}
+		if e.toolDescBudget > 0 && len(d.Description) > e.toolDescBudget {
+			d.Description = strings.TrimSpace(d.Description[:e.toolDescBudget]) + "…"
 		}
 		out = append(out, d)
 	}
@@ -1722,14 +1763,18 @@ func (e *Engine) modelCompactionSummary(ctx context.Context) (bcontext.Compactio
 		"that captures everything a continuing agent still needs to know. " +
 		"Respond with ONLY a JSON object (no markdown fences, no prose) using EXACTLY this schema:\n" +
 		"{\"goal\": string, \"files_touched\": [string], \"decisions_made\": [string], " +
-		"\"open_questions\": [string], \"last_known_state\": string}\n\n" +
+		"\"next_action\": string, \"constraints\": string, \"open_questions\": [string], " +
+		"\"last_known_state\": string}\n\n" +
+		"next_action = the single most useful next step for the continuing agent. " +
+		"constraints = hard rules it must not violate (verified facts, things already tried that failed, " +
+		"scope boundaries). Keep each field tight.\n\n" +
 		"TRANSCRIPT TO COMPACT:\n" + transcript
 
 	summCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
 	resp, err := e.adapter.Complete(summCtx, provider.CompletionRequest{
-		Model:       e.model,
+		Model:       e.compactionModel(),
 		Messages:    []provider.Message{{Role: "user", Content: prompt}},
 		Temperature: 0.2,
 	})
@@ -1748,6 +1793,15 @@ func (e *Engine) modelCompactionSummary(ctx context.Context) (bcontext.Compactio
 		return bcontext.CompactionSummary{}, false
 	}
 	return summary, true
+}
+
+// compactionModel returns the model to use for compaction summarization: the
+// cheaper routing model when configured, otherwise the main synthesis model.
+func (e *Engine) compactionModel() string {
+	if e.compactModel != "" {
+		return e.compactModel
+	}
+	return e.model
 }
 
 // compactionTranscript renders the to-be-dropped messages as a bounded text

@@ -894,3 +894,51 @@ func TestRejectExtensionIsScopedPerTurn(t *testing.T) {
 		t.Fatalf("expected askCount = 2 after turn 2 (Reject must NOT permanently lock the session), got %d", askCount)
 	}
 }
+
+// fakeTool is a minimal Tool used to exercise toolsForMode trimming.
+type fakeTool struct {
+	name string
+	desc string
+}
+
+func (f fakeTool) Name() string                                { return f.name }
+func (f fakeTool) Description() string                        { return f.desc }
+func (f fakeTool) Parameters() map[string]any                 { return map[string]any{} }
+func (f fakeTool) Execute(ctx context.Context, a string) (string, error) { return "", nil }
+
+// TestToolDescBudgetTrims verifies the tool-description lean budget (P5) trims
+// each tool's schema in the request so more of the window is free for real task
+// context. 0 budget = untouched.
+func TestToolDescBudgetTrims(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(fakeTool{name: "big_tool", desc: strings.Repeat("very long description ", 50)})
+	eng := NewEngine(&mockAdapter{}, reg, bcontext.NewManager("s", nil, 128000), "m")
+
+	// No budget: full description preserved.
+	full := eng.toolsForMode("BUILDER")
+	var fullBig string
+	for _, d := range full {
+		if d.Name == "big_tool" {
+			fullBig = d.Description
+		}
+	}
+	if len(fullBig) <= 200 {
+		t.Fatalf("expected full long description for big_tool, got len=%d", len(fullBig))
+	}
+
+	// Budget of 40 chars: description must be trimmed + ellipsized.
+	eng.SetToolDescBudget(40)
+	trimmed := eng.toolsForMode("BUILDER")
+	var trimmedBig string
+	for _, d := range trimmed {
+		if d.Name == "big_tool" {
+			trimmedBig = d.Description
+		}
+	}
+	if len(trimmedBig) >= len(fullBig) {
+		t.Fatalf("expected trimmed description to be shorter than %d, got %d: %q", len(fullBig), len(trimmedBig), trimmedBig)
+	}
+	if !strings.HasSuffix(trimmedBig, "…") {
+		t.Fatalf("expected ellipsis suffix, got %q", trimmedBig)
+	}
+}

@@ -225,6 +225,27 @@ func TestContextManagerAppendAndCompaction(t *testing.T) {
 	}
 }
 
+// TestNeedsCompactionEarlyRatio verifies the budget triggers at the lower
+// compactionRatio (0.60), not the old 0.85 — compacting earlier keeps each
+// turn's working set lean (the "context rot" guard).
+func TestNeedsCompactionEarlyRatio(t *testing.T) {
+	// window 1000 tokens; system prompt accounts for 100 of them, so the
+	// conversation budget is 600 tokens (0.60 * 1000 - 100).
+	mgr := NewManager("s", nil, 1000)
+	mgr.SetSystemPromptTokens(100)
+	// At 0.60 ratio, total (sys+messages) > 600 triggers compaction.
+	if mgr.NeedsCompaction() {
+		t.Fatal("empty context should not need compaction")
+	}
+	// 550 message tokens + 100 system = 650 > 600 → should compact.
+	for i := 0; i < 55; i++ {
+		_ = mgr.AppendUserMessage("word word word word word word word word word word") // ~10 tokens each
+	}
+	if !mgr.NeedsCompaction() {
+		t.Errorf("expected compaction to trigger at >60%% of window (total=%d)", mgr.TotalContextTokens())
+	}
+}
+
 // TestRestoreSessionStampsModeAndModel verifies that an assistant turn
 // persisted with Mode/Model metadata restores with a "BROCODE:MODE:MODEL\n"
 // display prefix (so the UI renders the original badge), while messages saved
