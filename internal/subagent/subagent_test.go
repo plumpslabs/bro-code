@@ -531,3 +531,78 @@ func TestSubAgentBudgetCap(t *testing.T) {
 		t.Error("expected a graceful synthesized answer even under a tiny budget")
 	}
 }
+
+// TestMergeDeDuplicates collapses repeated content lines across reports while
+// preserving the per-agent structure (### headers + **Status:** lines).
+func TestMergeDeDuplicates(t *testing.T) {
+	reports := []string{
+		"### Sub-agent a — find the bug\n**Status:** DONE\nerror: nil pointer\nfile: a.go",
+		"### Sub-agent b — find the bug\n**Status:** DONE\nerror: nil pointer\nfile: b.go",
+	}
+	merged := Merge(reports)
+	if !strings.Contains(merged, "### Sub-agent a") || !strings.Contains(merged, "### Sub-agent b") {
+		t.Errorf("merge dropped agent structure: %q", merged)
+	}
+	if !strings.Contains(merged, "**Status:** DONE") {
+		t.Errorf("merge dropped status line: %q", merged)
+	}
+	// The repeated "error: nil pointer" line must appear only once.
+	if n := strings.Count(merged, "error: nil pointer"); n != 1 {
+		t.Errorf("expected 1 de-duplicated line, got %d in %q", n, merged)
+	}
+	if !strings.Contains(merged, "file: a.go") || !strings.Contains(merged, "file: b.go") {
+		t.Errorf("merge dropped unique lines: %q", merged)
+	}
+}
+
+// TestRunManyDeniesMutatingWithoutAsk verifies fail-closed behavior: a mutating
+// parallel task is denied when no confirmation handler is wired (and is never
+// executed by the adapter).
+func TestRunManyDeniesMutatingWithoutAsk(t *testing.T) {
+	f := &fakeAdapter{}
+	tools := tool.NewRegistry()
+	r := &Runner{Adapter: f, Model: "test-model", Tools: tools}
+
+	_, err := r.RunMany(context.Background(), []SubAgent{
+		{ID: "b", Task: "rm -rf logs", Mutates: true},
+	}, true, nil)
+	if err != nil {
+		t.Fatalf("RunMany returned error: %v", err)
+	}
+	// No Ask handler -> mutating task must be denied (not silently run).
+	if f.callCount > 0 {
+		t.Errorf("mutating sub-agent should never have been executed, adapter calls=%d", f.callCount)
+	}
+}
+
+// TestRunManyApprovesMutatingWithAsk verifies a mutating task runs only after the
+// confirmation handler approves.
+func TestRunManyApprovesMutatingWithAsk(t *testing.T) {
+	f := &fakeAdapter{}
+	tools := tool.NewRegistry()
+	approved := 0
+	r := &Runner{
+		Adapter: f,
+		Model:   "test-model",
+		Tools:   tools,
+		Ask: func(q string, opts []string) (string, error) {
+			approved++
+			return "yes", nil
+		},
+	}
+
+	reports, err := r.RunMany(context.Background(), []SubAgent{
+		{ID: "a", Task: "read config", Mutates: false},
+		{ID: "b", Task: "rm -rf logs", Mutates: true},
+	}, true, nil)
+	if err != nil {
+		t.Fatalf("RunMany: %v", err)
+	}
+	if approved != 1 {
+		t.Errorf("Ask should be called exactly once for the mutating task, got %d", approved)
+	}
+	if f.callCount == 0 {
+		t.Error("mutating sub-agent should have run after approval")
+	}
+	_ = reports
+}

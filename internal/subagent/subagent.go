@@ -39,12 +39,23 @@ type Runner struct {
 	// SQLite so delegated work is auditable after the fact. Nil keeps the
 	// previous behavior (fresh context, nothing persisted).
 	Store *store.Store
+	// Ask, when set, is the confirmation gate for MUTATING parallel tasks. A
+	// sub-agent flagged Mutates (write/delete/exec) must be explicitly approved
+	// by the user before it runs — this is the "controlled" half of BroCode's
+	// parallel orchestration: fan-out is free and fast, but any side-effecting
+	// parallel agent cannot act without a confirm. Nil = deny mutating tasks.
+	Ask func(question string, options []string) (string, error)
 }
 
 // SubAgent is a single delegated task.
 type SubAgent struct {
 	ID   string `json:"id,omitempty"` // optional label for the result
 	Task string `json:"task"`         // the isolated task description
+	// Mutates marks a task that may write/delete/execute. Mutating parallel
+	// agents are never run without explicit user confirmation (see Runner.Ask);
+	// this keeps fan-out fast and read-only by default but still lets the model
+	// request a supervised parallel mutation when it is actually useful.
+	Mutates bool `json:"mutates,omitempty"`
 }
 
 // runOne executes one sub-agent in its own isolated loop and returns its final
@@ -87,6 +98,25 @@ func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, 
 		return nil, fmt.Errorf("no sub-agent tasks provided")
 	}
 
+	// Confirm-gate: fan-out is read-only by default. Any task flagged Mutates
+	// (write/delete/exec) must be explicitly approved by the user via Runner.Ask
+	// before it runs — parallel side effects are never silent. Without an Ask
+	// handler, mutating tasks are denied outright (fail-closed).
+	mutating := false
+	for _, a := range agents {
+		if a.Mutates {
+			mutating = true
+			break
+		}
+	}
+	allowed := !mutating
+	if mutating && r.Ask != nil {
+		ans, err := r.Ask("Parallel sub-agents include MUTATING tasks (write/delete/exec). Approve them?", []string{"yes", "no"})
+		if err == nil && strings.EqualFold(strings.TrimSpace(ans), "yes") {
+			allowed = true
+		}
+	}
+
 	results := make([]string, len(agents))
 	errs := make([]error, len(agents))
 
@@ -94,6 +124,13 @@ func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, 
 		id := agents[i].ID
 		if id == "" {
 			id = fmt.Sprintf("%d", i+1)
+		}
+		if agents[i].Mutates && !allowed {
+			errs[i] = fmt.Errorf("sub-agent %q is mutating and was not approved by the user", id)
+			if onUpdate != nil {
+				onUpdate(loop.StateBlocked, fmt.Sprintf("🤖 Sub-agent %s DENIED (mutating, not confirmed)", id))
+			}
+			return
 		}
 		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, onUpdate)
 		if onUpdate != nil {
@@ -140,6 +177,47 @@ func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, 
 		reports = append(reports, sb.String())
 	}
 	return reports, nil
+}
+
+// Merge combines per-sub-agent reports into one concise, de-duplicated summary.
+// It keeps the per-agent structure (### headers and **Status:** lines are always
+// preserved) but collapses identical content lines that several agents repeat
+// (the same error message, the same file path) so the merged view is small enough
+// to drop straight back into the main context without re-bloating it.
+func Merge(reports []string) string {
+	if len(reports) == 0 {
+		return ""
+	}
+	const maxLines = 240
+	seen := map[string]bool{}
+	var out []string
+	total := 0
+	for _, rep := range reports {
+		for _, line := range strings.Split(rep, "\n") {
+			t := strings.TrimSpace(line)
+			if t == "" {
+				out = append(out, line)
+				continue
+			}
+			// Always keep structural lines; dedupe only repeated content.
+			if strings.HasPrefix(t, "### ") || strings.HasPrefix(t, "**Status:**") {
+				out = append(out, line)
+				total++
+				continue
+			}
+			if seen[t] {
+				continue
+			}
+			seen[t] = true
+			out = append(out, line)
+			total++
+			if total >= maxLines {
+				out = append(out, "… (merged output truncated)")
+				return fmt.Sprintf("Merged %d sub-agent reports (%d lines, de-duplicated):\n\n%s", len(reports), total, strings.Join(out, "\n"))
+			}
+		}
+	}
+	return fmt.Sprintf("Merged %d sub-agent reports (%d lines, de-duplicated):\n\n%s", len(reports), total, strings.Join(out, "\n"))
 }
 
 func truncate(s string, n int) string {
@@ -364,6 +442,7 @@ func (t *Tool) Parameters() map[string]any {
 					"properties": map[string]any{
 						"id":   map[string]any{"type": "string", "description": "Optional short label (e.g. 'frontend')"},
 						"task": map[string]any{"type": "string", "description": "The isolated task description"},
+						"mutates": map[string]any{"type": "boolean", "description": "Set true ONLY if the task writes, deletes, or executes commands. Mutating parallel tasks require explicit user confirmation before running — read-only research should leave this false."},
 					},
 					"required": []string{"task"},
 				},
@@ -399,7 +478,7 @@ func (t *Tool) Execute(ctx context.Context, argsJSON string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return strings.Join(reports, "\n\n"), nil
+		return Merge(reports), nil
 	case strings.TrimSpace(args.Task) != "":
 		return t.Runner.Run(tctx, args.Task)
 	default:
@@ -426,10 +505,5 @@ func (r *Runner) RunScoutSwarm(ctx context.Context, subpaths []string, goal stri
 	if err != nil {
 		return "Scout swarm error: " + err.Error()
 	}
-	var sb strings.Builder
-	sb.WriteString("⚡ Speculative Scout Swarm Findings:\n")
-	for i, res := range reports {
-		sb.WriteString(fmt.Sprintf("\n### [Scout_%d]\n%s\n", i+1, res))
-	}
-	return strings.TrimSpace(sb.String())
+	return Merge(reports)
 }

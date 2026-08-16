@@ -292,6 +292,10 @@ type Model struct {
 	modelsQuery  string
 	modelOptions map[string][]string
 	modelsSel    int
+	// modelListCache memoizes the sorted+filtered model list so the models modal
+	// doesn't re-fetch and re-sort every provider on every keystroke while open.
+	modelListCache      []modelOptionItem
+	modelListCacheQuery string
 
 	// Sessions Modal State
 	sessionList      []store.Session
@@ -359,6 +363,13 @@ type Model struct {
 	askCustomInput textinput.Model
 	askViewport    viewport.Model
 
+	// Mode-switch confirmation. Shift+Tab flips the agent mode (BUILDER/
+	// PLANNER/MINER), but doing so mid-turn would silently re-tune an in-flight
+	// agent. When a turn is running we instead stage the switch and require an
+	// explicit confirm (y/Enter = apply, n/Esc = cancel) so it is always a
+	// deliberate, acknowledged action.
+	showModeConfirm bool
+	pendingMode     string
 	// mcpSummary is a compact one-liner of connected MCP servers injected into
 	// OpenCode CLI prompts, so the CLI model answers MCP questions directly
 	// from context instead of exploring config files with bash.
@@ -655,6 +666,7 @@ func NewApp(
 	m.tools.Register(&tool.RunTestsTool{Plan: loop.TestCommandPlan})
 
 	m.modelOptions = provider.DiscoverModels(cfg)
+	m.modelListCache = nil
 	m.rebuildEngine()
 	m.initialized = true
 	return m
@@ -734,6 +746,26 @@ func (m *Model) rebuildEngine() {
 			}
 			return "", nil
 		})
+		// Parallel orchestration confirm-gate: mutating sub-agents route their
+		// approval question through the same user-ask channel.
+		if m.scoutMgr != nil && m.scoutMgr.Runner != nil {
+			m.scoutMgr.Runner.Ask = func(question string, opts []string) (string, error) {
+				results, err := m.ask.Ask(context.Background(), []tool.AskQuestion{
+					{
+						Question: question,
+						Options:  opts,
+						Multi:    false,
+					},
+				})
+				if err != nil || len(results) == 0 {
+					return "", err
+				}
+				if len(results[0].Answers) > 0 {
+					return results[0].Answers[0], nil
+				}
+				return results[0].Custom, nil
+			}
+		}
 	}
 	if m.projectCtx == nil {
 		// Build the compact project overview once (tree + AGENTS/CLAUDE/README
@@ -1279,7 +1311,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+		}
+	}
+
+		// Mode-switch confirmation: while confirm is pending, only y/Enter
+		// (apply) or n/Esc (cancel) are handled; everything else is ignored.
+		if m.showModeConfirm {
+			switch keyStr {
+			case "y", "Y", "enter":
+				m.mode = m.pendingMode
+				m.engine.SetMode(m.mode)
+				m.persistMode()
+				m.appendMessages(fmt.Sprintf("✅ Mode → %s", m.mode))
+			case "n", "N", "esc":
+				m.appendMessages("❌ Ganti mode dibatalkan.")
 			}
+			m.showModeConfirm = false
+			m.pendingMode = ""
+			return m, nil
 		}
 
 		switch keyStr {
@@ -1379,16 +1428,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// mode (it's reserved for in-modal navigation), so it is a no-op
 			// here — and the key is still consumed so it can't bubble elsewhere.
 			if keyStr == "shift+tab" && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
+				next := m.mode
 				switch m.mode {
 				case "BUILDER":
-					m.mode = "PLANNER"
+					next = "PLANNER"
 				case "PLANNER":
-					m.mode = "MINER"
+					next = "MINER"
 				default:
-					m.mode = "BUILDER"
+					next = "BUILDER"
 				}
-				m.engine.SetMode(m.mode)
-				m.persistMode()
+				// Mid-turn: stage the switch and require an explicit confirm so
+				// we never silently re-tune an in-flight agent. Idle: the
+				// deliberate Shift+Tab press is itself the confirmation.
+				if m.turnRunning {
+					m.pendingMode = next
+					m.showModeConfirm = true
+					m.appendMessages(fmt.Sprintf("⚠️ Ganti mode ke %s saat sedang berjalan? Tekan y/Enter untuk lanjut, n/Esc untuk batal.", next))
+				} else {
+					m.mode = next
+					m.engine.SetMode(m.mode)
+					m.persistMode()
+				}
 			}
 			return m, nil
 
@@ -2163,6 +2223,7 @@ func (m *Model) saveProviderKey(pID, apiKey string) {
 
 	// Re-detect providers and switch if appropriate
 	m.modelOptions = provider.DiscoverModels(m.cfg)
+	m.modelListCache = nil
 	m.switchProviderAndModel(pID, targetProvider.DefaultModels[0])
 }
 
@@ -2333,6 +2394,7 @@ func (m *Model) saveProviderConfig(pID string, info provider.ProviderInfo, keyVa
 	}
 
 	m.modelOptions = provider.DiscoverModels(m.cfg)
+	m.modelListCache = nil
 	model := "default"
 	if len(info.DefaultModels) > 0 {
 		model = info.DefaultModels[0]
@@ -2347,6 +2409,11 @@ type modelOptionItem struct {
 }
 
 func (m *Model) getModelList() []modelOptionItem {
+	// Memoize: the modal re-renders on every keystroke, but the underlying list
+	// only changes when the filter query (or the discovered models) changes.
+	if m.modelListCache != nil && m.modelListCacheQuery == m.modelsQuery {
+		return m.modelListCache
+	}
 	var items []modelOptionItem
 	var providerIDs []string
 	for pID := range m.modelOptions {
@@ -2366,6 +2433,8 @@ func (m *Model) getModelList() []modelOptionItem {
 			items = append(items, modelOptionItem{ProviderID: pID, ModelName: mod})
 		}
 	}
+	m.modelListCache = items
+	m.modelListCacheQuery = m.modelsQuery
 	return items
 }
 
