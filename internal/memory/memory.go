@@ -156,7 +156,7 @@ func (s *Store) WarmStart() string {
 		if len(items) == 0 {
 			continue
 		}
-		sb.WriteString("## " + sec + "\n")
+		sb.WriteString("## ");sb.WriteString(sec);sb.WriteString("\n")
 		for _, f := range items {
 			sb.WriteString("- " + f + "\n")
 		}

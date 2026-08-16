@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -88,6 +89,12 @@ const (
 	// with an error.
 	FallbackPrimaryOnly = "primary_only"
 )
+
+// defaultModelCallTimeout bounds a single LLM call. Without it a slow/free
+// provider can hang the whole turn for minutes with no feedback (the engine
+// sits silently inside one completeTurn call). On timeout the adaptive router
+// falls back to the next healthy model instead of stalling.
+const defaultModelCallTimeout = 120 * time.Second
 
 // ScoutDrainer delivers completed background research findings. Implemented by
 // *subagent.ScoutManager; defined here as an interface to avoid an import
@@ -2055,12 +2062,12 @@ func atoiSafe(s string) int {
 // write_file (new/overwrite) without parsing tool output text.
 func (e *Engine) lastChangeDiff(path string) string {
 	chs := tool.PeekChanges()
-	for i := len(chs) - 1; i >= 0; i-- {
-		if chs[i].Path != path {
+	for _, ch := range slices.Backward(chs) {
+		if ch.Path != path {
 			continue
 		}
-		raw := tool.FileChangesDiff([]tool.FileChange{chs[i]})
-		raw = strings.TrimPrefix(raw, chs[i].Path+"\n")
+		raw := tool.FileChangesDiff([]tool.FileChange{ch})
+		raw = strings.TrimPrefix(raw, ch.Path+"\n")
 		return strings.TrimRight(raw, "\n")
 	}
 	return ""
@@ -2424,6 +2431,13 @@ func (e *Engine) fitMessages(sysPrompt string) []provider.Message {
 // a chronically failing provider is skipped on later turns instead of burning
 // a full timeout each time.
 func (e *Engine) completeTurn(ctx context.Context, req provider.CompletionRequest, onUpdate TurnOutputHandler) (*provider.CompletionResponse, string, error) {
+	timeout := defaultModelCallTimeout
+	// Log that we are now blocking on the LLM so the activity log is never
+	// silent during a slow generation (otherwise it looks "stuck").
+	if onUpdate != nil {
+		onUpdate(e.state, fmt.Sprintf("⏳ %s: generating response…", req.Model))
+	}
+
 	// Fast path: the primary is cooling down from a recent failure — don't
 	// burn a full timeout on it again; go straight to the first healthy
 	// fallback. The cooldown is a hint, not a hard block: if nothing is
@@ -2437,7 +2451,11 @@ func (e *Engine) completeTurn(ctx context.Context, req provider.CompletionReques
 		// fall through → try the primary anyway
 	}
 
-	resp, err := e.complete(ctx, req)
+	// Each attempt gets its OWN timeout so a single slow call can't hang the
+	// whole turn — on timeout we fall back to the next healthy model instead.
+	callCtx, callCancel := context.WithTimeout(ctx, timeout)
+	resp, err := e.complete(callCtx, req)
+	callCancel()
 	if err == nil {
 		e.health.recordSuccess(e.primaryID)
 		return resp, "", nil
@@ -2448,14 +2466,21 @@ func (e *Engine) completeTurn(ctx context.Context, req provider.CompletionReques
 	if e.fallbackPolicy == FallbackPrimaryOnly {
 		return nil, "", primaryErr
 	}
+	// Surface a timeout clearly so the user knows we're re-routing, not frozen.
+	if errors.Is(err, context.DeadlineExceeded) && onUpdate != nil {
+		onUpdate(e.state, fmt.Sprintf("⚠️ %s timed out after %s — routing to fallback…", req.Model, timeout))
+	}
 
 	// A transient primary failure (stream stall, timeout, 429/5xx) deserves
 	// ONE retry on the same provider before switching models. Permanent errors
 	// (auth, invalid model, user ESC) are never retried.
 	if provider.IsRetryable(err) {
-		if resp, err := e.complete(ctx, req); err == nil {
+		retryCtx, retryCancel := context.WithTimeout(ctx, timeout)
+		rresp, rerr := e.complete(retryCtx, req)
+		retryCancel()
+		if rerr == nil {
 			e.health.recordSuccess(e.primaryID)
-			return resp, "", nil
+			return rresp, "", nil
 		}
 	}
 
@@ -2494,7 +2519,10 @@ func (e *Engine) tryFallbacks(ctx context.Context, req provider.CompletionReques
 		}
 		fbReq := req
 		fbReq.Model = fb.Model
-		fbResp, err := e.completeWith(ctx, fb.Adapter, fbReq)
+		// Bound each fallback attempt so a slow fallback can't hang either.
+		fbCtx, fbCancel := context.WithTimeout(ctx, defaultModelCallTimeout)
+		fbResp, err := e.completeWith(fbCtx, fb.Adapter, fbReq)
+		fbCancel()
 		if err == nil {
 			e.health.recordSuccess(fb.ID)
 			e.lastFallback = fb.Model

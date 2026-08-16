@@ -629,12 +629,7 @@ func formatDiagnostic(d protocol.Diagnostic) string {
 }
 
 func hasTag(d protocol.Diagnostic, tag protocol.DiagnosticTag) bool {
-	for _, t := range d.Tags.Slice() {
-		if t == tag {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(d.Tags.Slice(), tag)
 }
 
 // scanSkipDirs are dependency/build/cache directories never worth opening in
