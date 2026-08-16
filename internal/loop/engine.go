@@ -966,12 +966,31 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		}
 		if toolBudgetExhausted {
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Tool exploration limit reached — synthesizing graceful answer from explored context...")
+				onUpdate(e.state, "⚠️ Tool exploration limit reached — applying known fixes, then synthesizing...")
 			}
-			// Graceful Recovery: Instead of a cold abort message, make ONE final
-			// completion request WITHOUT tools, forcing the model to synthesize a
-			// helpful answer for the user based on the context explored so far.
-			synthPrompt := "⚠️ TOOL EXPLORATION BUDGET REACHED: You have reached the tool call limit for this task. Tools are now DISABLED for this final response. You MUST now synthesize a helpful, comprehensive response for the user in the user's language based ONLY on the files and context you have explored so far. Answer as much of the user's prompt as possible, summarize your findings, and clearly note any missing context or next steps." + e.exploredSummary()
+			// FIX-TASK SAFETY NET: when the task was to fix diagnostics and an LSP is
+			// available, actually apply the auto-fixable ones NOW (deterministically,
+			// via the batch lsp_autofix tool) instead of punting a TODO list to the
+			// user. This is the core "efficiency by design" guarantee — the machine
+			// finishes the mechanical fixes even when the model loop ran out of budget.
+			var autoFixResult string
+			if e.lspAvailable > 0 && (e.preflightBlock != "" || looksLikeLSPFixTask(e.context.LastUserPrompt())) {
+				if at := e.tools.ToolByName("lsp_autofix"); at != nil {
+					if fr, ferr := at.Execute(ctx, `{"target":"all"}`); ferr == nil {
+						autoFixResult = fr
+					}
+				}
+			}
+			// Graceful Recovery: make ONE final completion request WITHOUT tools,
+			// forcing the model to synthesize a helpful answer from context so far.
+			synthPrompt := "⚠️ TOOL EXPLORATION BUDGET REACHED: tool calls are now DISABLED for this final response. "
+			if autoFixResult != "" {
+				synthPrompt += "The engine already applied auto-fixes via lsp_autofix (results below) — report exactly what was fixed. "
+			}
+			synthPrompt += "Synthesize a helpful, comprehensive response for the user in the user's language based ONLY on the files and context explored so far. If the task was to fix warnings/deprecations, report the fixes that were applied and list any that remain for a follow-up turn — do NOT tell the user to apply the fixes themselves. Answer as much of the user's prompt as possible; note any genuinely missing context." + e.exploredSummary()
+			if autoFixResult != "" {
+				synthPrompt += "\n\nENGINE AUTO-FIX RESULTS:\n" + autoFixResult
+			}
 			_ = e.context.AppendUserMessage(synthPrompt)
 
 			reqMessages := append([]provider.Message{
@@ -1009,6 +1028,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			// stays connected instead of ending on an abrupt notice.
 			e.state = StateDone
 			msg := "⚠️ Tool budget limit reached — here is what was verified from the explored context:\n" + e.exploredSummary()
+			if autoFixResult != "" {
+				msg = "⚠️ Tool budget limit reached, but the engine applied these auto-fixes first:\n" + autoFixResult + "\n\n" + msg
+			}
 			if e.lastReasoning != "" {
 				msg += "\n\n**Last Working Focus**: " + e.lastReasoning
 			}
@@ -1807,15 +1829,31 @@ func looksLikeLSPFixTask(query string) bool {
 	q := strings.ToLower(query)
 	if strings.Contains(q, "lsp_scan") || strings.Contains(q, "diagnostic") ||
 		strings.Contains(q, "linter") || strings.Contains(q, "lint ") ||
-		strings.Contains(q, "go vet") || strings.Contains(q, "tsc") {
+		strings.Contains(q, "go vet") || strings.Contains(q, "tsc") ||
+		strings.Contains(q, "deprecat") {
 		return true
 	}
-	// "fix/clean up/resolve ... (the) warnings/errors/deprecations"
-	if (strings.Contains(q, "fix") || strings.Contains(q, "clean") || strings.Contains(q, "resolve")) &&
-		(strings.Contains(q, "warning") || strings.Contains(q, "error") || strings.Contains(q, "deprecat")) {
-		return true
+	// "(fix|clean|resolve|perbaiki|...) ... (warning|error|deprecat|lint)".
+	// Language-agnostic: covers English AND Indonesian fix prompts (perbaiki,
+	// betulkan, baiki, beresin, benerin, bersihkan, hapus, ganti) so pre-flight
+	// LSP packing fires regardless of the user's language.
+	fixVerbs := []string{"fix", "clean", "resolve", "repair", "perbaiki", "betulkan",
+		"baiki", "beresin", "benerin", "bersihkan", "hapus", "ganti", "update"}
+	diagNouns := []string{"warning", "error", "deprecat", "lint", "linter"}
+	hasVerb, hasNoun := false, false
+	for _, v := range fixVerbs {
+		if strings.Contains(q, v) {
+			hasVerb = true
+			break
+		}
 	}
-	return false
+	for _, n := range diagNouns {
+		if strings.Contains(q, n) {
+			hasNoun = true
+			break
+		}
+	}
+	return hasVerb && hasNoun
 }
 
 // preflightLSP runs lsp_scan proactively and packs the result — plus the exact

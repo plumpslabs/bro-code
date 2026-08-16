@@ -1071,3 +1071,31 @@ func TestPlanModeDirectiveInSystemPrompt(t *testing.T) {
 		t.Errorf("expected plan-mode to instruct ask_user confirmation")
 	}
 }
+
+// TestLooksLikeLSPFixTaskLanguageAgnostic verifies the pre-flight trigger fires
+// for Indonesian fix prompts (the user's actual phrasing), not just English.
+func TestLooksLikeLSPFixTaskLanguageAgnostic(t *testing.T) {
+	yes := []string{
+		"perbaiki smua warning depreceted dll", // user's exact prompt (misspelled)
+		"betulkan semua error di project",
+		"baiki deprecated API di client.go",
+		"beresin lint warnings",
+		"bersihkan warnings",
+	}
+	for _, q := range yes {
+		if !looksLikeLSPFixTask(q) {
+			t.Errorf("expected LSP-fix intent for %q", q)
+		}
+	}
+	// Still must NOT fire on plain build/question prompts.
+	no := []string{
+		"implement a login endpoint",
+		"jelaskan cara kerja cache",
+		"build a caching layer",
+	}
+	for _, q := range no {
+		if looksLikeLSPFixTask(q) {
+			t.Errorf("did NOT expect LSP-fix intent for %q", q)
+		}
+	}
+}
