@@ -56,6 +56,14 @@ type Manager struct {
 	messages     []provider.Message
 	totalTokens  int
 	maxWindow    int
+	// systemPromptTokens is the estimated size of the per-turn system prompt
+	// (repo map + warm-start memory + tool definitions). It is NOT part of the
+	// conversation messages but IS sent with every request, so it must count
+	// toward the context budget — otherwise the real wire request (system
+	// prompt + messages) can exceed the model window even when the conversation
+	// alone is under the cap. Set by the engine each turn via
+	// SetSystemPromptTokens.
+	systemPromptTokens int
 	compactCount int
 	model        string // active model name; enables exact BPE token counting
 }
@@ -283,11 +291,29 @@ func (m *Manager) LastUserPrompt() string {
 	return ""
 }
 
-// NeedsCompaction checks if token usage exceeds 85% threshold.
+// SetSystemPromptTokens records the estimated size of the per-turn system
+// prompt so the context budget accounts for it (see systemPromptTokens).
+func (m *Manager) SetSystemPromptTokens(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.systemPromptTokens = n
+}
+
+// TotalContextTokens is the true on-wire token cost of a request: the
+// conversation messages plus the system prompt that accompanies every call.
+func (m *Manager) TotalContextTokens() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.totalTokens + m.systemPromptTokens
+}
+
+// NeedsCompaction checks if token usage exceeds 85% of the window. The budget
+// includes the system prompt, so compaction triggers before the real request
+// (system prompt + messages) can overflow the model's context window.
 func (m *Manager) NeedsCompaction() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.totalTokens > int(float64(m.maxWindow)*0.85)
+	return m.TotalContextTokens() > int(float64(m.maxWindow)*0.85)
 }
 
 // Compact performs structured summary compaction.

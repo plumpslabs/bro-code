@@ -798,6 +798,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			e.sysPromptCached = e.buildSystemPrompt(currentMode, iteration, onUpdate)
 		}
 		sysPrompt := e.sysPromptCached
+		// Account for the system prompt in the context budget so compaction (and
+		// the wire-size guard in fitMessages) fire before the real request can
+		// overflow the model window.
+		e.context.SetSystemPromptTokens(bcontext.EstimateTokens(sysPrompt))
 
 		// Deliver any scout findings that finished since the last iteration —
 		// a scout started mid-turn reaches the model at the NEXT reasoning step
@@ -818,7 +822,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 
 			reqMessages := append([]provider.Message{
 				{Role: "system", Content: sysPrompt},
-			}, e.context.Messages()...)
+	}, e.fitMessages(sysPrompt)...)
 
 			synthReq := provider.CompletionRequest{
 				Model:       e.model,
@@ -887,7 +891,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 
 		reqMessages := append([]provider.Message{
 			{Role: "system", Content: sysPrompt},
-		}, e.context.Messages()...)
+		}, e.fitMessages(sysPrompt)...)
 
 		req := provider.CompletionRequest{
 			Model:       e.model,
@@ -1601,7 +1605,7 @@ func (e *Engine) finalSynth(ctx context.Context, reason string, marker string) (
 	}
 	reqMessages := append([]provider.Message{
 		{Role: "system", Content: localSysPrompt},
-	}, e.context.Messages()...)
+	}, e.fitMessages(localSysPrompt)...)
 
 	synthReq := provider.CompletionRequest{
 		Model:       e.model,
@@ -1832,6 +1836,44 @@ func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, r
 		e.turnTokens += resp.Usage.TotalTokens
 	}
 	return resp, nil
+}
+
+// fitMessages returns the conversation messages trimmed from the oldest end so
+// the full wire request — system prompt + messages + a reserved completion
+// budget — fits the model's context window. It is the final safety net against
+// context overflow: a too-large request makes some providers return a 200 with
+// empty content (instead of an error), which the UI surfaces as "the model
+// returned an empty response". NeedsCompaction handles the common case; this
+// guarantees the request that actually goes on the wire is never over budget,
+// even when the system prompt alone is large or a single message is huge.
+func (e *Engine) fitMessages(sysPrompt string) []provider.Message {
+	msgs := e.context.Messages()
+	if len(msgs) == 0 {
+		return msgs
+	}
+	reserved := int(float64(e.context.MaxWindow()) * 0.15) // completion budget
+	limit := e.context.MaxWindow() - reserved
+	if limit < 0 {
+		limit = e.context.MaxWindow()
+	}
+	budget := limit - bcontext.EstimateTokens(sysPrompt)
+	if budget <= 0 {
+		// System prompt alone eats the whole window — keep only the newest
+		// message so the request is never empty.
+		return []provider.Message{msgs[len(msgs)-1]}
+	}
+	// Accumulate from the newest message backward; stop before the budget breaks.
+	total := 0
+	start := len(msgs)
+	for i := len(msgs) - 1; i >= 0; i-- {
+		c := bcontext.EstimateTokens(msgs[i].Content) + bcontext.EstimateTokens(msgs[i].Reasoning)
+		if total+c > budget && start < len(msgs) {
+			break
+		}
+		total += c
+		start = i
+	}
+	return msgs[start:]
 }
 
 // completeTurn runs a completion through the adaptive router. It returns the
