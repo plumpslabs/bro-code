@@ -60,6 +60,11 @@ type Registry struct {
 	tools    map[string]Tool
 	repoRoot string          // anchors the cd/pushd escape check
 	allow    map[string]bool // session allow-list (keys from AllowKey)
+	// allowExact remembers commands the user already approved this session. An
+	// "Allow once" on command X therefore does NOT re-prompt when the model runs
+	// the SAME command again — previously a re-run popped a fresh gated prompt
+	// every time, which is exactly the "Allow once / Allow once" loop users hit.
+	allowExact map[string]bool
 	askFunc  func(context.Context, []AskQuestion) ([]AskResult, error)
 	sandbox  *Sandbox // granular per-tool policy (.brocode/sandbox.json)
 
@@ -257,6 +262,12 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 		return false, fmt.Sprintf("command %q is prohibited (destructive system operation)", cmd), nil
 	}
 
+	// Exact-command session memory: if the user already approved this precise
+	// command (Allow once or Always), don't re-prompt for the identical re-run.
+	if r.allowExact != nil && r.allowExact[cmd] {
+		return true, "", nil
+	}
+
 	// GateAsk
 	if r.askFunc == nil {
 		return true, "", nil // headless/unattended: proceed
@@ -326,12 +337,22 @@ func (r *Registry) askViaModal(ctx context.Context, cmd string) (bool, string, e
 		if r.allow == nil {
 			r.allow = map[string]bool{}
 		}
+		if r.allowExact == nil {
+			r.allowExact = map[string]bool{}
+		}
+		r.allowExact[cmd] = true
 		if key != "" {
 			r.allow[key] = true
 		}
 		return true, "", nil
 	default:
-		return true, "", nil // allow once
+		// "Allow once": approve this invocation AND remember the exact command so
+		// an identical re-run within the session doesn't re-prompt.
+		if r.allowExact == nil {
+			r.allowExact = map[string]bool{}
+		}
+		r.allowExact[cmd] = true
+		return true, "", nil
 	}
 }
 

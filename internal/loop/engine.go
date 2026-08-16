@@ -377,21 +377,30 @@ func (e *Engine) SetToolDescBudget(n int) {
 // Tool-only budget: a model that keeps calling tools without answering is
 // nudged EARLY (so a rabbit-hole exploration like "search the schema for more
 // models" is cut before it burns a dollar of tokens) and aborted shortly
-// after. 10 rounds of pure tool calls is plenty for a legitimate overview in
-// a big monorepo; the first reminder lands right after that.
+// after. A few rounds of pure tool calls is plenty for most tasks (a big
+// monorepo overview, an LSP-warning sweep); the first reminder lands early so
+// the agent answers instead of reading itself in circles.
 const (
 	// toolWarnRounds — first "stop and answer" reminder.
-	toolWarnRounds = 10
+	toolWarnRounds = 6
 	// toolFinalWarnRounds — second, firmer warning.
-	toolFinalWarnRounds = 12
+	toolFinalWarnRounds = 8
 	// maxToolOnlyRounds — abort once a spinning model stalls. Still well below
 	// the 25-iteration cap.
 	maxToolOnlyRounds = 14
 	// maxToolOnlyAbsolute — unconditional abort even for a model that keeps
-	// discovering new files (freedom is bounded, never infinite). 20 leaves
+	// discovering new files (freedom is bounded, never infinite). 16 leaves
 	// room for the final-warning pattern (ONE last targeted read, then the
 	// answer) to complete instead of being cut right after the read.
-	maxToolOnlyAbsolute = 20
+	maxToolOnlyAbsolute = 16
+	// finalWarnHardStop — after the FINAL WARNING the model may make at most this
+	// many more tool rounds before it is forced to synthesize. The warning is
+	// otherwise toothless: the model kept reading "one more section" forever.
+	finalWarnHardStop = 2
+	// exploredWarnCap — once the agent has read this many DISTINCT files/paths in
+	// a row without answering, accelerate the final warning. Reading a dozen
+	// files for a simple cleanup task is over-exploration, not progress.
+	exploredWarnCap = 8
 )
 
 // CalculateAdaptiveToolBudget dynamically scales the tool budget based on
@@ -863,6 +872,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 			continue
 		}
+		// Accelerate the final warning when the agent has already read many
+		// DISTINCT files yet still hasn't answered — continued reading is now
+		// over-exploration, not progress (it was resetting the stall counter by
+		// touching a new file each round).
+		if !e.toolReminder2Sent && e.toolOnlyRounds >= toolWarnRounds && len(e.explored) >= exploredWarnCap {
+			e.toolReminder2Sent = true
+			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: You have already examined " + fmt.Sprintf("%d", len(e.explored)) + " distinct files without answering. Make AT MOST ONE more targeted read if you truly need it, then write your answer. Do NOT keep opening new files." + e.exploredSummary())
+			if onUpdate != nil {
+				onUpdate(e.state, "⚠️ Final warning — too much reading, answer now")
+			}
+			continue
+		}
 		// 1. Thinking State
 		e.state = StateThinking
 		if onUpdate != nil {
@@ -890,7 +911,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		e.drainScouts(onUpdate)
 
 		adaptiveCap := CalculateAdaptiveToolBudget(e.context.LastUserPrompt(), e.Mode())
-		if e.toolOnlyRounds >= adaptiveCap && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute) {
+		// Hard stop after the FINAL WARNING: the model was already told "one more
+		// read, then answer" — if it is still only calling tools after the grace
+		// rounds, force synthesis instead of letting it read in circles.
+		toolBudgetExhausted := e.toolOnlyRounds >= adaptiveCap && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute)
+		if e.toolReminder2Sent && e.toolOnlyRounds >= toolFinalWarnRounds+finalWarnHardStop {
+			toolBudgetExhausted = true
+		}
+		if toolBudgetExhausted {
 			if onUpdate != nil {
 				onUpdate(e.state, "⚠️ Tool exploration limit reached — synthesizing graceful answer from explored context...")
 			}

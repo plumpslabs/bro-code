@@ -451,10 +451,14 @@ func TestEngineToolBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTurn failed: %v", err)
 	}
-	// A SPINNING model (no new files) is cut at maxToolOnlyRounds; the
-	// reminder rounds inject messages without calling the adapter.
-	if adapter.calls != maxToolOnlyAbsolute {
-		t.Fatalf("spinning model cut off at %d completions, want %d", adapter.calls, maxToolOnlyAbsolute)
+	// A SPINNING model (no new files) is cut at the tool-only budget, well
+	// below the 25-iteration cap; the reminder rounds inject messages without
+	// calling the adapter.
+	if adapter.calls > maxToolOnlyRounds {
+		t.Fatalf("spinning model not cut at tool-only budget: %d completions (max %d)", adapter.calls, maxToolOnlyRounds)
+	}
+	if adapter.calls <= toolWarnRounds {
+		t.Fatalf("spinning model cut too early (%d <= warn %d) — guard fired before any real exploration", adapter.calls, toolWarnRounds)
 	}
 	if !strings.Contains(res, "Turn aborted") && !strings.Contains(res, "Tool Limit Tercapai") {
 		t.Errorf("expected tool-budget graceful summary message, got %q", res)
@@ -522,9 +526,9 @@ func TestEngineToolBudgetRangeReadsAreProgress(t *testing.T) {
 		t.Fatalf("RunTurn failed: %v", err)
 	}
 	// Range reads of the same file must NOT be treated as spinning: the model
-	// survives past maxToolOnlyRounds (only the absolute cap stops it).
-	if adapter.calls <= maxToolOnlyRounds {
-		t.Fatalf("range-reading model cut at %d calls (<= maxToolOnlyRounds %d): same-path range reads must count as progress", adapter.calls, maxToolOnlyRounds)
+	// gets room past the first reminder (only the absolute cap stops it).
+	if adapter.calls <= toolWarnRounds {
+		t.Fatalf("range-reading model cut too early (%d <= warn %d): same-path range reads must count as progress", adapter.calls, toolWarnRounds)
 	}
 	if adapter.calls > maxToolOnlyAbsolute {
 		t.Fatalf("range-reading model exceeded absolute cap: %d > %d", adapter.calls, maxToolOnlyAbsolute)
@@ -569,8 +573,8 @@ func TestEngineToolBudgetBashExplorationIsProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTurn failed: %v", err)
 	}
-	if adapter.calls <= maxToolOnlyRounds {
-		t.Fatalf("bash explorer cut at %d calls (<= maxToolOnlyRounds %d): distinct bash commands must count as progress", adapter.calls, maxToolOnlyRounds)
+	if adapter.calls <= toolWarnRounds {
+		t.Fatalf("bash explorer cut too early (%d <= warn %d): distinct bash commands must count as progress", adapter.calls, toolWarnRounds)
 	}
 	if adapter.calls > maxToolOnlyAbsolute {
 		t.Fatalf("bash explorer exceeded absolute cap: %d > %d", adapter.calls, maxToolOnlyAbsolute)
@@ -592,9 +596,13 @@ func TestEngineToolBudgetProgressing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTurn failed: %v", err)
 	}
-	// Progressing model runs past maxToolOnlyRounds up to the absolute cap.
-	if adapter.calls != maxToolOnlyAbsolute {
-		t.Fatalf("progressing model cut off at %d completions, want absolute cap %d", adapter.calls, maxToolOnlyAbsolute)
+	// Progressing model (new file every round) gets room past the first
+	// reminder but is still bounded by the absolute cap — never burns all 25.
+	if adapter.calls <= toolWarnRounds {
+		t.Fatalf("progressing model cut too early (%d <= warn %d): new-file exploration must get room", adapter.calls, toolWarnRounds)
+	}
+	if adapter.calls > maxToolOnlyAbsolute {
+		t.Fatalf("progressing model exceeded absolute cap: %d > %d", adapter.calls, maxToolOnlyAbsolute)
 	}
 	if !strings.Contains(res, "Turn aborted") && !strings.Contains(res, "Tool Limit Tercapai") {
 		t.Errorf("expected summary message, got %q", res)
