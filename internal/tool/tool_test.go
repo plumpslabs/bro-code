@@ -53,9 +53,10 @@ func TestReadFileBlockedForSensitiveAndHeavy(t *testing.T) {
 	}
 }
 
-// TestReadFileTruncationGuidance verifies a large file (>200 lines) returns
-// the first 100 lines with ACTIONABLE guidance (start_line/end_line ranges,
-// code_search) — not a vague "request more" that lets weak models fall into
+// TestReadFileTruncationGuidance verifies a large file (>150 lines) returns a
+// short head preview with ACTIONABLE guidance (start_line/end_line ranges,
+// code_locate, shrinkwrap) — not a whole-file dump that makes the model ingest
+// code it only needs one span of, nor a vague "request more" that triggers
 // bash sed/head/tail truncation-fighting loops.
 func TestReadFileTruncationGuidance(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -73,14 +74,14 @@ func TestReadFileTruncationGuidance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read_file failed: %v", err)
 	}
-	if !strings.Contains(out, "file has 50") || !strings.Contains(out, "showing first 250") {
-		t.Fatalf("truncation notice missing line count: %q", out)
+	if !strings.Contains(out, "501 lines") {
+		t.Fatalf("structural overview notice missing line count: %q", out)
 	}
-	if !strings.Contains(out, "start_line/end_line") || !strings.Contains(out, "code_search") {
-		t.Fatalf("truncation notice must give actionable guidance: %q", out)
+	if !strings.Contains(out, "start_line/end_line") || !strings.Contains(out, "code_locate") {
+		t.Fatalf("structural overview must give actionable guidance: %q", out)
 	}
 	if strings.Contains(out, "line 300") {
-		t.Fatalf("read_file returned content past the first 250 lines")
+		t.Fatalf("read_file returned content past the first 60 lines of the overview")
 	}
 
 	// A range read returns the requested section.
@@ -90,6 +91,82 @@ func TestReadFileTruncationGuidance(t *testing.T) {
 	}
 	if !strings.Contains(rangeOut, "line 200") || !strings.Contains(rangeOut, "line 205") {
 		t.Fatalf("range read missing expected lines: %q", rangeOut)
+	}
+}
+
+// TestReadFileLazyRange verifies a start_line/end_line read streams only the
+// requested span and never loads the rest of a large file into the response.
+func TestReadFileLazyRange(t *testing.T) {
+	tmpDir := t.TempDir()
+	big := filepath.Join(tmpDir, "big.txt")
+	var sb strings.Builder
+	for i := 1; i <= 1000; i++ {
+		sb.WriteString(fmt.Sprintf("line %d\n", i))
+	}
+	if err := os.WriteFile(big, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt := &ReadFileTool{}
+	out, err := rt.Execute(context.Background(), `{"path":"`+big+`","start_line":400,"end_line":403}`)
+	if err != nil {
+		t.Fatalf("lazy range read failed: %v", err)
+	}
+	if !strings.Contains(out, "line 400") || !strings.Contains(out, "line 403") {
+		t.Fatalf("range read missing expected lines: %q", out)
+	}
+	if strings.Contains(out, "line 1\n") || strings.Contains(out, "line 999") {
+		t.Fatalf("range read returned out-of-span content: %q", out)
+	}
+}
+
+// TestEditFilePositional verifies a start_line/end_line edit replaces just that
+// span WITHOUT requiring the caller to read the whole file first.
+func TestEditFilePositional(t *testing.T) {
+	tmpDir := t.TempDir()
+	f := filepath.Join(tmpDir, "app.go")
+	content := "package main\n\nfunc a() {}\n\nfunc b() {}\n\nfunc c() {}\n"
+	if err := os.WriteFile(f, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	et := &EditFileTool{}
+	// func a() {} is line 3; replace lines [3,3] (inclusive) with the new signature.
+	args := `{"path":"` + f + `","start_line":3,"end_line":3,"replacement":"func a() int { return 1 }"}`
+	out, err := et.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("positional edit failed: %v", err)
+	}
+	if !strings.Contains(out, "Successfully updated") || !strings.Contains(out, "lines 3-3") {
+		t.Fatalf("expected positional-edit confirmation, got: %q", out)
+	}
+	got, _ := os.ReadFile(f)
+	want := "package main\n\nfunc a() int { return 1 }\n\nfunc b() {}\n\nfunc c() {}\n"
+	if string(got) != want {
+		t.Fatalf("positional edit produced wrong file:\n got=%q\nwant=%q", string(got), want)
+	}
+}
+
+// TestWriteFileAppend verifies append=true adds to the end instead of replacing.
+func TestWriteFileAppend(t *testing.T) {
+	tmpDir := t.TempDir()
+	f := filepath.Join(tmpDir, "log.txt")
+	if err := os.WriteFile(f, []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wt := &WriteFileTool{}
+	if _, err := wt.Execute(context.Background(), `{"path":"`+f+`","content":"second\n","append":true}`); err != nil {
+		t.Fatalf("append write failed: %v", err)
+	}
+	got, _ := os.ReadFile(f)
+	if string(got) != "first\nsecond\n" {
+		t.Fatalf("append write wrong result: %q", string(got))
+	}
+	// Default (no append) replaces the whole file.
+	if _, err := wt.Execute(context.Background(), `{"path":"`+f+`","content":"only\n"}`); err != nil {
+		t.Fatalf("overwrite write failed: %v", err)
+	}
+	got, _ = os.ReadFile(f)
+	if string(got) != "only\n" {
+		t.Fatalf("overwrite write wrong result: %q", string(got))
 	}
 }
 

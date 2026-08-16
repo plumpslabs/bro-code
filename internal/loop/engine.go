@@ -11,6 +11,7 @@ import (
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/hooks"
+	"github.com/plumpslabs/bro-code/internal/learn"
 	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/tool"
@@ -154,6 +155,15 @@ type Engine struct {
 	// instead of silently swapping providers.
 	lastFallback       string
 	lastFallbackReason string
+	// learner is the self-improving control layer: it observes per-turn context
+	// utilization and tunes efficiency knobs (compaction trigger ratio) so the
+	// agent gets smarter about its own token budget the longer it runs. Nil =
+	// adaptive tuning disabled (static defaults).
+	learner *learn.Learner
+	// lastOverflow records whether the most recent fitMessages() call had to drop
+	// context because even the system prompt alone approached the window — a hard
+	// overflow signal the learner uses to compact more aggressively next time.
+	lastOverflow bool
 	// lastToolCall tracks the previous tool invocation within a turn so the
 	// loop guard can detect the model repeating the exact same call and stop
 	// it from spinning (grep the same file 3x in a row, etc.).
@@ -312,6 +322,47 @@ func (e *Engine) SetScoutManager(sm ScoutDrainer) {
 // keeps it on the main synthesis model.
 func (e *Engine) SetCompactModel(m string) {
 	e.compactModel = m
+}
+
+// SetLearner attaches the self-improving control layer. It immediately applies
+// the learned compaction ratio so the session starts with the tuned threshold
+// rather than the default, and observes each turn to keep converging.
+func (e *Engine) SetLearner(l *learn.Learner) {
+	e.learner = l
+	if l != nil {
+		bcontext.SetCompactionRatio(l.CompactionRatio())
+	}
+}
+
+// learnObserve feeds the just-finished turn's real context utilization into the
+// learner so the compaction threshold converges to this project's actual usage.
+// Called via defer in RunTurn, so it runs on every return path. A hard overflow
+// (fitMessages could not fit even the smallest request) is the strongest signal
+// and is reported separately so the ratio drops faster.
+func (e *Engine) learnObserve() {
+	if e.learner == nil {
+		return
+	}
+	if e.lastOverflow {
+		e.learner.ObserveOverflow()
+		e.lastOverflow = false
+	}
+	win := e.context.MaxWindow()
+	if win > 0 {
+		util := float64(e.context.TotalContextTokens()) / float64(win)
+		e.learner.ObserveTurn(util)
+	}
+	// Re-apply the (possibly nudged) ratio so the next turn compacts with it.
+	bcontext.SetCompactionRatio(e.learner.CompactionRatio())
+	_ = e.learner.Save()
+}
+
+// LearnerStats returns the self-improving layer's status line for the HUD/debug.
+func (e *Engine) LearnerStats() string {
+	if e.learner == nil {
+		return ""
+	}
+	return e.learner.Stats()
 }
 
 // SetToolDescBudget caps each tool description to n characters in the request
@@ -612,6 +663,11 @@ func (e *Engine) State() LoopState {
 type TurnOutputHandler func(state LoopState, info string)
 
 func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOutputHandler) (answer string, err error) {
+	// Self-improving control layer: after the turn settles, observe context
+	// utilization and nudge the compaction ratio toward the high-signal band.
+	// Runs on every return path via defer.
+	defer e.learnObserve()
+
 	e.progressHandler = onUpdate
 	// Reset the fallback marker for this turn (set when a fallback provider
 	// serves the turn; "" when the primary does).
@@ -1483,8 +1539,15 @@ Engine Mode Rules (%s):
 5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`
 	default:
 		sysPrompt += `1. PLAN & CONTINUE: reason through your plan BEFORE acting, then keep the tool loop running until the goal is achieved — do not stop to ask unless technical ambiguity cannot be resolved by tools. Use native function calling.
-2. EXPLORE BEFORE ANSWERING: form a hypothesis about where the answer lives, then verify it with ONE batched round of targeted reads (glob/grep/read_file/code_locate/search_code; git tool for repo state; fetch_url/web_search for docs). Never answer from memory — read the real code and verify your claims. If a result is unhelpful, adapt; do NOT re-run the same narrow search.
-3. BATCH & STAY LEAN (cost): every round re-sends the ENTIRE conversation, so the number of rounds is the single biggest cost driver. Issue 3-4 independent read/grep/glob calls in ONE message. A read_file over 250 lines truncates — cover the rest with 1-2 range reads (start_line/end_line) then answer; NEVER fight truncation with bash sed/head/tail/grep loops on the same file. Range reads of a large file ARE progress.
+	2. READ SURGICALLY (biggest token saver): NEVER read an entire file to find or change one symbol. Use code_locate to get line numbers, then read_file(start_line, end_line) for the exact span, or edit_file(start_line, end_line) to change it WITHOUT reading the whole file first. For a large file's structure, call read_file(shrinkwrap) — it returns signatures/types only (~70% smaller). Pick ONE search tool (below); do NOT spray grep+glob+code_locate together.
+	   SEARCH TOOL DECISION TREE:
+	   • "where is symbol X defined/used?"  → code_locate (repo-wide symbol + reference graph, no server)
+	   • understand ONE file's structure     → read_file(shrinkwrap)  (code_symbols is deprecated — use this)
+	   • find text / regex inside files     → grep
+	   • find files by name/pattern         → glob
+	   • "code that does X" (semantic)      → search_code
+	3. EXPLORE BEFORE ANSWERING: form a hypothesis, then verify it with ONE batched round of targeted reads (code_locate/grep/glob/read_file). Never answer from memory — read the real code and verify your claims. If a result is unhelpful, adapt; do NOT re-run the same narrow search.
+	3b. BATCH & STAY LEAN (cost): every round re-sends the ENTIRE conversation, so the number of rounds is the single biggest cost driver. Issue 3-4 independent read/grep/glob calls in ONE message. read_file auto-returns a STRUCTURAL OVERVIEW for files over 150 lines — ask for the specific span with start_line/end_line instead of re-reading the whole file. NEVER fight truncation with bash sed/head/tail/grep loops on the same file.
 4. ASK ONLY WHEN TOOLS CANNOT DECIDE: for preferences, architecture choices, or destructive operations, call ask_user with 1-3 clear multiple-choice questions. If a risky command is denied or blocked, do NOT retry it — adapt with a safe alternative.
 5. REUSE FIRST: before writing new code, use code_locate and search_code to check whether the symbol/function already exists — reimplementing existing code wastes tokens and creates duplicates. Report what you reused.
 6. TYPE SAFETY & PERFORMANCE: treat type errors as blockers — fix them after the auto-verification (build/typecheck) flags them. Avoid N+1 queries, SELECT *, missing WHERE on updates/deletes, string-built SQL (injection), quadratic loops, and unbounded fetches.
@@ -1913,7 +1976,9 @@ func (e *Engine) fitMessages(sysPrompt string) []provider.Message {
 	budget := limit - bcontext.EstimateTokens(sysPrompt)
 	if budget <= 0 {
 		// System prompt alone eats the whole window — keep only the newest
-		// message so the request is never empty.
+		// message so the request is never empty. This is a hard overflow: even
+		// the smallest request does not fit, so flag it for the learner.
+		e.lastOverflow = true
 		return []provider.Message{msgs[len(msgs)-1]}
 	}
 	// Accumulate from the newest message backward; stop before the budget breaks.

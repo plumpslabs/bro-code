@@ -815,14 +815,16 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 		return "", ctx.Err()
 	}
 
+	// Gather per-file diagnostics (only files that actually have any).
+	type fileDiag struct {
+		rel   string
+		diags []protocol.Diagnostic
+	}
 	order := make([]string, 0, len(opened))
 	for u := range opened {
 		order = append(order, u)
 	}
-	sort.Strings(order)
-
-	var totalErrs, totalWarns, totalDeps, totalDiags int
-	var out []string
+	fds := make([]fileDiag, 0, len(order))
 	for _, u := range order {
 		c := clients[u]
 		c.mu.Lock()
@@ -835,13 +837,26 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 		if err != nil {
 			rel = opened[u]
 		}
-		fileLines := []string{rel}
-		for _, d := range diags {
-			if totalDiags >= scanMaxLines {
+		fds = append(fds, fileDiag{rel, diags})
+	}
+	// Surface the worst files first (most issues) so the model sees the highest
+	// leverage fixes without reading every file. Per-file + total caps keep the
+	// report compact enough to never hit the 40k tool-output truncation.
+	sort.Slice(fds, func(i, j int) bool { return len(fds[i].diags) > len(fds[j].diags) })
+
+	const scanMaxPerFile = 5
+	var totalErrs, totalWarns, totalDeps, totalDiags int
+	var out []string
+	for _, fd := range fds {
+		fileLines := []string{fd.rel}
+		shown := 0
+		for _, d := range fd.diags {
+			if totalDiags >= scanMaxLines || shown >= scanMaxPerFile {
 				break
 			}
 			fileLines = append(fileLines, "  "+formatDiagnostic(d))
 			totalDiags++
+			shown++
 			switch {
 			case d.Severity == protocol.DiagnosticSeverityError:
 				totalErrs++
@@ -852,18 +867,22 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 			}
 		}
 		out = append(out, strings.Join(fileLines, "\n"))
+		if totalDiags >= scanMaxLines {
+			break
+		}
 	}
 	if len(out) == 0 {
 		return "✅ No diagnostics found in the scanned files.", nil
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "🧹 Project diagnostics scan (%d files, %d issues):\n", len(opened), totalDiags)
+	fmt.Fprintf(&sb, "🧹 Project diagnostics scan (%d files, %d issues shown):\n", len(opened), totalDiags)
 	fmt.Fprintf(&sb, "  ✗ %d errors · ⚠ %d warnings · ♻ %d deprecated\n", totalErrs, totalWarns, totalDeps)
-	if totalDiags > scanMaxLines {
-		sb.WriteString(fmt.Sprintf("  (showing first %d issues)\n", scanMaxLines))
+	if totalDiags >= scanMaxLines {
+		sb.WriteString(fmt.Sprintf("  (capped at %d issues — fix these, then re-scan)\n", scanMaxLines))
 	}
 	sb.WriteString("\n")
 	sb.WriteString(strings.Join(out, "\n"))
+	sb.WriteString("\n\nUse read_file(start_line, end_line) on a flagged file for the exact span — do not read whole files.")
 	return sb.String(), nil
 }
 

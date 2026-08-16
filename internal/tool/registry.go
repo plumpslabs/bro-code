@@ -1,12 +1,14 @@
 package tool
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -496,6 +498,13 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	// project-relative form when the absolute one does not exist.
 	args.Path = resolvePath(args.Path)
 
+	// Semantic tool-result cache: repeated reads of the same span (or the same
+	// shrinkwrap) return instantly instead of re-reading disk. Invalidated on write.
+	readKey := "read_file:" + args.Path + fmt.Sprintf("|%d|%d|%v", args.StartLine, args.EndLine, args.Shrinkwrap)
+	if hit, ok := toolResultCache.Get("read_file", readKey); ok {
+		return hit, nil
+	}
+
 	// Native guard: never read secrets (.env, keys) or heavy dirs
 	// (node_modules, vendor, ...) into the LLM context.
 	if err := GuardFile(args.Path); err != nil {
@@ -508,19 +517,25 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	}
 
 	lines := strings.Split(string(data), "\n")
+
+	// Range read (start_line/end_line): stream ONLY the requested span from disk
+	// instead of loading the whole file into memory (P3). Essential for huge files
+	// and keeps the round cheap — the model should prefer this over full reads.
 	if args.StartLine > 0 || args.EndLine > 0 {
 		start := args.StartLine - 1
 		if start < 0 {
 			start = 0
 		}
 		end := args.EndLine
-		if end <= 0 || end > len(lines) {
-			end = len(lines)
+		if end <= 0 {
+			end = math.MaxInt
 		}
-		if start >= len(lines) {
-			return "", fmt.Errorf("start_line out of bounds")
+		span, _, rerr := readLineSpan(args.Path, start, end)
+		if rerr != nil {
+			return "", rerr
 		}
-		return strings.Join(lines[start:end], "\n"), nil
+		toolResultCache.Put("read_file", readKey, span, "file:"+args.Path)
+		return span, nil
 	}
 
 	// Explicit AST shrinkwrap: an optional whole-file structural overview for
@@ -529,36 +544,86 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	if args.Shrinkwrap {
 		compressed := bcontext.ShrinkwrapAST(string(data), args.Path)
 		if len(lines) > 150 {
-			return CapOutput(fmt.Sprintf("%s\n\n[AST shrinkwrap view of %d lines — function bodies omitted. Use read_file with start_line/end_line for specific bodies.]", compressed, len(lines))), nil
+			out := CapOutput(fmt.Sprintf("%s\n\n[AST shrinkwrap view of %d lines — function bodies omitted. Use read_file with start_line/end_line for specific bodies.]", compressed, len(lines)))
+			toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
+			return out, nil
 		}
-		return CapOutput(compressed), nil
+		out := CapOutput(compressed)
+		toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
+		return out, nil
 	}
 
-	// Window is 250 lines (not 100): a larger first read means a big file needs
-	// far fewer range reads to cover, which keeps models inside the tool-budget
-	// (each range read is a round that re-sends the whole conversation). The
-	// guidance is actionable — a weak model that sees truncation tends to
-	// fight it with bash sed/head/tail loops instead of using the range
-	// parameters, burning rounds until the budget aborts the turn.
-	if len(lines) > 250 {
-		head := strings.Join(lines[:250], "\n")
-		return fmt.Sprintf("%s\n\n[file has %d lines, showing first 250. Read specific ranges with start_line/end_line, or use code_search to locate symbols first]", head, len(lines)), nil
+	// Lean-by-default for large files (P2): dumping a whole big file into context
+	// makes the model ingest code it usually only needs one span of. For files over
+	// 150 lines we return a short head preview plus actionable guidance — the model
+	// targets the exact span with read_file(start_line/end_line), or requests a
+	// structural overview with read_file(shrinkwrap:true). Files <=150 lines are
+	// still returned in full (cheap).
+	if len(lines) > 150 {
+		headN := 60
+		if len(lines) < headN {
+			headN = len(lines)
+		}
+		head := strings.Join(lines[:headN], "\n")
+		out := fmt.Sprintf("[File %s has %d lines — showing first %d as a preview. Use read_file(start_line/end_line) for the exact span; or read_file(shrinkwrap:true) for a structural (signatures/types) overview. Use code_locate to find symbols across the project.]\n\n%s", args.Path, len(lines), headN, head)
+		toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
+		return out, nil
 	}
 
-	return CapOutput(string(data)), nil
+	out := CapOutput(string(data))
+	toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
+	return out, nil
+}
+
+// readLineSpan streams lines [start, end) (0-based start, 1-based exclusive end)
+// from disk without loading the entire file. Returns the joined span and the
+// total line count. Used by read_file range reads so a 2000-line file costs only
+// the bytes actually requested.
+func readLineSpan(path string, start, end int) (string, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024) // permit long lines
+	var b strings.Builder
+	total := 0
+	first := true
+	for sc.Scan() {
+		total++
+		if total > end {
+			break
+		}
+		if total > start {
+			if !first {
+				b.WriteByte('\n')
+			}
+			b.WriteString(sc.Text())
+			first = false
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return "", total, err
+	}
+	if start >= total {
+		return "", total, fmt.Errorf("start_line %d out of bounds (%d lines)", start+1, total)
+	}
+	return b.String(), total, nil
 }
 
 // WriteFileTool
 type WriteFileTool struct{}
 
 func (t *WriteFileTool) Name() string        { return "write_file" }
-func (t *WriteFileTool) Description() string { return "Write or overwrite a file with new content" }
+func (t *WriteFileTool) Description() string { return "Write or overwrite a file with new content. Set append=true to ADD content to the end of an existing file instead of replacing it." }
 func (t *WriteFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"path":    map[string]any{"type": "string", "description": "Target file path"},
-			"content": map[string]any{"type": "string", "description": "Complete file content"},
+			"content": map[string]any{"type": "string", "description": "Complete file content (or text to append when append=true)"},
+			"append":  map[string]any{"type": "boolean", "description": "When true, append content to the file instead of overwriting it"},
 		},
 		"required": []string{"path", "content"},
 	}
@@ -567,6 +632,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 	var args struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
+		Append  bool   `json:"append"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
@@ -592,16 +658,24 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 	// One-turn rollback window: keep a backup before overwriting.
 	_ = Snapshot(args.Path)
 
-	if err := os.WriteFile(args.Path, []byte(args.Content), 0644); err != nil {
+	final := args.Content
+	action := "created"
+	if args.Append && old != "" {
+		final = old + args.Content
+		action = "appended"
+	} else if old != "" {
+		action = "modified"
+	}
+
+	// Invalidate any cached reads/greps so a subsequent read sees the new content.
+	toolResultCache.InvalidatePath(args.Path)
+
+	if err := os.WriteFile(args.Path, []byte(final), 0644); err != nil {
 		return "", err
 	}
 
-	action := "created"
-	if old != "" {
-		action = "modified"
-	}
-	RecordChange(FileChange{Path: args.Path, Action: action, Old: old, New: args.Content})
-	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(args.Content), args.Path), nil
+	RecordChange(FileChange{Path: args.Path, Action: action, Old: old, New: final})
+	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(final), args.Path), nil
 }
 
 // EditFileTool
@@ -609,17 +683,19 @@ type EditFileTool struct{}
 
 func (t *EditFileTool) Name() string { return "edit_file" }
 func (t *EditFileTool) Description() string {
-	return "Edit target file by replacing old string content with new content"
+	return "Edit a file. PREFER a positional edit with start_line/end_line — you get line numbers from code_locate, so you can edit a span WITHOUT reading the whole file first (token-cheap). When no range is given, falls back to exact-string replacement of `target` with `replacement`."
 }
 func (t *EditFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"path":        map[string]any{"type": "string", "description": "Target file path"},
-			"target":      map[string]any{"type": "string", "description": "Exact text to replace"},
-			"replacement": map[string]any{"type": "string", "description": "Replacement text"},
+			"target":      map[string]any{"type": "string", "description": "Exact text to replace (used only when start_line/end_line are NOT given)"},
+			"replacement": map[string]any{"type": "string", "description": "Replacement text (or the new content for the start_line/end_line span)"},
+			"start_line":  map[string]any{"type": "integer", "description": "1-based start line of the span to replace (positional edit — no full read needed)"},
+			"end_line":    map[string]any{"type": "integer", "description": "1-based end line (exclusive) of the span to replace; omit to replace from start_line to EOF"},
 		},
-		"required": []string{"path", "target", "replacement"},
+		"required": []string{"path", "replacement"},
 	}
 }
 func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, error) {
@@ -627,6 +703,8 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		Path        string `json:"path"`
 		Target      string `json:"target"`
 		Replacement string `json:"replacement"`
+		StartLine   int    `json:"start_line"`
+		EndLine     int    `json:"end_line"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
@@ -647,22 +725,59 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	_ = Snapshot(args.Path)
 
 	content := string(data)
-	if !strings.Contains(content, args.Target) {
-		// Fallback 1: Normalize CRLF line endings (\r\n -> \n)
-		normContent := strings.ReplaceAll(content, "\r\n", "\n")
-		normTarget := strings.ReplaceAll(args.Target, "\r\n", "\n")
-		normReplacement := strings.ReplaceAll(args.Replacement, "\r\n", "\n")
+	newContent := content
 
-		if strings.Contains(normContent, normTarget) {
-			content = normContent
-			args.Target = normTarget
-			args.Replacement = normReplacement
-		} else {
-			return "", fmt.Errorf("target string not found in %s. Ensure exact line whitespace and text match by calling read_file first", args.Path)
+	// Positional (line-range) edit: replace lines [start_line, end_line) with
+	// `replacement`. This is the surgical path — the model edits by position from
+	// code_locate without having read the whole file, which is the single biggest
+	// token saving on edit-heavy turns.
+	editRange := ""
+	if args.StartLine > 0 || args.EndLine > 0 {
+		lines := strings.Split(content, "\n")
+		start := args.StartLine - 1
+		if start < 0 {
+			start = 0
 		}
+		end := args.EndLine
+		if end <= 0 || end > len(lines) {
+			end = len(lines)
+		}
+		if start > len(lines) {
+			return "", fmt.Errorf("start_line %d out of bounds (%d lines)", args.StartLine, len(lines))
+		}
+		span := strings.Split(args.Replacement, "\n")
+		updated := make([]string, 0, len(lines)-end+start+len(span))
+		updated = append(updated, lines[:start]...)
+		updated = append(updated, span...)
+		updated = append(updated, lines[end:]...)
+		newContent = strings.Join(updated, "\n")
+		editRange = fmt.Sprintf(" (lines %d-%d)", args.StartLine, end)
+	} else {
+		// Exact-string edit (original behavior): replace the first occurrence of
+		// `target` with `replacement`.
+		if !strings.Contains(content, args.Target) {
+			// Fallback 1: Normalize CRLF line endings (\r\n -> \n)
+			normContent := strings.ReplaceAll(content, "\r\n", "\n")
+			normTarget := strings.ReplaceAll(args.Target, "\r\n", "\n")
+			normReplacement := strings.ReplaceAll(args.Replacement, "\r\n", "\n")
+
+			if strings.Contains(normContent, normTarget) {
+				content = normContent
+				args.Target = normTarget
+				args.Replacement = normReplacement
+			} else {
+				return "", fmt.Errorf("target string not found in %s. Use start_line/end_line for a positional edit, or read_file first to copy the exact text", args.Path)
+			}
+		}
+		newContent = strings.Replace(content, args.Target, args.Replacement, 1)
 	}
 
-	newContent := strings.Replace(content, args.Target, args.Replacement, 1)
+	if newContent == content {
+		return fmt.Sprintf("No change made to %s", args.Path), nil
+	}
+	// Invalidate any cached reads/greps so a subsequent read sees the new content.
+	toolResultCache.InvalidatePath(args.Path)
+
 	if err := os.WriteFile(args.Path, []byte(newContent), 0644); err != nil {
 		return "", err
 	}
@@ -671,7 +786,7 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 
 	edits := myers.ComputeEdits(span.URIFromPath(args.Path), content, newContent)
 	unified := gotextdiff.ToUnified(args.Path, args.Path, content, edits)
-	return fmt.Sprintf("Successfully updated %s\nDiff:\n%s", args.Path, unified), nil
+	return fmt.Sprintf("Successfully updated %s%s\nDiff:\n%s", args.Path, editRange, unified), nil
 }
 
 // DeleteFileTool permanently removes a file. It is gated (GateAction asks the
@@ -803,6 +918,13 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	// filesystem root and silently return "no matches", burning rounds.
 	args.Path = resolvePath(args.Path)
 
+	// Semantic tool-result cache: an unchanged tree returns the same grep result
+	// instantly. Invalidated on any file write/edit (global scope).
+	grepKey := "grep:" + args.Pattern + "|" + args.Path
+	if hit, ok := toolResultCache.Get("grep", grepKey); ok {
+		return hit, nil
+	}
+
 	// Fail-fast path validation: if path does not exist on disk, return a clear
 	// diagnostic message so the LLM immediately knows the path is wrong
 	// instead of getting "No matches found." and looping.
@@ -855,15 +977,20 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	if len(lines) == 1 && lines[0] == "" {
+		toolResultCache.Put("grep", grepKey, "No matches found.", "global")
 		return "No matches found.", nil
 	}
 
 	if len(lines) > 50 {
 		head := strings.Join(lines[:50], "\n")
-		return fmt.Sprintf("%s\n\n[showing 50/%d matches, refine query or ask for specific file]", head, len(lines)), nil
+		out := fmt.Sprintf("%s\n\n[showing 50/%d matches, refine query or ask for specific file]", head, len(lines))
+		toolResultCache.Put("grep", grepKey, out, "global")
+		return out, nil
 	}
 
-	return strings.Join(lines, "\n"), nil
+	out := strings.Join(lines, "\n")
+	toolResultCache.Put("grep", grepKey, out, "global")
+	return out, nil
 }
 
 // GlobTool

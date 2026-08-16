@@ -316,13 +316,33 @@ func (m *Manager) TotalContextTokens() int {
 	return m.totalTokens + m.systemPromptTokens
 }
 
-// compactionRatio is the fraction of the context window at which compaction
-// kicks in. 0.60 (not 0.85) on purpose: research on context engineering shows
-// quality and reliability degrade well before the window is "full" (the
-// "context rot" effect), and compacting earlier keeps each turn's working set
-// small and high-signal. The hard fitMessages() guard still protects against
-// any true overflow regardless of this ratio.
-const compactionRatio = 0.60
+// defaultCompactionRatio is the fraction of the context window at which
+// compaction kicks in. 0.60 (not 0.85) on purpose: research on context
+// engineering shows quality and reliability degrade well before the window is
+// "full" (the "context rot" effect), and compacting earlier keeps each turn's
+// working set small and high-signal. The hard fitMessages() guard still protects
+// against any true overflow regardless of this ratio. The ratio is adaptive: the
+// learn package nudges it over sessions (see SetCompactionRatio) to keep context
+// utilization in the high-signal band instead of a fixed guess.
+const defaultCompactionRatio = 0.60
+
+// compactionRatio is the live, adaptive trigger threshold. It starts at
+// defaultCompactionRatio and is overwritten by SetCompactionRatio when the
+// self-improving learner has tuned it from observed utilization.
+var compactionRatio = defaultCompactionRatio
+
+// SetCompactionRatio overrides the adaptive compaction trigger (0 < r <= 0.95).
+// The learn package calls this each turn so the threshold converges to the
+// project's actual usage pattern over time.
+func SetCompactionRatio(r float64) {
+	if r <= 0 {
+		r = defaultCompactionRatio
+	}
+	if r > 0.95 {
+		r = 0.95
+	}
+	compactionRatio = r
+}
 
 // NeedsCompaction checks if token usage exceeds compactionRatio of the window.
 // The budget includes the system prompt, so compaction triggers before the real

@@ -24,6 +24,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/hooks"
+	"github.com/plumpslabs/bro-code/internal/learn"
 	"github.com/plumpslabs/bro-code/internal/loop"
 	"github.com/plumpslabs/bro-code/internal/lsp"
 	"github.com/plumpslabs/bro-code/internal/mcp"
@@ -826,6 +827,12 @@ func (m *Model) rebuildEngine() {
 			m.engine.SetToolDescBudget(n)
 		}
 	}
+	// Self-improving control layer (B1): observe per-turn context utilization and
+	// tune the compaction trigger across sessions, persisted under
+	// ~/.config/brocode/learn.json so every future session starts warm.
+	if lp := learn.DefaultPath(); lp != "" {
+		m.engine.SetLearner(learn.NewLearner(lp))
+	}
 }
 
 // intelligenceBlock renders BroCode's native project knowledge (repo map +
@@ -918,16 +925,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case spinnerTickMsg:
-		// While any modal is open the content is static — keep ticking would
-		// re-render every 150ms and cause visible flicker on the modal.
+		// While any modal is open the content is static — skip the tick so we
+		// don't re-render every 150ms and flicker the modal.
 		if m.showAsk || m.showModels || m.showConnect || m.showDebug || m.showSessions {
 			return m, nil
 		}
+		// Keep the ticker ALIVE for the whole session. If we killed it on
+		// "Ready" (old behavior) it could die mid-turn and the spinner would
+		// freeze / never reappear. We only advance the frame while a turn is
+		// active, so an idle view re-renders identical content (cheap, no
+		// flicker) and any new turn animates immediately.
 		if m.status != "Ready" && m.status != "Failed" {
 			m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
-			return m, tickCmd()
 		}
-		return m, nil
+		return m, tickCmd()
 
 	case stepProgressMsg:
 		str := msg.info

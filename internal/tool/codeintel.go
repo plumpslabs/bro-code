@@ -19,7 +19,7 @@ type CodeSymbolsTool struct{}
 
 func (t *CodeSymbolsTool) Name() string { return "code_symbols" }
 func (t *CodeSymbolsTool) Description() string {
-	return "Return a compact map of symbols (functions, methods, structs, classes, interfaces, enums) with their line numbers for one or more files. Use to understand a file's structure quickly without reading the whole file — then read_file the exact lines you need."
+	return "[DEPRECATED — prefer read_file(shrinkwrap) or code_locate] Return a compact map of symbols (functions, methods, structs, classes, interfaces, enums) with their line numbers for one or more files. Still works, but read_file with shrinkwrap=true now returns the same structural overview and code_locate covers repo-wide lookup — use those instead to avoid spraying multiple search tools."
 }
 func (t *CodeSymbolsTool) Parameters() map[string]any {
 	return map[string]any{
