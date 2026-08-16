@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -948,5 +949,76 @@ func TestToolDescBudgetTrims(t *testing.T) {
 	}
 	if !strings.HasSuffix(trimmedBig, "…") {
 		t.Fatalf("expected ellipsis suffix, got %q", trimmedBig)
+	}
+}
+
+// TestLooksLikeLSPFixTask verifies the pre-flight trigger only fires on
+// diagnostic/fix-lint phrasing, not generic "build a feature" requests.
+func TestLooksLikeLSPFixTask(t *testing.T) {
+	yes := []string{
+		"fix all the warnings in the project",
+		"clean up the lint errors",
+		"resolve the deprecation warnings",
+		"run lsp_scan and fix diagnostics",
+		"fix type errors from go vet",
+	}
+	for _, q := range yes {
+		if !looksLikeLSPFixTask(q) {
+			t.Errorf("expected LSP-fix intent for %q", q)
+		}
+	}
+	no := []string{
+		"build a login feature",
+		"add a new endpoint for users",
+		"explain how the cache works",
+		"write tests for the parser",
+	}
+	for _, q := range no {
+		if looksLikeLSPFixTask(q) {
+			t.Errorf("did NOT expect LSP-fix intent for %q", q)
+		}
+	}
+}
+
+// TestReadLinesWindow verifies best-effort line-window extraction (1-indexed,
+// clamped) and graceful empty result on missing files.
+func TestReadLinesWindow(t *testing.T) {
+	f := t.TempDir() + "/sample.txt"
+	content := "zero\none\ntwo\nthree\nfour\n"
+	if err := os.WriteFile(f, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readLinesWindow(f, 2, 4)
+	want := "2: one\n3: two\n4: three"
+	if got != want {
+		t.Fatalf("readLinesWindow(2,4) = %q, want %q", got, want)
+	}
+	// Clamped lower bound.
+	if got := readLinesWindow(f, -5, 1); got != "1: zero" {
+		t.Fatalf("clamp low = %q", got)
+	}
+	// Missing file -> empty (never errors).
+	if got := readLinesWindow("/no/such/file.txt", 1, 3); got != "" {
+		t.Fatalf("missing file should return empty, got %q", got)
+	}
+}
+
+// TestBuildSystemPromptIncludesPreflight verifies the pre-flight packed block is
+// injected into the first prompt so diagnostics reach the model in shot 1.
+func TestBuildSystemPromptIncludesPreflight(t *testing.T) {
+	ctxMgr := bcontext.NewManager("sess", nil, 128000)
+	eng := NewEngine(&mockAdapter{}, tool.NewRegistry(), ctxMgr, "test-model")
+	eng.lspAvailable = 1
+	eng.preflightBlock = "PRE-GATHERED LSP DIAGNOSTICS:\n  error 12:5  unused variable\n--- internal/foo.go:12 ---\n12: x := 1"
+
+	prompt := eng.buildSystemPrompt("BUILDER", 1, nil)
+	if !strings.Contains(prompt, "PRE-GATHERED LSP DIAGNOSTICS") {
+		t.Errorf("preflight block missing from system prompt:\n%s", prompt)
+	}
+	// A later iteration must still include it (stable cached prefix uses the same
+	// build, but guard against accidental omission on iteration>1 path).
+	prompt2 := eng.buildSystemPrompt("BUILDER", 2, nil)
+	if !strings.Contains(prompt2, "PRE-GATHERED LSP DIAGNOSTICS") {
+		t.Errorf("preflight block missing on iteration 2")
 	}
 }

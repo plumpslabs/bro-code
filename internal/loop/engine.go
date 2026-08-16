@@ -1,9 +1,12 @@
 package loop
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -135,6 +138,14 @@ type Engine struct {
 	// set by the UI at startup so the system prompt can tell the model whether
 	// lsp_scan is usable (and steer it away from installing external linters).
 	lspAvailable    int
+	// preflightBlock holds diagnostics/context the engine gathered proactively at
+	// turn start (pre-flight packing) so the model sees them in the FIRST prompt
+	// instead of spending tool rounds discovering them. Empty unless the task
+	// looks like a diagnostic/LSP-fix and an LSP server is available.
+	preflightBlock string
+	// repoRoot anchors relative paths from pre-flight diagnostics back to real
+	// files so their code windows can be read.
+	repoRoot string
 	// Adaptive routing state: primaryID/primaryProtocol identify the active
 	// provider for health tracking and cross-vendor confirmation; health is the
 	// per-provider circuit breaker; fallbackPolicy is the user's routing
@@ -605,6 +616,7 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		reviewLLMEnabled:  true,
 		health:            newProviderHealth(),
 		fallbackPolicy:    FallbackAuto,
+		repoRoot:          tools.RepoRoot(),
 	}
 }
 
@@ -716,6 +728,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			e.maxIterations = e.baseMaxIterations
 		} else {
 			e.maxIterations = 25
+		}
+	}
+	// Pre-flight context packing: for a diagnostic/LSP-fix task, run lsp_scan once
+	// NOW and bundle the diagnostics + code windows into the first prompt, so the
+	// model skips the "scan, then read everything" tool-loop entirely.
+	e.preflightBlock = ""
+	if e.lspAvailable > 0 && looksLikeLSPFixTask(userQuery) {
+		if packed := e.preflightLSP(ctx); packed != "" {
+			e.preflightBlock = packed
+			if onUpdate != nil {
+				onUpdate(e.state, "📡 Pre-flight: scanned LSP diagnostics & packed context")
+			}
 		}
 	}
 	defer func() { e.progressHandler = nil }()
@@ -1546,6 +1570,13 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 			}
 		}
 	}
+	// Pre-flight packed diagnostics: when present, the engine already gathered the
+	// diagnostics + code windows this turn, so the model fixes in place instead of
+	// re-scanning and re-reading. Shown once (iteration 1) to keep the cached
+	// prompt stable across later iterations.
+	if e.preflightBlock != "" && iteration == 1 {
+		sysPrompt += "\n\n" + e.preflightBlock
+	}
 	sysPrompt += fmt.Sprintf(`
 🔥 ACTIVE ENGINE MODE: %s (%s).
 CRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as PLANNER or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY. You are NOW operating strictly in %s mode.
@@ -1582,7 +1613,8 @@ Engine Mode Rules (%s):
 7. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony, no new abstractions. Extract a helper only at 3+ uses; keep a file under ~300 LOC; inline one-off logic. Over-engineering is a review finding.
 8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth and run lsp_scan at most once per task (and call it ONCE at the START of any "find/fix warnings/lint" task — that IS your linter: gopls already covers go vet + type errors + deprecated + unused). NEVER go install external linters (golangci-lint/staticcheck/revive/eslint) mid-task — they are redundant with LSP and network-heavy; if LSP is unavailable, ask the user to run /lsp-install or fall back to the project's own go vet/go build. lsp_rename is the right tool for project-wide symbol renames, lsp_fix auto-applies quick-fixes (imports, organize), and lsp_symbols/lsp_outline find symbols by name without guessing a cursor position. LSP diagnostics also run automatically on your edited files after verification.
 9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.
-10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.`
+ 10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.
+ 11. ANTI-LOOP EFFICIENCY (critical): do NOT re-read a file you have already seen, and do NOT keep opening "one more section" hoping for context — once you have enough to act, ACT. When a PRE-GATHERED LSP DIAGNOSTICS block is present, the diagnostics AND their code windows are already in context: fix each item directly with edit_file(start_line,end_line)/lsp_fix, do NOT call lsp_scan again, and do NOT read whole files. For any task, batch all edits, then run verification ONCE (the project's own go build/vet/test, or tsc --noEmit). STOP after that single verification pass — re-running the same checks repeatedly is a loop, not progress.`
 	}
 	return sysPrompt
 }
@@ -1718,6 +1750,135 @@ func (e *Engine) exploredSummary() string {
 		return ""
 	}
 	return "\n\nFiles you have already examined: " + strings.Join(e.explored, ", ")
+}
+
+// diagLineRe matches a scanned diagnostic line: "  error [deprecated] 12:5  msg".
+var diagLineRe = regexp.MustCompile(`^\s*(error|warning|info|hint)(?:\s*\[(deprecated|unnecessary)\])?\s+(\d+):(\d+)\s+(.*)$`)
+
+// looksLikeLSPFixTask reports whether a user query is a diagnostic/LSP-fix task
+// that benefits from pre-gathered diagnostics (so the engine can run lsp_scan
+// itself instead of letting the model burn a tool round discovering them).
+func looksLikeLSPFixTask(query string) bool {
+	q := strings.ToLower(query)
+	if strings.Contains(q, "lsp_scan") || strings.Contains(q, "diagnostic") ||
+		strings.Contains(q, "linter") || strings.Contains(q, "lint ") ||
+		strings.Contains(q, "go vet") || strings.Contains(q, "tsc") {
+		return true
+	}
+	// "fix/clean up/resolve ... (the) warnings/errors/deprecations"
+	if (strings.Contains(q, "fix") || strings.Contains(q, "clean") || strings.Contains(q, "resolve")) &&
+		(strings.Contains(q, "warning") || strings.Contains(q, "error") || strings.Contains(q, "deprecat")) {
+		return true
+	}
+	return false
+}
+
+// preflightLSP runs lsp_scan proactively and packs the result — plus the exact
+// code window around each diagnostic — into a single block for the first prompt.
+// It is BEST-EFFORT: any failure (no LSP, unreadable file) degrades gracefully to
+// just the scan report rather than erroring the turn. Path resolution uses the
+// repo root so relative paths from the scan map back to real files.
+func (e *Engine) preflightLSP(ctx context.Context) string {
+	scanTool := e.tools.ToolByName("lsp_scan")
+	if scanTool == nil {
+		return ""
+	}
+	// Bound the scan so a slow language server cannot stall turn start.
+	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := scanTool.Execute(sctx, "{}")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return ""
+	}
+	if strings.Contains(out, "No supported source files") {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("PRE-GATHERED LSP DIAGNOSTICS (already scanned for you — do NOT call lsp_scan again; target each item with read_file(start_line,end_line) then fix):\n\n")
+	sb.WriteString(out)
+
+	// Pack the actual code around each diagnostic so the model can fix in place
+	// without a separate read round. Parse the scan report's file→line structure.
+	lines := strings.Split(out, "\n")
+	root := e.repoRoot
+	if root == "" {
+		if wd, werr := os.Getwd(); werr == nil {
+			root = wd
+		}
+	}
+	var curFile string
+	for _, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if trimmed == "" {
+			continue
+		}
+		// A non-indented line with no "N:M" diagnostic marker is a file path.
+		if !strings.HasPrefix(ln, " ") && !strings.HasPrefix(ln, "\t") && !diagLineRe.MatchString(ln) {
+			curFile = trimmed
+			continue
+		}
+		m := diagLineRe.FindStringSubmatch(ln)
+		if m == nil || curFile == "" {
+			continue
+		}
+		lineNo := atoiSafe(m[3])
+		if lineNo <= 0 {
+			continue
+		}
+		abs := curFile
+		if !strings.HasPrefix(abs, "/") && root != "" {
+			abs = root + string(os.PathSeparator) + curFile
+		}
+		win := readLinesWindow(abs, lineNo-3, lineNo+3)
+		if win == "" {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("\n--- %s:%d ---\n%s\n", curFile, lineNo, win))
+	}
+	return sb.String()
+}
+
+// readLinesWindow returns lines [lo,hi] (1-indexed, clamped) of the file, or ""
+// if the file is unreadable. Best-effort; never errors.
+func readLinesWindow(path string, lo, hi int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if lo < 1 {
+		lo = 1
+	}
+	var sb strings.Builder
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	n := 0
+	for sc.Scan() {
+		n++
+		if n < lo {
+			continue
+		}
+		if n > hi {
+			break
+		}
+		sb.WriteString(fmt.Sprintf("%d: %s\n", n, sc.Text()))
+	}
+	if sb.Len() == 0 {
+		return ""
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func atoiSafe(s string) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // finalSynth is the graceful turn-abort path (max iterations or cost budget

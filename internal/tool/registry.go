@@ -360,6 +360,20 @@ func (r *Registry) Register(t Tool) {
 	r.tools[t.Name()] = t
 }
 
+// ToolByName returns a registered tool by name, or nil when not present. Used by
+// the engine for pre-flight context packing (e.g. running lsp_scan itself before
+// the model does, so diagnostics land in the first prompt instead of costing a
+// tool round-trip).
+func (r *Registry) ToolByName(name string) Tool {
+	return r.tools[name]
+}
+
+// RepoRoot returns the configured repo root (anchors the cd/pushd escape check
+// and path resolution for pre-flight context packing).
+func (r *Registry) RepoRoot() string {
+	return r.repoRoot
+}
+
 // linterInstallPatterns are external linter/binary names whose mid-task
 // install is redundant with BroCode's built-in LSP diagnostics.
 var linterInstallPatterns = []string{
