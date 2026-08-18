@@ -240,6 +240,13 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*C
 		})
 	}
 
+	if len(res.ToolCalls) == 0 && res.Content != "" {
+		if extracted, cleaned := ExtractEmbeddedToolCalls(res.Content); len(extracted) > 0 {
+			res.ToolCalls = extracted
+			res.Content = cleaned
+		}
+	}
+
 	return res, nil
 }
 
@@ -346,5 +353,13 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 	if !sawDone && res.FinishReason == "" {
 		return nil, StreamTruncated()
 	}
+
+	if len(res.ToolCalls) == 0 && res.Content != "" {
+		if extracted, cleaned := ExtractEmbeddedToolCalls(res.Content); len(extracted) > 0 {
+			res.ToolCalls = extracted
+			res.Content = cleaned
+		}
+	}
+
 	return res, nil
 }

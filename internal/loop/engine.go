@@ -1147,6 +1147,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			e.lastFallback = fbModel
 		}
 
+		// Normalize pseudo-XML tool calls emitted in Content by models like Poolside laguna
+		if len(resp.ToolCalls) == 0 && resp.Content != "" {
+			if extracted, cleaned := provider.ExtractEmbeddedToolCalls(resp.Content); len(extracted) > 0 {
+				resp.ToolCalls = extracted
+				resp.Content = cleaned
+			}
+		}
+
 		// Remember the model's last reasoning so a tool-budget abort can tell
 		// the user WHAT the agent was stuck on ("search for more models…")
 		// instead of just dumping a file list.
@@ -1851,6 +1859,9 @@ func (e *Engine) recordExplored(tc provider.ToolCall) {
 		switch tc.Name {
 		case "read_file", "edit_file", "write_file":
 			target, _ = m["path"].(string)
+			if tc.Name == "edit_file" || tc.Name == "write_file" {
+				e.exploredStalls = 0
+			}
 			// A deliberate line-range read of a large file (read_file with
 			// start_line) is genuine progress — the model is covering the file in
 			// sections — NOT spinning, even though the path is the same. Reset the
