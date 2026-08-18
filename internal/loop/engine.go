@@ -1147,7 +1147,17 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			e.lastFallback = fbModel
 		}
 
-		// Normalize pseudo-XML tool calls emitted in Content by models like Poolside laguna
+		// Normalize think tags and pseudo-XML tool calls emitted in Content by models like Poolside laguna / DeepSeek
+		if resp.Content != "" {
+			if r, cleaned := provider.ExtractEmbeddedReasoning(resp.Content); r != "" {
+				if resp.Reasoning == "" {
+					resp.Reasoning = r
+				} else {
+					resp.Reasoning += "\n\n" + r
+				}
+				resp.Content = cleaned
+			}
+		}
 		if len(resp.ToolCalls) == 0 && resp.Content != "" {
 			if extracted, cleaned := provider.ExtractEmbeddedToolCalls(resp.Content); len(extracted) > 0 {
 				resp.ToolCalls = extracted

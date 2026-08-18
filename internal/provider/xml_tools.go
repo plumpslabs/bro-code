@@ -9,10 +9,35 @@ import (
 )
 
 var (
-	toolCallTagRe   = regexp.MustCompile(`(?s)<tool_call>(.*?)</tool_call>`)
-	functionTagRe   = regexp.MustCompile(`(?s)<function=([a-zA-Z0-9_\-\.]+)\s*>(.*?)</function>`)
-	argKeyValueRe   = regexp.MustCompile(`(?s)<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
+	toolCallTagRe = regexp.MustCompile(`(?s)<tool_call>(.*?)</tool_call>`)
+	functionTagRe = regexp.MustCompile(`(?s)<function=([a-zA-Z0-9_\-\.]+)\s*>(.*?)</function>`)
+	argKeyValueRe = regexp.MustCompile(`(?s)<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
+	thinkTagRe    = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
 )
+
+// ExtractEmbeddedReasoning pulls <think>...</think> chain-of-thought blocks out
+// of the main message content so internal model deliberation is captured in
+// Reasoning rather than leaking into visible user-facing output.
+func ExtractEmbeddedReasoning(content string) (string, string) {
+	if !strings.Contains(content, "<think>") {
+		return "", content
+	}
+
+	var reasoningParts []string
+	cleaned := thinkTagRe.ReplaceAllStringFunc(content, func(match string) string {
+		sub := thinkTagRe.FindStringSubmatch(match)
+		if len(sub) >= 2 {
+			r := strings.TrimSpace(sub[1])
+			if r != "" {
+				reasoningParts = append(reasoningParts, r)
+			}
+		}
+		return ""
+	})
+
+	reasoning := strings.Join(reasoningParts, "\n\n")
+	return reasoning, strings.TrimSpace(cleaned)
+}
 
 // ExtractEmbeddedToolCalls inspects message content for pseudo-XML tool calls
 // emitted by models like Poolside laguna-s-2.1, Qwen, or custom fine-tunes.

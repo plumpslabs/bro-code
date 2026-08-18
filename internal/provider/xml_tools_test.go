@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +66,21 @@ Done.`
 	}
 	if cleaned != "Here is the plan.\n\nDone." {
 		t.Errorf("cleaned = %q", cleaned)
+	}
+}
+
+func TestExtractEmbeddedReasoning(t *testing.T) {
+	rawContent := `<think>
+I need to check if roleModal already exists in id.json and en.json.
+I will read lines 1 to 50 first.
+</think>
+Here is the verified translation.`
+
+	reasoning, cleaned := ExtractEmbeddedReasoning(rawContent)
+	if !strings.Contains(reasoning, "I need to check if roleModal") {
+		t.Fatalf("expected reasoning extracted, got %q", reasoning)
+	}
+	if cleaned != "Here is the verified translation." {
+		t.Fatalf("expected cleaned content, got %q", cleaned)
 	}
 }

@@ -240,6 +240,17 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*C
 		})
 	}
 
+	if res.Content != "" {
+		if r, cleaned := ExtractEmbeddedReasoning(res.Content); r != "" {
+			if res.Reasoning == "" {
+				res.Reasoning = r
+			} else {
+				res.Reasoning += "\n\n" + r
+			}
+			res.Content = cleaned
+		}
+	}
+
 	if len(res.ToolCalls) == 0 && res.Content != "" {
 		if extracted, cleaned := ExtractEmbeddedToolCalls(res.Content); len(extracted) > 0 {
 			res.ToolCalls = extracted
@@ -352,6 +363,17 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 	// retryable error instead and let the engine retry/fall back.
 	if !sawDone && res.FinishReason == "" {
 		return nil, StreamTruncated()
+	}
+
+	if res.Content != "" {
+		if r, cleaned := ExtractEmbeddedReasoning(res.Content); r != "" {
+			if res.Reasoning == "" {
+				res.Reasoning = r
+			} else {
+				res.Reasoning += "\n\n" + r
+			}
+			res.Content = cleaned
+		}
 	}
 
 	if len(res.ToolCalls) == 0 && res.Content != "" {
