@@ -1,6 +1,6 @@
 # PHILOSOPHY.md
 
-> Design constitution for [project name]. This is a mandatory reference every
+> Design constitution for BroCode. This is a mandatory reference every
 > time a feature is added — if a decision conflicts with a principle here,
 > the principle wins, not short-term implementation convenience.
 
