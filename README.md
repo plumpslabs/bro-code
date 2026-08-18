@@ -1,16 +1,25 @@
+<div align="center">
+
+```text
+██████╗ ██████╗  ██████╗  ██████╗ ██████╗ ██████╗ ███████╗
+██╔══██╗██╔══██╗██╔═══██╗██╔════╝██╔═══██╗██╔══██╗██╔════╝
+██████╔╝██████╔╝██║   ██║██║     ██║   ██║██║  ██║█████╗  
+██╔══██╗██╔══██╗██║   ██║██║     ██║   ██║██║  ██║██╔══╝  
+██████╔╝██║  ██║╚██████╔╝╚██████╗╚██████╔╝██████╔╝███████╗
+╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
+```
+
+**Autonomous AI Coding Agent for Software Engineering**  
+*High-performance, token-efficient, and deterministic coding assistant for real-world codebases.*
+
 <p align="center">
-  <h1 align="center">🧠 BroCode</h1>
-  <p align="center">
-    <strong>Autonomous AI Coding Agent for Software Engineering</strong><br>
-    <em>High-performance, token-efficient, and deterministic coding assistant for real-world codebases.</em>
-  </p>
-  <p align="center">
-    <a href="https://github.com/plumpslabs/bro-code/releases"><img src="https://img.shields.io/badge/release-v0.1.0-blue.svg?style=flat-square" alt="Version"></a>
-    <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.24+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
-    <a href="#-platform-compatibility"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20BSD-lightgrey.svg?style=flat-square" alt="Platforms"></a>
-  </p>
+  <a href="https://github.com/plumpslabs/bro-code/releases"><img src="https://img.shields.io/badge/release-v0.1.0-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.24+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
+  <a href="#-platform-compatibility"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20BSD-lightgrey.svg?style=flat-square" alt="Platforms"></a>
 </p>
+
+</div>
 
 ---
 
