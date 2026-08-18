@@ -223,3 +223,51 @@ func ReRank(ctx context.Context, root, query string, results []bm25Result, e *Em
 	}
 	return out
 }
+
+// ReRankDocs re-ranks in-memory BM25 results (e.g. project-memory facts) by
+// embedding cosine similarity. Unlike ReRank — which persists a per-file
+// embedding cache keyed by path — docs here are short texts embedded directly,
+// so the candidate set must already be small (the caller limits it, typically
+// top-8 from BM25). The query and each candidate are embedded in one batch;
+// on ANY embedding failure it returns the BM25 order untouched — hybrid
+// retrieval never breaks BM25-only operation.
+func ReRankDocs(ctx context.Context, query string, results []bm25Result, e *Embedder, limit int) []bm25Result {
+	if e == nil || len(results) == 0 {
+		return results
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	if len(results) <= limit {
+		limit = len(results)
+	}
+
+	qvec, err := e.embedBatch(ctx, []string{truncateForEmbedding(query, 500)})
+	if err != nil || len(qvec) == 0 {
+		return results
+	}
+	texts := make([]string, len(results))
+	for i, r := range results {
+		texts[i] = truncateForEmbedding(r.Doc.Body, 500)
+	}
+	vecs, err := e.embedBatch(ctx, texts)
+	if err != nil || len(vecs) != len(results) {
+		return results
+	}
+
+	type scored struct {
+		res bm25Result
+		sim float64
+	}
+	sc := make([]scored, len(results))
+	for i, v := range vecs {
+		sc[i] = scored{res: results[i], sim: Cosine(qvec[0], v)}
+	}
+	sort.Slice(sc, func(i, j int) bool { return sc[i].sim > sc[j].sim })
+
+	out := make([]bm25Result, len(sc))
+	for i := range sc {
+		out[i] = sc[i].res
+	}
+	return out
+}

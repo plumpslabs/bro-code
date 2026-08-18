@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
+	"github.com/plumpslabs/bro-code/internal/mcp"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/tool"
@@ -947,6 +949,110 @@ func longAnswer(n int) string {
 		s += "line of the long answer with some detail and context\n"
 	}
 	return s
+}
+
+// TestMCPModalFlow verifies the /mcp interactive modal: it opens (not just a
+// text note), lists servers with status, the a-wizard adds a server to
+// .mcp.json (merging), and d+y removes it with an explicit confirm.
+func TestMCPModalFlow(t *testing.T) {
+	tmp := t.TempDir() // .mcp.json lands in a temp dir, not the repo
+	if err := os.WriteFile(filepath.Join(tmp, ".mcp.json"), []byte(`{"mcpServers": {"github": {"command": "npx", "args": ["-y", "pkg"]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestApp()
+
+	// Empty-state: a manager with no servers shows the add hint (built before
+	// the chdir below so NewApp still runs inside the git repo).
+	m2 := newTestApp()
+	m2.mcpMgr = mcp.NewManager()
+	m2.showMCP = true
+	if v := m2.renderMCPModal(); !strings.Contains(v, "No MCP servers configured") {
+		t.Fatalf("empty state missing:\n%s", v)
+	}
+
+	t.Chdir(tmp)
+	m.mcpMgr = mcp.NewManager()
+	// Never spawn real subprocesses in tests: every server fails fast at the
+	// client factory, so reloads record errors instead of hanging on stdio.
+	m.mcpMgr.SetClientFactory(func(cfg mcp.ServerConfig) (mcp.Client, error) {
+		return nil, errors.New("no spawn in tests")
+	})
+	m.mcpMgr.LoadDefaults()
+
+	// /mcp opens the modal.
+	_, _ = m.handleSlashCommand("/mcp")
+	if !m.showMCP {
+		t.Fatal("expected /mcp to open the modal")
+	}
+	view := m.renderMCPModal()
+	if !strings.Contains(view, "github") {
+		t.Fatalf("modal should list the server:\n%s", view)
+	}
+
+
+	// 'a' starts the add wizard at the transport step.
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	if !m.mcpAddActive || m.mcpAddStep != 0 {
+		t.Fatal("expected add wizard at transport step")
+	}
+	// ENTER keeps stdio → name step; type a name.
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.mcpAddStep != 1 {
+		t.Fatal("expected name step")
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
+	if got := m.mcpAddName.Value(); got != "fs" {
+		t.Fatalf("name input = %q, want fs", got)
+	}
+	// ENTER → command step; type a command.
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.mcpAddStep != 2 {
+		t.Fatal("expected command step")
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if got := m.mcpAddCmd.Value(); got != "npx" {
+		t.Fatalf("command input = %q, want npx", got)
+	}
+	// ENTER saves: .mcp.json written, wizard closed.
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.mcpAddActive {
+		t.Fatal("wizard must close after save")
+	}
+	data, err := os.ReadFile(mcp.ProjectMCPPath())
+	if err != nil {
+		t.Fatalf(".mcp.json not written: %v", err)
+	}
+	if !strings.Contains(string(data), "\"fs\"") || !strings.Contains(string(data), "\"github\"") {
+		t.Fatalf("new server must merge into .mcp.json, preserving github:\n%s", data)
+	}
+
+	// After the reload the manager reflects both file servers.
+	names := m.mcpNames()
+	if len(names) != 2 || names[0] != "fs" || names[1] != "github" {
+		t.Fatalf("manager after save = %v, want [fs github]", names)
+	}
+
+	// 'd' arms the delete confirm; 'n' cancels; 'd' + 'y' removes from file.
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if m.mcpConfirm != "fs" {
+		t.Fatalf("expected delete confirm for fs, got %q", m.mcpConfirm)
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if m.mcpConfirm != "" {
+		t.Fatal("n must cancel the delete confirm")
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	data, err = os.ReadFile(mcp.ProjectMCPPath())
+	if err != nil {
+		t.Fatalf(".mcp.json missing after delete: %v", err)
+	}
+	if strings.Contains(string(data), "\"fs\"") || !strings.Contains(string(data), "\"github\"") {
+		t.Fatalf("delete must remove only the target server:\n%s", data)
+	}
 }
 
 // TestLiveDiffUpsertPerPath verifies live per-edit DIFF entries grow one entry

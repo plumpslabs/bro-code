@@ -26,7 +26,14 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "-v" || os.Args[1] == "--version") {
+		fmt.Println(version.Banner())
 		fmt.Println(version.Info())
+		os.Exit(0)
+	}
+
+	// `brocode mcp list|add|remove` — MCP config management without the TUI.
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		runMCPCommand(os.Args[2:])
 		os.Exit(0)
 	}
 
@@ -44,6 +51,7 @@ func main() {
 	flag.Parse()
 
 	if *flagVersion || *flagVersionLong {
+		fmt.Println(version.Banner())
 		fmt.Println(version.Info())
 		os.Exit(0)
 	}

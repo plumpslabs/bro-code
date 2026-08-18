@@ -748,6 +748,175 @@ func TestContextWindowForFreeBuff(t *testing.T) {
 	}
 }
 
+// TestContextWindowForOpenCode anchors the per-model free-tier windows of the
+// BroCode free gateway (models.dev, 2026-08): the free tier does NOT cap every
+// model at 200K — longcat/nemotron-ultra serve their native 1M, laguna-free is
+// 256K, hy3-free is 190K, ling/nemotron-3.5-lightning are 262144.
+func TestContextWindowForOpenCode(t *testing.T) {
+	cases := map[string]int{
+		"deepseek-v4-flash-free":      200_000,
+		"hy3-free":                    190_000,
+		"mimo-v2.5-free":              200_000,
+		"laguna-s-2.1-free":           256_000,
+		"ling-3.0-tiny-free":          262_144,
+		"longcat-2.0-free":            1_000_000,
+		"nemotron-3-ultra-free":       1_000_000,
+		"nemotron-3.5-lightning-free": 262_144,
+		"big-pickle":                  200_000,
+	}
+	for model, want := range cases {
+		if got := ContextWindowFor(AppConfig{}, "opencode", model); got != want {
+			t.Errorf("opencode %s: expected %d window, got %d", model, want, got)
+		}
+	}
+}
+
+// TestContextWindowForDeepSeek anchors the 1M window of every current DeepSeek
+// model (2026-07-24: deepseek-chat/reasoner are now aliases of v4-flash).
+func TestContextWindowForDeepSeek(t *testing.T) {
+	cases := map[string]int{
+		"deepseek-chat":     1_000_000,
+		"deepseek-reasoner": 1_000_000,
+		"deepseek-v4-flash": 1_000_000,
+		"deepseek-v4-pro":   1_000_000,
+	}
+	for model, want := range cases {
+		if got := ContextWindowFor(AppConfig{}, "deepseek", model); got != want {
+			t.Errorf("deepseek %s: expected %d window, got %d", model, want, got)
+		}
+	}
+}
+
+// TestContextWindowForNewGen anchors the 2025-2026 generation windows: claude
+// sonnet/opus 4.6+/5 and fable 5 = 1M, haiku 4.5 and legacy 3.x = 200K,
+// gpt-5 family = 400K, gemini-3.x = 1M (models.dev, 2026-08).
+func TestContextWindowForNewGen(t *testing.T) {
+	cases := []struct {
+		provider, model string
+		want            int
+	}{
+		{"anthropic", "claude-sonnet-5", 1_000_000},
+		{"anthropic", "claude-opus-5", 1_000_000},
+		{"anthropic", "claude-fable-5", 1_000_000},
+		{"anthropic", "claude-haiku-4-5", 200_000},
+		{"anthropic", "claude-3-7-sonnet-20250219", 200_000},
+		{"openai", "gpt-5", 400_000},
+		{"openai", "gpt-5-mini", 400_000},
+		{"openai", "gpt-5-nano", 400_000},
+		{"openai", "gpt-4.1", 1_047_576},
+		{"google", "gemini-3-flash-preview", 1_048_576},
+		{"google", "gemini-3.1-pro-preview", 1_048_576},
+		{"google", "gemini-3.5-flash", 1_048_576},
+	}
+	for _, c := range cases {
+		if got := ContextWindowFor(AppConfig{}, c.provider, c.model); got != c.want {
+			t.Errorf("%s %s: expected %d window, got %d", c.provider, c.model, c.want, got)
+		}
+	}
+}
+
+// TestContextWindowForOpenRouter anchors OpenRouter route caps (its own
+// /v1/models, 2026-08): deepseek-r1 is capped at 64K there (not 128K),
+// llama-3.3-70b-instruct = 131072, and the 2026 claude IDs are 1M.
+func TestContextWindowForOpenRouter(t *testing.T) {
+	cases := map[string]int{
+		"deepseek/deepseek-r1":              64_000,
+		"anthropic/claude-sonnet-5":         1_000_000,
+		"meta-llama/llama-3.3-70b-instruct": 131_072,
+	}
+	for model, want := range cases {
+		if got := ContextWindowFor(AppConfig{}, "openrouter", model); got != want {
+			t.Errorf("openrouter %s: expected %d window, got %d", model, want, got)
+		}
+	}
+}
+
+// TestContextWindowForGroq anchors Groq's route windows (131072 for the
+// llama-3.3-70b and deepseek-r1-distill routes, 2026-08).
+func TestContextWindowForGroq(t *testing.T) {
+	cases := map[string]int{
+		"llama-3.3-70b-versatile":       131_072,
+		"deepseek-r1-distill-llama-70b": 131_072,
+	}
+	for model, want := range cases {
+		if got := ContextWindowFor(AppConfig{}, "groq", model); got != want {
+			t.Errorf("groq %s: expected %d window, got %d", model, want, got)
+		}
+	}
+}
+
+// TestContextWindowForFamily anchors the family-prefix fallback: dated or
+// unlisted model IDs still resolve to their generation's window instead of
+// collapsing to the 128k default. The longest matching prefix wins, and
+// completely unrelated IDs still return 0.
+func TestContextWindowForFamily(t *testing.T) {
+	cases := map[string]int{
+		"claude-sonnet-5-20260908":      1_000_000,
+		"claude-opus-5-20260908":        1_000_000,
+		"claude-sonnet-4-6-20260801":    1_000_000,
+		"claude-opus-4-5-20251101":      200_000,
+		"claude-haiku-4-5-20261001":     200_000,
+		"claude-3-7-sonnet-20250219-v2": 200_000,
+		"gpt-5.4":                       1_050_000,
+		"gpt-5.2-20260407":              400_000,
+		"gpt-4.1-20250616":              1_047_576,
+		"deepseek-v4-pro-20260724":      1_000_000,
+		"deepseek/deepseek-r1-0528":     1_000_000,
+		"gemini-3.9-flash":              1_048_576,
+		"llama-3.3-70b-instruct":        131_072,
+		"o3-mini-20260131":              200_000,
+		"mimo-v2.5":                     1_048_576,
+		"minimax-m3":                    1_048_576,
+		"totally-unrelated-model":       0,
+	}
+	for model, want := range cases {
+		if got := ContextWindowFor(AppConfig{}, "some-gateway", model); got != want {
+			t.Errorf("family %s: expected %d window, got %d", model, want, got)
+		}
+	}
+}
+
+// TestContextWindowForLiveLimits proves the gateway's live context_length
+// (cached by DiscoverModels) wins over the builtin table, capped at the
+// researched window: poolside reports 262144 live even though the model is
+// natively 1M, and a custom provider with no builtin entry uses its live value.
+func TestContextWindowForLiveLimits(t *testing.T) {
+	// Custom gateway: no builtin entry → live value is used directly.
+	recordLiveContextLimits("test-live-gateway", map[string]int{"widget-1": 700_000})
+	if got := ContextWindowFor(AppConfig{}, "test-live-gateway", "widget-1"); got != 700_000 {
+		t.Errorf("expected live window 700000 for custom gateway, got %d", got)
+	}
+	// poolside: live reports 262144 (verified per-key deployment cap), which
+	// is below the native 1M → live value wins.
+	recordLiveContextLimits("poolside", map[string]int{"poolside/laguna-s-2.1": 262_144})
+	if got := ContextWindowFor(AppConfig{}, "poolside", "poolside/laguna-s-2.1"); got != 262_144 {
+		t.Errorf("expected live window 262144 for poolside laguna, got %d", got)
+	}
+}
+
+// TestFetchOpenAIModelsDetailed proves the /models fetch also captures each
+// model's context_length alongside the sorted deduplicated ID list.
+func TestFetchOpenAIModelsDetailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"model-b","context_length":262144},{"id":"model-a","context_length":1048576},{"id":"model-a"}]}`))
+	}))
+	defer srv.Close()
+
+	models, limits, err := FetchOpenAIModelsDetailed(srv.URL, "")
+	if err != nil {
+		t.Fatalf("FetchOpenAIModelsDetailed failed: %v", err)
+	}
+	if len(models) != 2 || models[0] != "model-a" || models[1] != "model-b" {
+		t.Errorf("expected sorted deduped [model-a model-b], got %v", models)
+	}
+	if limits["model-a"] != 1_048_576 {
+		t.Errorf("expected model-a limit 1048576, got %d", limits["model-a"])
+	}
+	if limits["model-b"] != 262_144 {
+		t.Errorf("expected model-b limit 262144, got %d", limits["model-b"])
+	}
+}
+
 func TestFormatTokens(t *testing.T) {
 	cases := []struct {
 		n    int

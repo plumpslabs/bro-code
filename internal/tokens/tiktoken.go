@@ -11,6 +11,7 @@
 package tokens
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/pkoukk/tiktoken-go"
@@ -132,4 +133,29 @@ func CountTokens(text, model string) int {
 // default encoding and falls back to the heuristic on any error.
 func CountTokensDefault(text string) int {
 	return CountTokens(text, "")
+}
+
+// CountMethod describes how CountTokens counts for a model, so the UI can
+// label estimates honestly instead of presenting every number as exact
+// (PHILOSOPHY Principle 3 — forecast vs settlement must be distinguishable).
+func CountMethod(model string) string {
+	if model == "" {
+		return "estimate (generic heuristic)"
+	}
+	if strings.HasPrefix(model, "deepseek-") || strings.HasPrefix(model, "deepseek/") {
+		return "estimate (DeepSeek official char→token ratios)"
+	}
+	enc := encodingForModel(model)
+	switch enc {
+	case tiktoken.MODEL_O200K_BASE, tiktoken.MODEL_CL100K_BASE:
+		if _, ok := realEncoding(model); ok {
+			return "exact BPE (" + enc + ")"
+		}
+		return "estimate (tokenizer unavailable, generic heuristic)"
+	case tiktoken.MODEL_P50K_BASE:
+		// Anthropic ships no offline BPE vocabulary; p50k_base is the documented
+		// community approximation and undercounts Claude 4.7+ by ~25-30%.
+		return "approximation (p50k_base — Claude, ±25-30% on newest models)"
+	}
+	return "estimate (generic heuristic)"
 }

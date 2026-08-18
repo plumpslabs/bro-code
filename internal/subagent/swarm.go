@@ -29,13 +29,50 @@ type SwarmTask struct {
 
 // SwarmResult contains the combined synthesis from all swarm stages.
 type SwarmResult struct {
-	Goal           string   `json:"goal"`
-	ArchitectSpec  string   `json:"architect_spec"`
-	BuilderOutput  string   `json:"builder_output"`
-	AuditorVerdict string   `json:"auditor_verdict"`
-	Success        bool     `json:"success"`
-	TouchedFiles   []string `json:"touched_files,omitempty"`
-	Duration       string   `json:"duration"`
+	Goal           string      `json:"goal"`
+	ArchitectSpec  string      `json:"architect_spec"`
+	BuilderOutput  string      `json:"builder_output"`
+	AuditorVerdict string      `json:"auditor_verdict"`
+	Success        bool        `json:"success"`
+	TouchedFiles   []string    `json:"touched_files,omitempty"`
+	Duration       string      `json:"duration"`
+	Architect      RunMetrics `json:"architect_metrics,omitempty"`
+	Builder        RunMetrics `json:"builder_metrics,omitempty"`
+	Auditor        RunMetrics `json:"auditor_metrics,omitempty"`
+	TotalTokens    int        `json:"total_tokens"`
+	TotalCost      float64    `json:"total_cost"`
+	Compactions    int        `json:"compactions"`
+}
+
+// UsageLine renders a one-line per-phase cost attribution for the swarm
+// completion status (e.g. "arch 1.2k tok / $0.01 · build 9.4k tok / $0.09").
+func (s *SwarmResult) UsageLine() string {
+	var parts []string
+	for _, m := range []struct {
+		label string
+		run   RunMetrics
+	}{{"arch", s.Architect}, {"build", s.Builder}, {"audit", s.Auditor}} {
+		if m.run.Tokens <= 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %s tok / $%.3f", m.label, fmtTokens(m.run.Tokens), m.run.Cost))
+	}
+	if s.Compactions > 0 {
+		parts = append(parts, fmt.Sprintf("%d compaction(s)", s.Compactions))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// fmtTokens renders token counts compactly (1.2k, 9.4k, 1.1m).
+func fmtTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fm", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // ExecuteSwarm coordinates a 3-tier specialist swarm (Architect -> Builder -> Auditor).
@@ -71,11 +108,15 @@ TASK:
 4. Highlight any edge cases or risks.
 DO NOT write full replacement code files; keep the specification clear and actionable for the BUILDER agent.`, task.Goal, task.Context)
 
-	archOutput, err := r.runOne(tctx, "architect", archPrompt, "PLANNER", "", onUpdate)
+	archRun, err := r.runOneResult(tctx, "architect", archPrompt, "PLANNER", "", "", onUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("architect phase failed: %w", err)
 	}
-	res.ArchitectSpec = strings.TrimSpace(archOutput)
+	res.ArchitectSpec = strings.TrimSpace(archRun.Answer)
+	res.Architect = archRun
+	res.TotalTokens += archRun.Tokens
+	res.TotalCost += archRun.Cost
+	res.Compactions += archRun.Compactions
 
 	// ── Phase 2: BUILDER (Surgical Implementation) ──────────────────────────
 	if onUpdate != nil {
@@ -92,11 +133,15 @@ TASK:
 2. Avoid over-engineering; keep changes minimal, robust, and DRY.
 3. Once edits are made, summarize exactly what was modified.`, task.Goal, res.ArchitectSpec)
 
-	buildOutput, err := r.runOne(tctx, "builder", buildPrompt, "BUILDER", "", onUpdate)
+	buildRun, err := r.runOneResult(tctx, "builder", buildPrompt, "BUILDER", "", r.CheapModel, onUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("builder phase failed: %w", err)
 	}
-	res.BuilderOutput = strings.TrimSpace(buildOutput)
+	res.BuilderOutput = strings.TrimSpace(buildRun.Answer)
+	res.Builder = buildRun
+	res.TotalTokens += buildRun.Tokens
+	res.TotalCost += buildRun.Cost
+	res.Compactions += buildRun.Compactions
 
 	// ── Phase 3: AUDITOR (Verification & Quality Gate) ──────────────────────
 	if onUpdate != nil {
@@ -113,11 +158,15 @@ TASK:
 2. If project tests exist, verify them or check LSP diagnostics.
 3. Provide a final verdict (PASSED or ISSUES_FOUND) with concise findings.`, task.Goal, res.BuilderOutput)
 
-	auditOutput, err := r.runOne(tctx, "auditor", auditPrompt, "PLANNER", "", onUpdate)
+	auditRun, err := r.runOneResult(tctx, "auditor", auditPrompt, "PLANNER", "", r.CheapModel, onUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("auditor phase failed: %w", err)
 	}
-	res.AuditorVerdict = strings.TrimSpace(auditOutput)
+	res.AuditorVerdict = strings.TrimSpace(auditRun.Answer)
+	res.Auditor = auditRun
+	res.TotalTokens += auditRun.Tokens
+	res.TotalCost += auditRun.Cost
+	res.Compactions += auditRun.Compactions
 	res.Success = !strings.Contains(strings.ToUpper(res.AuditorVerdict), "ISSUES_FOUND")
 	res.Duration = time.Since(start).Round(time.Millisecond).String()
 
@@ -126,7 +175,11 @@ TASK:
 		if !res.Success {
 			status = "REQUIRES_ATTENTION"
 		}
-		onUpdate(loop.StateObserving, fmt.Sprintf("✨ [Swarm] %s in %s", status, res.Duration))
+		msg := fmt.Sprintf("✨ [Swarm] %s in %s", status, res.Duration)
+		if line := res.UsageLine(); line != "" {
+			msg += " · " + line
+		}
+		onUpdate(loop.StateObserving, msg)
 	}
 
 	return res, nil

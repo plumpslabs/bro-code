@@ -23,7 +23,7 @@ type checkCmd struct {
 
 // planVerification detects the project type from its config files and returns
 // the check commands to run, in order. It is language-agnostic (Go, JS/TS,
-// Python, Rust, Java) and architecture-agnostic: configs are first looked for
+// Python, Rust, Java, Ruby, PHP, C#) and architecture-agnostic: configs are first looked for
 // in the current directory, then one level down — so monorepos whose packages
 // live under apps/*, packages/*, services/*, or backend/ frontend/ still get
 // verified even when the root has no config of its own. An empty result means
@@ -108,13 +108,74 @@ func planIn(dir string) []checkCmd {
 		return []checkCmd{{"./mvnw", []string{"-q", "test"}, dir}}
 	case (fileExistsIn(dir, "build.gradle") || fileExistsIn(dir, "build.gradle.kts")) && fileExistsIn(dir, "gradlew"):
 		return []checkCmd{{"./gradlew", []string{"-q", "test"}, dir}}
+	case fileExistsIn(dir, "Gemfile"):
+		return planRubyVerificationIn(dir)
+	case fileExistsIn(dir, "composer.json"):
+		return planPHPVerificationIn(dir)
+	case globExistsIn(dir, "*.sln"), globExistsIn(dir, "*.csproj"):
+		return planDotNetVerificationIn(dir)
 	}
 	return nil
+}
+
+// planRubyVerificationIn plans Ruby checks: bundle exec rspec when a spec/
+// directory exists, bundle exec rake test for a test/-only project. A Gemfile
+// with neither plans nothing — there is no test suite to verify (no false
+// failures).
+func planRubyVerificationIn(dir string) []checkCmd {
+	switch {
+	case dirExistsIn(dir, "spec"):
+		return []checkCmd{{"bundle", []string{"exec", "rspec"}, dir}}
+	case dirExistsIn(dir, "test"):
+		return []checkCmd{{"bundle", []string{"exec", "rake", "test"}, dir}}
+	}
+	return nil
+}
+
+// planPHPVerificationIn plans PHP checks only when the project looks installed
+// (composer.lock or vendor/ present) — a bare composer.json means dependencies
+// were never fetched, so composer may not even be on the machine and a check
+// would be a false failure. Installed projects get composer validate plus
+// vendor/bin/phpunit when it exists and phpunit.xml is configured.
+func planPHPVerificationIn(dir string) []checkCmd {
+	if !fileExistsIn(dir, "composer.lock") && !dirExistsIn(dir, "vendor") {
+		return nil
+	}
+	cmds := []checkCmd{{"composer", []string{"validate", "--no-check-publish"}, dir}}
+	if (fileExistsIn(dir, "phpunit.xml") || fileExistsIn(dir, "phpunit.xml.dist")) &&
+		fileExistsIn(dir, "vendor/bin/phpunit") {
+		cmds = append(cmds, checkCmd{"vendor/bin/phpunit", nil, dir})
+	}
+	return cmds
+}
+
+// planDotNetVerificationIn plans C# checks: dotnet build (solution or project),
+// then dotnet test --no-build when a test project (*Tests.csproj/*Test.csproj)
+// is present. Requires the .NET SDK, like Go/Rust require theirs.
+func planDotNetVerificationIn(dir string) []checkCmd {
+	cmds := []checkCmd{{"dotnet", []string{"build", "--nologo"}, dir}}
+	if globExistsIn(dir, "*Tests.csproj") || globExistsIn(dir, "*Test.csproj") {
+		cmds = append(cmds, checkCmd{"dotnet", []string{"test", "--no-build", "--nologo"}, dir})
+	}
+	return cmds
 }
 
 func fileExistsIn(dir, name string) bool {
 	st, err := os.Stat(filepath.Join(dir, name))
 	return err == nil && !st.IsDir()
+}
+
+// dirExistsIn reports whether name is a directory under dir.
+func dirExistsIn(dir, name string) bool {
+	st, err := os.Stat(filepath.Join(dir, name))
+	return err == nil && st.IsDir()
+}
+
+// globExistsIn reports whether any file matches the glob pattern under dir
+// (used for .sln/.csproj and test-project detection, where exact names vary).
+func globExistsIn(dir, pattern string) bool {
+	matches, err := filepath.Glob(filepath.Join(dir, pattern))
+	return err == nil && len(matches) > 0
 }
 
 func anyExistsIn(dir string, names ...string) bool {

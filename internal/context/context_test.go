@@ -225,6 +225,92 @@ func TestContextManagerAppendAndCompaction(t *testing.T) {
 	}
 }
 
+// TestCompactPinsFirstUserGoal verifies goal-pinning: the first user message
+// (the turn's goal/constraints) survives compaction VERBATIM instead of being
+// summarized away — the documented governance-decay failure mode.
+func TestCompactPinsFirstUserGoal(t *testing.T) {
+	mgr := NewManager("test-session", nil, 1000)
+	_ = mgr.AppendUserMessage("IMPORTANT: never touch config.yaml, always use SQLite")
+	_ = mgr.AppendAssistantTurn("BUILDER", "m", "thinking", "ok", nil)
+	_ = mgr.AppendUserMessage("continue")
+	_ = mgr.AppendAssistantTurn("BUILDER", "m", "", "working", nil)
+	_ = mgr.AppendUserMessage("tool result")
+	_ = mgr.AppendAssistantTurn("BUILDER", "m", "", "done", nil)
+
+	// 6 messages, keepCount=4 → the goal (message 0) sits outside the verbatim
+	// tail, so it must be pinned ahead of the summary.
+	if err := mgr.Compact(CompactionSummary{Goal: "x"}); err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+	found := false
+	for _, msg := range mgr.Messages() {
+		if strings.Contains(msg.Content, "never touch config.yaml") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("first user goal must survive compaction verbatim (goal-pinning)")
+	}
+}
+
+// TestCompactPinsConstraints verifies EXPLICIT constraint pinning: hard
+// requirements that survive summarization are pinned verbatim above the tail,
+// so they cannot be lost-in-the-middle after repeated compactions.
+func TestCompactPinsConstraints(t *testing.T) {
+	mgr := NewManager("s", nil, 1000)
+	_ = mgr.AppendUserMessage("start")
+	_ = mgr.AppendAssistantTurn("BUILDER", "m", "", "ok", nil)
+	_ = mgr.AppendUserMessage("continue")
+	_ = mgr.AppendAssistantTurn("BUILDER", "m", "", "working", nil)
+	_ = mgr.AppendUserMessage("tool result")
+	_ = mgr.AppendAssistantTurn("BUILDER", "m", "", "done", nil)
+
+	if err := mgr.Compact(CompactionSummary{
+		Goal:        "ship feature",
+		Constraints: "NO network calls; must stay offline-only; keep vendor/ untouched",
+	}); err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+
+	found := false
+	for _, msg := range mgr.Messages() {
+		if strings.Contains(msg.Content, "CONSTRAINTS (PINNED") && strings.Contains(msg.Content, "must stay offline-only") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("constraints must be pinned verbatim across compaction (explicit goal-pinning)")
+	}
+}
+
+// TestTokenBreakdownByKind verifies the cumulative per-kind token counters:
+// user/assistant/tool outputs each accumulate, and compaction reduces the live
+// window but NEVER the cumulative breakdown (it answers "where did tokens
+// go?", not "how full is the window?").
+func TestTokenBreakdownByKind(t *testing.T) {
+	mgr := NewManager("s", nil, 1000)
+	_ = mgr.AppendUserMessage("hello")
+	_ = mgr.AppendAssistantTurn("BUILDER", "m", "think", "answer", nil)
+	_ = mgr.AppendToolResult("c1", "tool output")
+
+	u, a, tool := mgr.TokenBreakdown()
+	if u <= 0 || a <= 0 || tool <= 0 {
+		t.Errorf("expected positive breakdown, got user=%d assistant=%d tool=%d", u, a, tool)
+	}
+	if u+a+tool > mgr.TotalTokens() {
+		t.Errorf("cumulative breakdown %d must not exceed live total %d", u+a+tool, mgr.TotalTokens())
+	}
+
+	// Compaction shrinks the window; the cumulative breakdown must not shrink.
+	if err := mgr.Compact(CompactionSummary{Goal: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	u2, a2, t2 := mgr.TokenBreakdown()
+	if u2 < u || a2 < a || t2 < tool {
+		t.Errorf("breakdown must be cumulative across compaction: %d,%d,%d → %d,%d,%d", u, a, tool, u2, a2, t2)
+	}
+}
+
 // TestNeedsCompactionEarlyRatio verifies the budget triggers at the lower
 // compactionRatio (0.60), not the old 0.85 — compacting earlier keeps each
 // turn's working set lean (the "context rot" guard).

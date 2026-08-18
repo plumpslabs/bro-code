@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/tokens"
 )
 
 // ModelUsage accumulates tokens and estimated cost for one model.
@@ -79,13 +80,24 @@ func (u *UsageTracker) Summary() string {
 	var totalTokens int
 	var totalCost float64
 	var sb strings.Builder
+	estimated := false
 	for model, m := range u.models {
 		totalTokens += m.TotalTokens
 		totalCost += m.CostUSD
 		fmt.Fprintf(&sb, "%s: %s tokens (in %s / out %s) — $%.4f\n",
 			model, fmtTokens(m.TotalTokens), fmtTokens(m.PromptTokens), fmtTokens(m.CompletionTokens), m.CostUSD)
+		if method := tokens.CountMethod(model); strings.Contains(method, "estimate") || strings.Contains(method, "approximation") {
+			estimated = true
+		}
 	}
 	fmt.Fprintf(&sb, "\nTOTAL: %s tokens — $%.4f", fmtTokens(totalTokens), totalCost)
+	if estimated {
+		// Honest labeling (PHILOSOPHY Principle 3): raw usage is the provider's
+		// true token counts, but token estimates (Claude p50k, DeepSeek ratios,
+		// generic heuristics) are approximations that do NOT exactly match the
+		// provider's bill. Costs derive from these same figures.
+		sb.WriteString("\n\nNote: token figures for non-OpenAI models are local estimates (see per-model method above); actual billing may differ.")
+	}
 	return strings.TrimSpace(sb.String())
 }
 

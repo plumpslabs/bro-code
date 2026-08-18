@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,195 @@ func TestLoaderMatch(t *testing.T) {
 	}
 	if got := l.Match("python"); len(got) != 0 {
 		t.Errorf("expected 0 matches for 'python', got %d", len(got))
+	}
+}
+
+// TestEnsureDefaultsInstalled verifies the embedded default skill pack is
+// auto-installed into .brocode/skills (so the model can read SKILL.md files),
+// installs are idempotent, and user edits are never clobbered.
+func TestEnsureDefaultsInstalled(t *testing.T) {
+	root := t.TempDir()
+	if n := EnsureDefaultsInstalled(root); n == 0 {
+		t.Fatal("expected default skills to install")
+	}
+	// Idempotent: a second run installs nothing new.
+	if n := EnsureDefaultsInstalled(root); n != 0 {
+		t.Fatalf("second install must be a no-op, installed %d", n)
+	}
+	// The regular loader picks them up as real, readable skills.
+	all := NewLoader(root).All()
+	if len(all) == 0 {
+		t.Fatal("loader found no skills after install")
+	}
+	got := map[string]bool{}
+	for _, s := range all {
+		got[s.Name] = true
+	}
+	for _, want := range []string{"go-workflow", "ts-workflow", "migration-playbook", "refactor-playbook", "debugging-repro", "locale-json-merge", "rust-workflow", "python-workflow"} {
+		if !got[want] {
+			t.Errorf("default skill %q not installed", want)
+		}
+	}
+	// User edits are never clobbered on re-install.
+	edit := filepath.Join(root, ".brocode", "skills", "go-workflow", "SKILL.md")
+	if err := os.WriteFile(edit, []byte("---\nname: go-workflow\ndescription: USER EDITED\n---\ncustom\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	EnsureDefaultsInstalled(root)
+	data, err := os.ReadFile(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "USER EDITED") {
+		t.Error("EnsureDefaultsInstalled clobbered a user-edited skill")
+	}
+}
+
+// embeddedSkill returns the embedded default skill with the given name, or nil.
+func embeddedSkill(t *testing.T, name string) *Skill {
+	t.Helper()
+	for _, s := range DefaultSkills() {
+		if s.Name == name {
+			return &s
+		}
+	}
+	t.Fatalf("embedded skill %q not found", name)
+	return nil
+}
+
+// TestEnsureDefaultsVersionTracking verifies the version-aware installer:
+// fresh installs record a baseline; an untouched default is upgraded when the
+// embedded version is newer; a user-edited file is never touched and is marked
+// user-owned so later versions don't retry.
+func TestEnsureDefaultsVersionTracking(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".brocode", "skills")
+	stateFile := filepath.Join(skillDir, ".versions.json")
+	goSkill := embeddedSkill(t, "go-workflow")
+
+	// Fresh install: baseline recorded with the embedded version + hash.
+	if n := EnsureDefaultsInstalled(root); n != 8 {
+		t.Fatalf("expected 8 default skills installed, got %d", n)
+	}
+	st := loadVersionState(skillDir)
+	if st.Versions["go-workflow"] != 1 || st.Hashes["go-workflow"] != sha256Hex([]byte(goSkill.Content)) {
+		t.Fatalf("fresh install baseline wrong: %+v", st)
+	}
+
+	// Simulate an embedded upgrade to v2: same content, newer version. An
+	// untouched file must be upgraded in place.
+	_ = os.Remove(stateFile)
+	st = &skillVersionState{Versions: map[string]int{"go-workflow": 0}, Hashes: map[string]string{"go-workflow": sha256Hex([]byte(goSkill.Content))}}
+	if data, err := json.Marshal(st); err == nil {
+		_ = os.WriteFile(stateFile, data, 0o644)
+	}
+	if n := EnsureDefaultsInstalled(root); n != 1 {
+		t.Fatalf("expected 1 untouched upgrade, got %d", n)
+	}
+	st = loadVersionState(skillDir)
+	if st.Versions["go-workflow"] != 1 {
+		t.Fatalf("untouched upgrade must bump version to 1, got %+v", st)
+	}
+
+	// Legacy user edit (no baseline, file differs from embedded): never
+	// touched, marked user-owned (hash "") so future versions don't retry.
+	_ = os.Remove(stateFile)
+	edit := filepath.Join(skillDir, "go-workflow", "SKILL.md")
+	if err := os.WriteFile(edit, []byte("---\nname: go-workflow\ndescription: USER EDITED\n---\ncustom\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := EnsureDefaultsInstalled(root); n != 0 {
+		t.Fatalf("user-edited skill must not be upgraded, got %d installs", n)
+	}
+	data, err := os.ReadFile(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "USER EDITED") {
+		t.Error("user edit was clobbered")
+	}
+	st = loadVersionState(skillDir)
+	if st.Hashes["go-workflow"] != "" {
+		t.Fatalf("user-edited skill must be marked user-owned, got %+v", st)
+	}
+
+	// Editing a skill AFTER a recorded baseline: never touched, marked owned.
+	st = &skillVersionState{
+		Versions: map[string]int{"go-workflow": 1},
+		Hashes:   map[string]string{"go-workflow": sha256Hex([]byte(goSkill.Content))},
+	}
+	if data, err := json.Marshal(st); err == nil {
+		_ = os.WriteFile(stateFile, data, 0o644)
+	}
+	if err := os.WriteFile(edit, []byte(goSkill.Content+"\nuser tweak\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	EnsureDefaultsInstalled(root)
+	st = loadVersionState(skillDir)
+	if st.Hashes["go-workflow"] != "" {
+		t.Fatalf("post-baseline edit must mark user-owned, got %+v", st)
+	}
+}
+
+// TestProposeGotchasPatch verifies the self-evolution proposal: gotchas are
+// appended (deduped) to GOTCHAS.md in the skill dir, SKILL.md itself is never
+// touched (so the version-aware installer's content hash stays pristine), and
+// re-proposing writes nothing new.
+func TestProposeGotchasPatch(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "go-workflow")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillFile := filepath.Join(dir, "SKILL.md")
+	if err := os.WriteFile(skillFile, []byte("---\nname: go-workflow\n---\n# Go Workflow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotchas := []string{
+		"Verification failed on main.go — fixed after 1 repair attempt",
+		"interface satisfaction usually means a missing method",
+	}
+	if n := ProposeGotchasPatch(dir, "go-workflow", gotchas); n != 2 {
+		t.Fatalf("expected 2 written, got %d", n)
+	}
+	// SKILL.md is never modified by the proposal.
+	data, err := os.ReadFile(skillFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "repair") {
+		t.Error("SKILL.md must never be modified by the proposal")
+	}
+	// Idempotent: re-proposing the same gotchas writes nothing new.
+	if n := ProposeGotchasPatch(dir, "go-workflow", gotchas); n != 0 {
+		t.Fatalf("re-proposal must write nothing new, got %d", n)
+	}
+	// A new gotcha appends to the existing proposal.
+	if n := ProposeGotchasPatch(dir, "go-workflow", []string{"edition differences matter"}); n != 1 {
+		t.Fatalf("expected 1 new gotcha appended, got %d", n)
+	}
+	data, err = os.ReadFile(filepath.Join(dir, "GOTCHAS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "interface satisfaction") || !strings.Contains(got, "edition differences") {
+		t.Errorf("proposal missing gotchas:\n%s", got)
+	}
+	// Empty input / unknown dir → 0.
+	if n := ProposeGotchasPatch(dir, "go-workflow", nil); n != 0 {
+		t.Fatalf("empty gotchas must write nothing, got %d", n)
+	}
+}
+
+// TestDefaultSkillVersionsParsed pins the embedded pack to version 1 so a
+// future bump is deliberate.
+func TestDefaultSkillVersionsParsed(t *testing.T) {
+	for _, s := range DefaultSkills() {
+		if s.Version != 1 {
+			t.Errorf("default skill %q: expected version 1, got %d", s.Name, s.Version)
+		}
 	}
 }
 

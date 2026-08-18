@@ -277,12 +277,91 @@ func stripJSONComments(input string) string {
 	return sb.String()
 }
 
+// familyContextLimits maps a model-ID prefix to a context window for models
+// that are not in the exact builtin table (e.g. a dated model ID such as
+// "claude-sonnet-4-6-20260801" that isn't pinned verbatim). Prefixes are
+// matched against the model ID; the longest matching prefix wins so a dated
+// claude-sonnet-5 ID resolves to 1M (its 4.x-era siblings that cap at 200K
+// never share the same prefix). Values follow the same 2026-08 research:
+// claude sonnet/opus 4.5+ = 1M, claude 3.x & haiku 4.5 = 200K, gpt-5 family
+// = 400K, gpt-4.1 family = 1M, deepseek = 1M, gemini = 1M, llama-3.3 = 131K.
+var familyContextLimits = []struct {
+	prefix string
+	window int
+}{
+	// Anthropic Claude. Order matters: sonnet/opus 4.6+/5 and fable 5 (1M)
+	// must be checked before the generic "claude-" 200K fallback, and the
+	// "claude-3-" legacy family must win over it too.
+	{"claude-sonnet-4-5", 1_000_000},
+	{"claude-sonnet-4-6", 1_000_000},
+	{"claude-sonnet-5", 1_000_000},
+	{"claude-opus-4-5", 200_000},
+	{"claude-opus-4-6", 1_000_000},
+	{"claude-opus-4-7", 1_000_000},
+	{"claude-opus-4-8", 1_000_000},
+	{"claude-opus-5", 1_000_000},
+	{"claude-fable-5", 1_000_000},
+	{"claude-haiku-4-5", 200_000},
+	{"claude-3-", 200_000},
+	{"claude-", 200_000},
+	// OpenAI. gpt-4.1 family and gpt-5.x are 400K-1M; gpt-4o stays 128K.
+	{"gpt-5.5", 1_050_000},
+	{"gpt-5.4", 1_050_000},
+	{"gpt-5", 400_000},
+	{"gpt-4.1", 1_047_576},
+	{"gpt-4o", 128_000},
+	{"gpt-4", 128_000},
+	{"o4-", 200_000},
+	{"o3-", 200_000},
+	{"o1-", 200_000},
+	// DeepSeek: chat/reasoner are v4-flash aliases (1M) since 2026-07.
+	{"deepseek-", 1_000_000},
+	{"deepseek/", 1_000_000},
+	// Google Gemini: every generation serves the 1M window.
+	{"gemini-", 1_048_576},
+	// NVIDIA Nemotron 3 / 3.5: 1M for the -ultra/-super tiers, 256K for 3.5.
+	{"nemotron-3.5", 262_144},
+	{"nemotron-3-ultra", 1_000_000},
+	{"nemotron-3", 262_144},
+	// Meta Llama 3.3 (Groq/OpenRouter) = 131072.
+	{"llama-3.3", 131_072},
+	{"llama-3.2", 131_072},
+	// Qwen coder / general-purpose = 131K.
+	{"qwen2.5-coder", 131_072},
+	{"qwen", 131_072},
+	// Free gateway / Chinese open models: MiMo & MiniMax = 1M natively. Both
+	// bare (mimo-v2.5) and FreeBuff wire (mimo/mimo-v2.5) ID forms match.
+	{"mimo-", 1_048_576},
+	{"mimo/", 1_048_576},
+	{"minimax-", 1_048_576},
+	{"minimax/", 1_048_576},
+}
+
+// familyContextWindow returns the context window for a model ID based on its
+// known model family prefix, or 0 when no family rule matches.
+func familyContextWindow(model string) int {
+	for _, rule := range familyContextLimits {
+		if strings.HasPrefix(model, rule.prefix) {
+			return rule.window
+		}
+	}
+	return 0
+}
+
 // ContextWindowFor returns the real context window (in tokens) for a model,
 // resolved in priority order:
 //  1. The user-declared per-model "limit" in their config (the opencode.jsonc
 //     style block the /connect wizard accepts) — highest priority.
-//  2. The builtin research-backed table for builtin providers' default models
-//     (e.g. opencode free models = 200K on the free tier, gemini = 1M, ...).
+//  2. The live context_length reported by the gateway's /models endpoint
+//     (cached during DiscoverModels). It represents the real per-deployment
+//     cap — e.g. poolside reports 262144 although the model natively supports
+//     1M — but is capped at the researched builtin window for the same model,
+//     so the research-backed table stays the ceiling.
+//  3. The builtin research-backed table for builtin providers' default models
+//     (e.g. opencode free models per-model windows, gemini = 1M, ...).
+//  4. A model-family fallback (claude-sonnet-*, gpt-5*, deepseek-*,
+//     gemini-*, ...) so dated or unlisted model IDs still resolve to their
+//     generation's window instead of collapsing to the 128k default.
 //
 // Returns 0 when nothing is known — callers fall back to their default window.
 func ContextWindowFor(cfg AppConfig, providerID, model string) int {
@@ -294,17 +373,33 @@ func ContextWindowFor(cfg AppConfig, providerID, model string) int {
 			}
 		}
 	}
-	// 2. Builtin research-backed table.
+	// Builtin research-backed window doubles as the ceiling for the live value.
+	var builtin int
 	for _, bp := range BuiltinProviders {
 		if bp.ID != providerID {
 			continue
 		}
 		if w, ok := bp.ContextLimits[model]; ok {
-			return w
+			builtin = w
 		}
 		break
 	}
-	return 0
+	// 2. Live context_length from the gateway's /models endpoint: the real
+	// per-deployment cap, but never above the researched builtin window.
+	if live, ok := liveContextLimits[providerID][model]; ok {
+		if builtin == 0 {
+			return live
+		}
+		if live < builtin {
+			return live
+		}
+		return builtin
+	}
+	if builtin != 0 {
+		return builtin
+	}
+	// 3. Model-family fallback for dated/unlisted model IDs.
+	return familyContextWindow(model)
 }
 
 // FormatTokens renders a token count compactly and readably for the UI:

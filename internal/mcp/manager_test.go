@@ -261,3 +261,64 @@ func TestProviderDefinitions(t *testing.T) {
 		t.Fatalf("parameters not JSON-serializable: %v", err)
 	}
 }
+
+// TestAddRemoveServerToFile verifies the config-edit helpers: add merges into
+// the mcpServers file preserving other servers, remove deletes only the
+// target, unknown names are idempotent, missing files are created, and the
+// result round-trips through the manager's loader.
+func TestAddRemoveServerToFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".mcp.json")
+	existing := `{"mcpServers": {"github": {"command": "npx", "args": ["-y", "pkg"]}}}`
+	if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add merges, preserving the existing server.
+	if err := AddServerToFile(path, "filesystem", ServerConfig{Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "github") || !strings.Contains(string(data), "filesystem") {
+		t.Fatalf("add must preserve existing servers:\n%s", data)
+	}
+
+	// Remove only the target.
+	if err := RemoveServerFromFile(path, "github"); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "github") || !strings.Contains(string(data), "filesystem") {
+		t.Fatalf("remove must keep other servers:\n%s", data)
+	}
+
+	// Unknown name and missing file are idempotent.
+	if err := RemoveServerFromFile(path, "nope"); err != nil {
+		t.Fatalf("unknown-name remove: %v", err)
+	}
+	if err := RemoveServerFromFile(filepath.Join(dir, "missing.json"), "x"); err != nil {
+		t.Fatalf("missing-file remove: %v", err)
+	}
+
+	// Add to a missing file creates it, and the manager reloads it.
+	p2 := filepath.Join(dir, "new.json")
+	if err := AddServerToFile(p2, "remote", ServerConfig{Type: "http", URL: "https://mcp.example.com/mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager()
+	mgr.loadFile(p2)
+	names := mgr.ServerNames()
+	if len(names) != 1 || names[0] != "remote" {
+		t.Fatalf("reload mismatch: %v", names)
+	}
+	cfg, ok := mgr.Config("remote")
+	if !ok || cfg.URL != "https://mcp.example.com/mcp" || cfg.Transport() != "http" {
+		t.Fatalf("reloaded config mismatch: %+v ok=%v", cfg, ok)
+	}
+}

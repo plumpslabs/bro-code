@@ -30,12 +30,14 @@ import (
 	"github.com/plumpslabs/bro-code/internal/lsp"
 	"github.com/plumpslabs/bro-code/internal/mcp"
 	"github.com/plumpslabs/bro-code/internal/memory"
+	"github.com/plumpslabs/bro-code/internal/prompt"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/repo"
 	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/skill"
 	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/subagent"
+	"github.com/plumpslabs/bro-code/internal/tokens"
 	"github.com/plumpslabs/bro-code/internal/tool"
 	"golang.org/x/term"
 )
@@ -310,6 +312,20 @@ type Model struct {
 	// "" = no confirm pending, "ALL" = delete every session, otherwise the
 	// session ID to delete. The modal blocks until the user answers y/n.
 	sessionsConfirmID string
+
+	// MCP Modal State: /mcp opens an interactive server list (like /models /
+	// /sessions). a = add (wizard), d = delete (with y/n confirm), r = reload.
+	showMCP    bool
+	mcpSel     int
+	mcpConfirm string // server name awaiting y/n delete confirm ("" = none)
+	// MCP add wizard (mirrors the /connect multi-step wizard): 0 = transport
+	// pick, 1 = name, 2 = command (stdio) or URL (http/sse).
+	mcpAddActive bool
+	mcpAddStep   int // 0=transport, 1=name, 2=command/url
+	mcpAddType   int // 0=stdio, 1=http, 2=sse
+	mcpAddName   textinput.Model
+	mcpAddCmd    textinput.Model
+	mcpAddURL    textinput.Model
 
 	// File-action confirm bar (create/delete file): replaces the chat input
 	// until the user picks Allow once / Always / Discard. showFileConfirm
@@ -629,6 +645,17 @@ func NewApp(
 	aci.Placeholder = "Type your custom answer..."
 	aci.Prompt = ""
 
+	// MCP add-wizard inputs (clean, un-focused by default).
+	mcpName := textinput.New()
+	mcpName.Placeholder = "e.g. github, filesystem, my-tools..."
+	mcpName.Prompt = ""
+	mcpCmd := textinput.New()
+	mcpCmd.Placeholder = "e.g. npx -y @modelcontextprotocol/server-github"
+	mcpCmd.Prompt = ""
+	mcpURL := textinput.New()
+	mcpURL.Placeholder = "e.g. https://mcp.notion.com/mcp"
+	mcpURL.Prompt = ""
+
 	brk := newAskBroker()
 	if askTool, ok := tools.Lookup("ask_user").(*tool.AskUserTool); ok {
 		askTool.Ask = brk.Ask
@@ -645,7 +672,11 @@ func NewApp(
 	// ask_user tool and intelligence layer like any other provider — no
 	// prompt-injection shims are needed.
 
-	msgs := []string{"⚡ BroCode engine active. Type a prompt or /help for commands."}
+	// Fresh session: lead with the compact hero banner (blue-gradient logo +
+	// version + hint) as the first log entry. It scrolls up naturally once the
+	// user prompts. A resumed session starts from its own history instead —
+	// the banner never reappears over an existing conversation.
+	msgs := []string{welcomeBanner()}
 	if len(initialMsgs) > 0 {
 		msgs = initialMsgs
 	}
@@ -680,6 +711,9 @@ func NewApp(
 		connectNameInput:    cni,
 		connectBaseURLInput: cbi,
 		connectModelsInput:  cmi,
+		mcpAddName:          mcpName,
+		mcpAddCmd:           mcpCmd,
+		mcpAddURL:           mcpURL,
 		// Seed the up/down prompt-history with prompts from a resumed session
 		// so ArrowUp recalls previous prompts even before anything is typed
 		// this run (see CLI: -c / -continue / -session).
@@ -730,6 +764,17 @@ func (m *Model) contextWindow() int {
 		return w
 	}
 	return 128000
+}
+
+// swarmCheapModel returns the model used for mechanical swarm roles (BUILDER /
+// AUDITOR). Resolution: BROCODE_SWARM_CHEAP_MODEL env → BROCODE_COMPACT_MODEL
+// env (same "cheap work" tier) → "" (every role uses the active model). Empty
+// means no routing; the swarm falls back to a single model.
+func (m *Model) swarmCheapModel() string {
+	if cm := os.Getenv("BROCODE_SWARM_CHEAP_MODEL"); cm != "" {
+		return cm
+	}
+	return os.Getenv("BROCODE_COMPACT_MODEL")
 }
 
 func (m *Model) allProjectFiles() []string {
@@ -822,6 +867,7 @@ func (m *Model) rebuildEngine() {
 			m.scoutMgr.Runner.Adapter = m.adapter
 			m.scoutMgr.Runner.Model = m.activeModel
 			m.scoutMgr.Runner.ContextWindow = m.contextWindow()
+			m.scoutMgr.Runner.CheapModel = m.swarmCheapModel()
 			m.scoutMgr.Runner.Ask = func(question string, opts []string) (string, error) {
 				results, err := m.ask.Ask(context.Background(), []tool.AskQuestion{
 					{
@@ -843,6 +889,7 @@ func (m *Model) rebuildEngine() {
 		m.scoutMgr.Runner.Adapter = m.adapter
 		m.scoutMgr.Runner.Model = m.activeModel
 		m.scoutMgr.Runner.ContextWindow = m.contextWindow()
+		m.scoutMgr.Runner.CheapModel = m.swarmCheapModel()
 	}
 	if m.projectCtx == nil {
 		// Build the compact project overview once (tree + AGENTS/CLAUDE/README
@@ -861,6 +908,14 @@ func (m *Model) rebuildEngine() {
 		m.repoMap = repo.BuildMap(cwd, m.usage)
 	}
 	m.engine.SetRepoMap(m.repoMap.String())
+	// Detected stack (go/node/ts/...) with evidence files biases the skill
+	// catalog toward the repo and renders a one-line STACK hint ("STACK: go
+	// (go.mod, main.go)") in the system prompt.
+	stackHints := make([]prompt.Stack, 0, len(m.repoMap.Stacks))
+	for _, s := range m.repoMap.Stacks {
+		stackHints = append(stackHints, prompt.Stack{Name: s.Name, Files: s.Files})
+	}
+	m.engine.SetDetectedStacks(stackHints)
 	// The free-gateway (opencode CLI) loop runs with the gateway's own system
 	// prompt, so its model would never see the native intelligence layer
 	// (repo map, memory, project overview). Inject it into the CLI prompt so
@@ -886,10 +941,16 @@ func (m *Model) rebuildEngine() {
 			m.prog.Send(fileDiffMsg{path: path, diff: diff})
 		}
 	})
-	// Available skills (.agents/skills, .brocode/skills, global) are listed in
-	// the system prompt so the model knows what it can load and use — the
-	// general, tool-agnostic standard (never .opencode/ config in the repo).
-	m.engine.SetSkills(renderSkills(cwd))
+	// Auto-install the embedded default skill pack (.brocode/skills), then
+	// advertise the full catalog (name + description only) so the engine's
+	// prompt builder can relevance-filter it as the catalog grows. Skills are
+	// the general, tool-agnostic standard (never .opencode/ config in the repo).
+	skill.EnsureDefaultsInstalled(cwd)
+	m.engine.SetSkillCatalog(skillEntries(cwd))
+	// Runtime tuning surface (~/.config/brocode/tuning.json): block/rule
+	// toggles + skill-catalog budgets for the system prompt. Missing/corrupt
+	// file falls back to defaults — tuning never breaks a run.
+	m.engine.SetTuning(prompt.LoadTuning(prompt.DefaultTuningPath()))
 	// Cross-session project memory: built once, then wired into the engine
 	// (warm start + auto-extract on compaction) and the memory tool.
 	if m.memStore == nil {
@@ -901,6 +962,9 @@ func (m *Model) rebuildEngine() {
 	// active provider has one, so search_code re-ranks BM25 hits by vector
 	// similarity. Falls back to BM25-only on nil / bad keys / errors.
 	m.tools.SetSearchEmbedder(embedderFor(m.activeProvider))
+	// Hybrid memory retrieval: the same embedder re-ranks BM25 memory facts by
+	// semantic similarity for the warm-start excerpt. Nil keeps BM25-only.
+	m.memStore.SetEmbedder(embedderFor(m.activeProvider))
 	// Native type-error review after edits: wired to the LSP manager so
 	// edited files get real diagnostics (not just regex) before done.
 		m.engine.SetDiagnosticsChecker(func(path string) string {
@@ -991,25 +1055,22 @@ func embedderFor(p provider.DetectedProvider) *search.Embedder {
 	return search.NewEmbedder(p.Info.DefaultBaseURL, p.APIKey, "text-embedding-3-small")
 }
 
-// renderSkills builds the AVAILABLE SKILLS block for the system prompt from
-// the general tool-agnostic skill locations (.agents/skills, .brocode/skills,
-// and the global ~/.config/brocode/skills). It never reads .opencode/ from the
-// repo — skills are the agnostic standard, opencode config is not.
-func renderSkills(workspaceDir string) string {
-	loader := skill.NewLoader(workspaceDir)
-	skills := loader.All()
-	if len(skills) == 0 {
-		return ""
+// skillEntries converts the installed skills (embedded defaults installed into
+// .brocode/skills, plus user/project .agents/skills and the global
+// ~/.config/brocode/skills) into catalog entries for the engine's prompt
+// builder. Only name + description enter the prompt (progressive disclosure
+// level 1); the model loads each SKILL.md itself via read_file when relevant.
+func skillEntries(workspaceDir string) []prompt.SkillEntry {
+	all := skill.NewLoader(workspaceDir).All()
+	entries := make([]prompt.SkillEntry, 0, len(all))
+	for _, s := range all {
+		entries = append(entries, prompt.SkillEntry{
+			Name:        s.Name,
+			Description: s.Description,
+			Path:        s.Path,
+		})
 	}
-	var sb strings.Builder
-	for _, s := range skills {
-		if s.Description != "" {
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", s.Name, s.Description))
-		} else {
-			sb.WriteString(fmt.Sprintf("- %s\n", s.Name))
-		}
-	}
-	return strings.TrimSpace(sb.String())
+	return entries
 }
 
 func (m Model) Init() tea.Cmd {
@@ -1296,30 +1357,42 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				if m.showAsk && m.askCustomQ >= 0 {
 					m.askCustomInput.SetValue(m.askCustomInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
-					return m, nil
-				} else if m.showConnect {
-					switch m.connectStep {
-					case 1:
-						// Step 1 is the API key for built-in providers but the
-						// provider name for custom ones — mirror the render.
-						if m.connectCustom {
-							m.connectNameInput.SetValue(m.connectNameInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
-						} else {
-							m.connectTextInput.SetValue(m.connectTextInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
-						}
-					case 2:
+					return m, nil			} else if m.showConnect {
+				switch m.connectStep {
+				case 1:
+					// Step 1 is the API key for built-in providers but the
+					// provider name for custom ones — mirror the render.
+					if m.connectCustom {
+						m.connectNameInput.SetValue(m.connectNameInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+					} else {
 						m.connectTextInput.SetValue(m.connectTextInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
-					case 3:
-						m.connectBaseURLInput.SetValue(m.connectBaseURLInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
-					case 4:
-						// Models block is JSON — keep newlines.
-						m.connectModelsInput.InsertString(cleanClip)
 					}
-					return m, nil
+				case 2:
+					m.connectTextInput.SetValue(m.connectTextInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+				case 3:
+					m.connectBaseURLInput.SetValue(m.connectBaseURLInput.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+				case 4:
+					// Models block is JSON — keep newlines.
+					m.connectModelsInput.InsertString(cleanClip)
+				}
+				return m, nil
+			} else if m.showMCP && m.mcpAddActive {
+				// Paste into the MCP add-wizard input for the current step.
+				switch m.mcpAddStep {
+				case 1:
+					m.mcpAddName.SetValue(m.mcpAddName.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+				case 2:
+					if m.mcpAddType == 0 {
+						m.mcpAddCmd.SetValue(m.mcpAddCmd.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+					} else {
+						m.mcpAddURL.SetValue(m.mcpAddURL.Value() + strings.ReplaceAll(cleanClip, "\n", ""))
+					}
+				}
+				return m, nil
 				} else if m.showModels {
 					m.modelsQuery += strings.ReplaceAll(cleanClip, "\n", "")
 					return m, nil
-				} else if !m.showConnect && !m.showModels && !m.showDebug && !m.showSessions && !m.showAsk {
+				} else if !m.showConnect && !m.showModels && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk {
 					// Keep newlines: the prompt input is multi-line now.
 					m.promptInput.InsertString(cleanClip)
 					return m, nil
@@ -1436,7 +1509,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+f":
 			// Toggle the FILES change summary at the end of the last answer
 			// between compact per-file rows and the full +/- diff.
-			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug {
+			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug && !m.showMCP {
 				m.filesExpanded = !m.filesExpanded
 				m.renderedLog = "" // force re-render of the cached log
 				m.renderedKey = ""
@@ -1469,7 +1542,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+p":
 			// In-TUI pager for the last assistant answer (no subprocess): the
 			// viewport locks to the answer, keys scroll it, q/Esc/Ctrl+P exit.
-			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug {
+			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug && !m.showMCP {
 				contentWidth := m.width - 4
 				if contentWidth < 20 {
 					contentWidth = 80
@@ -1485,7 +1558,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "alt+k":
 			// Toggle queue management mode (see the intercept above for the
 			// keys it handles). Only useful while prompts are queued.
-			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug && len(m.pendingQueue) > 0 {
+			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug && !m.showMCP && len(m.pendingQueue) > 0 {
 				m.queueMode = !m.queueMode
 				if m.queueMode && m.queueSel >= len(m.pendingQueue) {
 					m.queueSel = len(m.pendingQueue) - 1
@@ -1535,7 +1608,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Mode switching is Shift+Tab ONLY. A bare Tab must never flip the
 			// mode (it's reserved for in-modal navigation), so it is a no-op
 			// here — and the key is still consumed so it can't bubble elsewhere.
-			if keyStr == "shift+tab" && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
+			if keyStr == "shift+tab" && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
 				next := m.mode
 				switch m.mode {
 				case "BUILDER":
@@ -1594,6 +1667,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.showMCP {
+				// ESC cancels the add wizard first, then a pending delete
+				// confirm, then closes the modal.
+				if m.mcpAddActive {
+					m.mcpAddPrev()
+				} else if m.mcpConfirm != "" {
+					m.mcpConfirm = ""
+				} else {
+					m.showMCP = false
+				}
+				return m, nil
+			}
 			if m.showDebug {
 				m.showDebug = false
 				return m, nil
@@ -1649,6 +1734,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+			if m.showMCP {
+				if m.mcpAddActive {
+					m.mcpAddNext()
+				} else if m.mcpConfirm != "" {
+					m.mcpConfirm = "" // ENTER clears a pending delete confirm
+				} else {
+					// ENTER on a server: show its tools in the chat.
+					names := m.mcpNames()
+					if m.mcpSel >= 0 && m.mcpSel < len(names) {
+						m.appendMessages(m.mcpServerDetail(names[m.mcpSel]))
+					}
+				}
+				return m, nil
+			}
+
 			if m.showConnect {
 				m.connectNext()
 				return m, nil
@@ -1700,10 +1800,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.startTurn(userQuery)
 
 		case "d", "D":
+			// MCP modal: d = delete the selected server (armed, then y/n).
+			if m.showMCP && !m.mcpAddActive && m.mcpConfirm == "" {
+				if keyStr == "d" {
+					names := m.mcpNames()
+					if m.mcpSel >= 0 && m.mcpSel < len(names) {
+						m.mcpConfirm = names[m.mcpSel]
+					}
+				}
+				return m, nil
+			}
 			// Sessions modal: d = delete the selected session, D = delete all.
 			// Outside the modal these must fall through to the prompt input
 			// below the switch (plain letters still type normally).
-			if !m.showSessions || m.sessionsConfirmID != "" {
+			if !m.showSessions || m.sessionsConfirmID != "" || m.mcpAddActive {
 				break
 			}
 			if keyStr == "d" {
@@ -1718,16 +1828,44 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "y", "n":
-			// Sessions modal confirmation: y executes the pending delete, n
-			// cancels. Outside a pending confirm these fall through to normal
-			// typing.
-			if !m.showSessions || m.sessionsConfirmID == "" {
+			// Modal confirmations: sessions y/n deletes, MCP y/n deletes a
+			// server. Outside a pending confirm these fall through to typing.
+			if m.showMCP && m.mcpConfirm != "" && !m.mcpAddActive {
+				if keyStr == "y" {
+					m.deleteMCPServer(m.mcpConfirm)
+				}
+				m.mcpConfirm = ""
+				return m, nil
+			}
+			if !m.showSessions || m.sessionsConfirmID == "" || m.mcpAddActive {
 				break
 			}
 			if keyStr == "y" {
 				m.confirmDeleteSessions()
 			}
 			m.sessionsConfirmID = ""
+			return m, nil
+
+		case "a", "r":
+			// MCP modal: a = start the add-server wizard, r = reload config.
+			// Ignored while the wizard is active (those keys type into the
+			// form) or outside the modal.
+			if !m.showMCP || m.mcpAddActive || m.mcpConfirm != "" {
+				break
+			}
+			if keyStr == "a" {
+				m.mcpAddActive = true
+				m.mcpAddStep = 0
+				m.mcpAddType = 0
+				m.mcpAddName.SetValue("")
+				m.mcpAddCmd.SetValue("")
+				m.mcpAddURL.SetValue("")
+				m.mcpAddName.Blur()
+				m.mcpAddCmd.Blur()
+				m.mcpAddURL.Blur()
+			} else {
+				m.reloadMCP()
+			}
 			return m, nil
 
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
@@ -1773,7 +1911,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionsViewport.PageUp()
 				return m, nil
 			}
-			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
+			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
 				m.logViewport.PageUp()
 				return m, nil
 			}
@@ -1783,7 +1921,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionsViewport.PageDown()
 				return m, nil
 			}
-			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions {
+			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
 				m.logViewport.PageDown()
 				return m, nil
 			}
@@ -1809,11 +1947,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionsSel--
 				return m, nil
 			}
+			if m.showMCP && m.mcpAddActive && m.mcpAddStep == 0 && m.mcpAddType > 0 {
+				m.mcpAddType--
+				return m, nil
+			}
+			if m.showMCP && !m.mcpAddActive && m.mcpSel > 0 {
+				m.mcpSel--
+				return m, nil
+			}
 			if m.showConnect && m.connectStep == 0 && m.connectProviderSel > 0 {
 				m.connectProviderSel--
 				return m, nil
 			}
-			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showAsk && !strings.Contains(m.promptInput.Value(), "\n") {
+			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk && !strings.Contains(m.promptInput.Value(), "\n") {
 				if len(m.promptHistory) > 0 {
 					if m.historyIdx > 0 {
 						m.historyIdx--
@@ -1847,11 +1993,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionsSel++
 				return m, nil
 			}
+			if m.showMCP && m.mcpAddActive && m.mcpAddStep == 0 && m.mcpAddType < 2 {
+				m.mcpAddType++
+				return m, nil
+			}
+			if m.showMCP && !m.mcpAddActive {
+				names := m.mcpNames()
+				if m.mcpSel < len(names)-1 {
+					m.mcpSel++
+				}
+				return m, nil
+			}
 			if m.showConnect && m.connectStep == 0 && m.connectProviderSel < len(provider.BuiltinProviders) {
 				m.connectProviderSel++
 				return m, nil
 			}
-			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showAsk && !strings.Contains(m.promptInput.Value(), "\n") {
+			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk && !strings.Contains(m.promptInput.Value(), "\n") {
 				if len(m.promptHistory) > 0 {
 					if m.historyIdx < len(m.promptHistory)-1 {
 						m.historyIdx++
@@ -1899,7 +2056,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connectModelsInput, cmd = m.connectModelsInput.Update(msg)
 			cmds = append(cmds, cmd)
 		}
-	} else if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showAsk {
+	} else if m.showMCP && m.mcpAddActive {
+		// MCP add wizard: route keys to whichever input the current step uses.
+		var cmd tea.Cmd
+		switch m.mcpAddStep {
+		case 1:
+			m.mcpAddName, cmd = m.mcpAddName.Update(msg)
+		case 2:
+			if m.mcpAddType == 0 {
+				m.mcpAddCmd, cmd = m.mcpAddCmd.Update(msg)
+			} else {
+				m.mcpAddURL, cmd = m.mcpAddURL.Update(msg)
+			}
+		}
+		cmds = append(cmds, cmd)
+	} else if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk {
 		var cmd tea.Cmd
 		m.promptInput, cmd = m.promptInput.Update(msg)
 		cmds = append(cmds, cmd)
@@ -1997,21 +2168,15 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		})
 
 	case "/mcp":
-		m.appendNote(m.mcpStatus())
+		// Interactive MCP manager modal: server list with connect status,
+		// empty state, add wizard (a) and delete with confirm (d).
+		m.showMCP = true
+		m.mcpSel = 0
+		m.mcpConfirm = ""
+		m.mcpAddActive = false
 
 	case "/mcp-reload":
-		if m.mcpMgr != nil {
-			m.mcpMgr.Close()
-			m.mcpMgr.LoadDefaults()
-			m.mcpMgr.Start(context.Background())
-			for _, mt := range m.mcpMgr.Tools() {
-				m.tools.Register(mt)
-			}
-			m.rebuildEngine()
-			m.appendNote(m.mcpStatus())
-		} else {
-			m.appendMessages("⚠️ MCP manager not initialized.")
-		}
+		m.reloadMCP()
 
 	case "/sessions", "/history":
 		if st := m.context.Store(); st != nil {
@@ -2206,6 +2371,119 @@ func summarizeMCP(mgr *mcp.Manager) string {
 	return "Connected MCP servers: " + strings.Join(names, ", ")
 }
 
+// reloadMCP restarts the MCP manager from disk config and re-registers its
+// tools (shared by /mcp-reload, the modal's r key, and the add/delete flows).
+func (m *Model) reloadMCP() {
+	if m.mcpMgr == nil {
+		m.appendMessages("⚠️ MCP manager not initialized.")
+		return
+	}
+	m.mcpMgr.Close()
+	m.mcpMgr.LoadDefaults()
+	m.mcpMgr.Start(context.Background())
+	for _, mt := range m.mcpMgr.Tools() {
+		m.tools.Register(mt)
+	}
+	m.rebuildEngine()
+	m.appendNote(m.mcpStatus())
+}
+
+// mcpNames returns the sorted configured server names (empty when nil).
+func (m *Model) mcpNames() []string {
+	if m.mcpMgr == nil {
+		return nil
+	}
+	return m.mcpMgr.ServerNames()
+}
+
+// mcpAddNext advances the add wizard; the final step saves the server to
+// .mcp.json and reloads.
+func (m *Model) mcpAddNext() {
+	switch m.mcpAddStep {
+	case 0: // transport picked → name
+		m.mcpAddStep = 1
+		m.mcpAddName.Focus()
+	case 1: // name → command (stdio) or URL (http/sse)
+		if strings.TrimSpace(m.mcpAddName.Value()) == "" {
+			return // name required — stay on the step
+		}
+		m.mcpAddStep = 2
+		if m.mcpAddType == 0 {
+			m.mcpAddCmd.Focus()
+		} else {
+			m.mcpAddURL.Focus()
+		}
+	case 2: // save
+		m.mcpAddName.Blur()
+		m.mcpAddCmd.Blur()
+		m.mcpAddURL.Blur()
+		m.saveMCPAdd()
+		m.mcpAddActive = false
+		m.mcpAddStep = 0
+	}
+}
+
+// mcpAddPrev steps the wizard back (or cancels it at the transport step).
+func (m *Model) mcpAddPrev() {
+	if m.mcpAddStep == 0 {
+		m.mcpAddName.Blur()
+		m.mcpAddCmd.Blur()
+		m.mcpAddURL.Blur()
+		m.mcpAddActive = false
+		return
+	}
+	m.mcpAddStep--
+	switch m.mcpAddStep {
+	case 0:
+		m.mcpAddName.Blur()
+	case 1:
+		m.mcpAddName.Focus()
+	}
+}
+
+// saveMCPAdd writes the completed wizard form into the project .mcp.json
+// (the standard cross-tool convention) and reloads the manager.
+func (m *Model) saveMCPAdd() {
+	name := strings.TrimSpace(m.mcpAddName.Value())
+	if name == "" {
+		m.appendMessages("⚠️ MCP server name is required.")
+		return
+	}
+	var cfg mcp.ServerConfig
+	switch m.mcpAddType {
+	case 1: // http
+		cfg = mcp.ServerConfig{Type: "http", URL: strings.TrimSpace(m.mcpAddURL.Value())}
+	case 2: // sse
+		cfg = mcp.ServerConfig{Type: "sse", URL: strings.TrimSpace(m.mcpAddURL.Value())}
+	default: // stdio
+		fields := strings.Fields(strings.TrimSpace(m.mcpAddCmd.Value()))
+		if len(fields) == 0 {
+			m.appendMessages("⚠️ MCP command is required (e.g. npx -y <pkg>).")
+			return
+		}
+		cfg = mcp.ServerConfig{Command: fields[0], Args: fields[1:]}
+	}
+	if err := mcp.AddServerToFile(mcp.ProjectMCPPath(), name, cfg); err != nil {
+		m.appendMessages("❌ Failed to write " + mcp.ProjectMCPPath() + ": " + err.Error())
+		return
+	}
+	m.reloadMCP()
+	m.appendMessages(fmt.Sprintf("✅ Added MCP server %q → %s", name, mcp.ProjectMCPPath()))
+}
+
+// deleteMCPServer removes a server from .mcp.json and reloads.
+func (m *Model) deleteMCPServer(name string) {
+	if name == "" {
+		return
+	}
+	if err := mcp.RemoveServerFromFile(mcp.ProjectMCPPath(), name); err != nil {
+		m.appendMessages("❌ Failed to update " + mcp.ProjectMCPPath() + ": " + err.Error())
+		return
+	}
+	m.reloadMCP()
+	m.appendMessages(fmt.Sprintf("🗑️ Removed MCP server %q from %s", name, mcp.ProjectMCPPath()))
+}
+
 // mcpStatus renders a readable status of connected MCP servers and tools.
 func (m *Model) mcpStatus() string {
 	if m.mcpMgr == nil {
@@ -2233,6 +2511,117 @@ func (m *Model) mcpStatus() string {
 		sb.WriteString(fmt.Sprintf("✅ %s — %d tool(s): %s\n", n, len(ts), strings.Join(ts, ", ")))
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+// mcpServerDetail renders one server's full status (used by ENTER in the MCP
+// modal — the compact list row shows only the tool count).
+func (m *Model) mcpServerDetail(name string) string {
+	if m.mcpMgr == nil {
+		return "⚠️ MCP not initialized."
+	}
+	var sb strings.Builder
+	sb.WriteString("🔌 " + name)
+	if e := m.mcpMgr.Errors()[name]; e != "" {
+		sb.WriteString(" — ❌ " + e)
+		return sb.String()
+	}
+	ts := m.mcpMgr.ToolNames(name)
+	sort.Strings(ts)
+	sb.WriteString(fmt.Sprintf(" — ✅ %d tool(s)\n", len(ts)))
+	if len(ts) > 0 {
+		sb.WriteString("  " + strings.Join(ts, "\n  "))
+	}
+	return sb.String()
+}
+
+// renderMCPModal renders the interactive MCP manager: server list with
+// connect status, empty state with add hint, y/n delete confirm, and the
+// add-server wizard (transport → name → command/URL).
+func (m *Model) renderMCPModal() string {
+	var sb strings.Builder
+	greenBadge := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	dangerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+
+	names := m.mcpNames()
+	toolCount := 0
+	if m.mcpMgr != nil {
+		toolCount = len(m.mcpMgr.Tools())
+	}
+	sb.WriteString(fmt.Sprintf("=== MCP Servers (/mcp) — %d server(s) · %d tool(s) ===\n", len(names), toolCount))
+
+	switch {
+	case m.mcpAddActive:
+		// Add-server wizard.
+		transports := []string{"stdio (local subprocess)", "http (streamable)", "sse (server-sent events)"}
+		if m.mcpAddStep == 0 {
+			sb.WriteString("\nSelect transport:\n")
+			for i, t := range transports {
+				cursor := "  "
+				if i == m.mcpAddType {
+					cursor = "❯ "
+				}
+				sb.WriteString(fmt.Sprintf("%s%s\n", cursor, t))
+			}
+			sb.WriteString("\n[↑/↓ transport · ENTER next · ESC cancel]")
+		} else {
+			if m.mcpAddStep == 1 {
+				sb.WriteString("\nServer name:\n  " + m.mcpAddName.View())
+			} else {
+				if m.mcpAddType == 0 {
+					sb.WriteString("\nCommand + args (stdio):\n  " + m.mcpAddCmd.View())
+				} else {
+					sb.WriteString("\nEndpoint URL (" + transports[m.mcpAddType] + "):\n  " + m.mcpAddURL.View())
+				}
+			}
+			sb.WriteString("\n\n[ENTER next · ESC back]")
+		}
+
+	case m.mcpConfirm != "":
+		// Destructive action pending: block the list and ask explicitly.
+		sb.WriteString("\n" + dangerStyle.Render("⚠️  CONFIRM DELETE — cannot be undone\n"))
+		sb.WriteString(fmt.Sprintf("Remove MCP server %q from %s?\n", m.mcpConfirm, mcp.ProjectMCPPath()))
+		sb.WriteString("\n[y] confirm delete · [n / ESC] cancel")
+
+	case len(names) == 0:
+		// Empty state: nothing configured, show the way in.
+		sb.WriteString("\nNo MCP servers configured.\n")
+		sb.WriteString("Press [a] to add one — or configure " + mcp.ProjectMCPPath() + " directly.\n")
+		sb.WriteString("\n[a] add server · [r] reload · ESC close")
+
+	default:
+		errs := m.mcpMgr.Errors()
+		for i, n := range names {
+			cursor := "  "
+			if i == m.mcpSel {
+				cursor = "❯ "
+			}
+			if e := errs[n]; e != "" {
+				sb.WriteString(fmt.Sprintf("%s❌ %s — %s\n", cursor, n, e))
+				continue
+			}
+			ts := m.mcpMgr.ToolNames(n)
+			sort.Strings(ts)
+			sb.WriteString(fmt.Sprintf("%s✅ %s — %d tool(s)\n", cursor, n, len(ts)))
+		}
+		if m.mcpSel >= 0 && m.mcpSel < len(names) && len(m.mcpMgr.ToolNames(names[m.mcpSel])) > 0 {
+			sb.WriteString(greenBadge.Render("\nENTER: show tools of the selected server"))
+		}
+		sb.WriteString("\n\n[↑/↓ navigate · a add · d delete · r reload · ENTER tools · ESC close]")
+	}
+
+	body := sb.String()
+	w := m.width - 8
+	if w < 30 {
+		w = 30
+	}
+	// Cap very long lines (tool lists) to the modal width.
+	lines := strings.Split(body, "\n")
+	for i, ln := range lines {
+		if len(ln) > w-4 {
+			lines[i] = ln[:w-4]
+		}
+	}
+	return lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2).Render(strings.Join(lines, "\n"))
 }
 
 // confirmDeleteSessions executes the pending sessions-modal delete (single
@@ -2666,6 +3055,8 @@ func (m *Model) View() tea.View {
 		content = m.renderModelsModal()
 	} else if m.showSessions {
 		content = m.renderSessionsModal()
+	} else if m.showMCP {
+		content = m.renderMCPModal()
 	} else if m.showConnect {
 		content = m.renderConnectModal()
 	} else if m.showDebug {
@@ -2989,7 +3380,7 @@ func (m *Model) buildLogChrome() (string, int) {
 	// calls, rendered ABOVE the input. Activity is transient — it never
 	// enters the conversation history (that's what made process rows pile
 	// up above the answer and hide the user's prompt).
-	if (m.turnRunning || (m.status != "Ready" && m.status != "Failed")) && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug {
+	if (m.turnRunning || (m.status != "Ready" && m.status != "Failed")) && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug && !m.showMCP {
 		spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 		frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
 		elapsed := ""
@@ -3345,8 +3736,9 @@ func (m Model) renderConnectModal() string {
 func (m Model) renderDebugModal() string {
 	var sb strings.Builder
 	sb.WriteString("=== Active LLM Context (/debug-context) ===\n\n")
-	sb.WriteString(fmt.Sprintf("Session ID: %s\nTotal Tokens: %s / %s\nEvents Count: %d\n\n",
-		m.context.SessionID(), provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()), len(m.context.Messages())))
+	u, a, t := m.context.TokenBreakdown()
+	sb.WriteString(fmt.Sprintf("Session ID: %s\nTotal Tokens: %s / %s\nEvents Count: %d\nTokenizer: %s\nTokens by kind (cumulative): user %d · assistant %d · tool output %d\n\n",
+		m.context.SessionID(), provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()), len(m.context.Messages()), tokens.CountMethod(m.activeModel), u, a, t))
 
 	for i, msg := range m.context.Messages() {
 		sb.WriteString(fmt.Sprintf("[%d] %s:\n%s\n\n", i+1, msg.Role, msg.Content))

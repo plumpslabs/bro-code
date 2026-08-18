@@ -39,26 +39,30 @@ type ProviderInfo struct {
 }
 
 // builtinContextLimits are the researched context windows for the models each
-// builtin provider lists by default (tokens).
+// builtin provider lists by default (tokens). Values come from the provider's
+// own docs / models.dev (the model DB opencode itself ships), 2026-08 — NOT
+// third-party blogs. 0 = unknown → 128k default.
 var builtinContextLimits = map[string]map[string]int{
 	"opencode": {
-		// OpenCode Zen free tier caps every free model at 200K even when the
-		// native model supports more (e.g. deepseek-v4-flash-free is 1M
-		// natively but 200K on the free tier).
+		// Per-model free-tier windows from models.dev (the DB opencode itself
+		// uses to serve these routes), 2026-08. The free tier does NOT cap
+		// every model at 200K — longcat/nemotron-ultra serve their native 1M.
 		"deepseek-v4-flash-free":      200_000,
-		"hy3-free":                    200_000,
+		"hy3-free":                    190_000,
 		"mimo-v2.5-free":              200_000,
-		"laguna-s-2.1-free":           200_000,
-		"ling-3.0-tiny-free":          200_000,
-		"longcat-2.0-free":            200_000,
-		"nemotron-3-ultra-free":       200_000,
-		"nemotron-3.5-lightning-free": 200_000,
+		"laguna-s-2.1-free":           256_000,
+		"ling-3.0-tiny-free":          262_144,
+		"longcat-2.0-free":            1_000_000,
+		"nemotron-3-ultra-free":       1_000_000,
+		"nemotron-3.5-lightning-free": 262_144,
 		"big-pickle":                  200_000,
 	},
 	"deepseek": {
-		"deepseek-chat":     128_000,
-		"deepseek-coder":    128_000,
-		"deepseek-reasoner": 128_000,
+		// deepseek-chat / deepseek-reasoner are now (2026-07-24) aliases of
+		// deepseek-v4-flash and serve the same 1M window; deepseek-coder is
+		// discontinued and no longer listed. Max output 384K for V4.
+		"deepseek-chat":     1_000_000,
+		"deepseek-reasoner": 1_000_000,
 		"deepseek-v4-flash": 1_000_000,
 		"deepseek-v4-pro":   1_000_000,
 	},
@@ -77,28 +81,62 @@ var builtinContextLimits = map[string]map[string]int{
 		"poolside/laguna-xs-2.1": 262_144,
 	},
 	"anthropic": {
+		// Legacy 3.x models keep their 200K window; the 2025-2026 generation
+		// (sonnet 4.5+/4.6, opus 4.6+/5, fable 5) serves 1M / 128K output,
+		// haiku 4.5 stays at 200K / 64K (models.dev + Anthropic docs, 2026-08).
 		"claude-3-7-sonnet-20250219": 200_000,
 		"claude-3-5-sonnet-20241022": 200_000,
 		"claude-3-5-haiku-20241022":  200_000,
+		"claude-sonnet-4-5":          1_000_000,
+		"claude-sonnet-4-6":          1_000_000,
+		"claude-sonnet-5":            1_000_000,
+		"claude-opus-4-6":            1_000_000,
+		"claude-opus-4-7":            1_000_000,
+		"claude-opus-4-8":            1_000_000,
+		"claude-opus-5":              1_000_000,
+		"claude-fable-5":             1_000_000,
+		"claude-haiku-4-5":           200_000,
 	},
 	"openai": {
-		"gpt-4o":      128_000,
-		"gpt-4o-mini": 128_000,
-		"o3-mini":     200_000,
+		// gpt-5 family = 400K (gpt-5 / mini / nano all 400K); gpt-4.1 family
+		// = ~1M; gpt-4o stays 128K; o-series reasoning = 200K. The gpt-5.4/5.5
+		// tier lists 1,050,000 per models.dev.
+		"gpt-4o":            128_000,
+		"gpt-4o-mini":       128_000,
+		"o3-mini":           200_000,
+		"gpt-5":             400_000,
+		"gpt-5-mini":        400_000,
+		"gpt-5-nano":        400_000,
+		"gpt-5.4":           1_050_000,
+		"gpt-5.5-pro":       1_050_000,
+		"gpt-4.1":           1_047_576,
+		"gpt-4.1-mini":      1_047_576,
+		"gpt-4.1-nano":      1_047_576,
+		"o3":                200_000,
+		"o4-mini":           200_000,
 	},
 	"openrouter": {
-		"deepseek/deepseek-r1":              128_000,
-		"anthropic/claude-3.5-sonnet":       200_000,
-		"meta-llama/llama-3.3-70b-instruct": 128_000,
+		// OpenRouter routes: deepseek-r1 is capped at 64K on OpenRouter (its
+		// /v1/models reports 64000); claude-3.5-sonnet is gone — the 2026
+		// generation claude IDs are all 1M; llama-3.3-70b-instruct = 131072.
+		"deepseek/deepseek-r1":              64_000,
+		"anthropic/claude-sonnet-5":         1_000_000,
+		"anthropic/claude-opus-5":           1_000_000,
+		"meta-llama/llama-3.3-70b-instruct": 131_072,
 	},
 	"groq": {
-		"llama-3.3-70b-versatile":       128_000,
-		"deepseek-r1-distill-llama-70b": 128_000,
+		"llama-3.3-70b-versatile":       131_072,
+		"deepseek-r1-distill-llama-70b": 131_072,
 	},
 	"google": {
-		"gemini-2.5-flash": 1_048_576,
-		"gemini-2.5-pro":   1_048_576,
-		"gemini-2.0-flash": 1_048_576,
+		"gemini-2.5-flash":            1_048_576,
+		"gemini-2.5-pro":              1_048_576,
+		"gemini-2.0-flash":            1_048_576,
+		"gemini-3-flash-preview":      1_048_576,
+		"gemini-3-pro-preview":        1_048_576,
+		"gemini-3.1-flash":            1_048_576,
+		"gemini-3.1-pro":              1_048_576,
+		"gemini-3.5-flash":            1_048_576,
 	}, "freebuff": {
 		// Official FreeBuff caps read from the CodebuffAI source tree
 		// (FREEBUFF_MODEL_CONTEXT_WINDOWS, 2026-08): MiniMax M3 is capped at
@@ -147,8 +185,8 @@ var BuiltinProviders = []ProviderInfo{
 		DefaultBaseURL: "https://api.deepseek.com",
 		DefaultModels: []string{
 			"deepseek-chat",
-			"deepseek-coder",
-			"deepseek-reasoner",
+			"deepseek-v4-flash",
+			"deepseek-v4-pro",
 		},
 		ContextLimits: builtinContextLimits["deepseek"],
 	},
@@ -171,6 +209,9 @@ var BuiltinProviders = []ProviderInfo{
 		APIKeyEnvVar:   "ANTHROPIC_API_KEY",
 		DefaultBaseURL: "https://api.anthropic.com",
 		DefaultModels: []string{
+			"claude-sonnet-5",
+			"claude-opus-5",
+			"claude-haiku-4-5",
 			"claude-3-7-sonnet-20250219",
 			"claude-3-5-sonnet-20241022",
 			"claude-3-5-haiku-20241022",
@@ -184,6 +225,9 @@ var BuiltinProviders = []ProviderInfo{
 		APIKeyEnvVar:   "OPENAI_API_KEY",
 		DefaultBaseURL: "https://api.openai.com/v1",
 		DefaultModels: []string{
+			"gpt-5",
+			"gpt-5-mini",
+			"gpt-5-nano",
 			"gpt-4o",
 			"gpt-4o-mini",
 			"o3-mini",
@@ -198,7 +242,8 @@ var BuiltinProviders = []ProviderInfo{
 		DefaultBaseURL: "https://openrouter.ai/api/v1",
 		DefaultModels: []string{
 			"deepseek/deepseek-r1",
-			"anthropic/claude-3.5-sonnet",
+			"anthropic/claude-sonnet-5",
+			"anthropic/claude-opus-5",
 			"meta-llama/llama-3.3-70b-instruct",
 		},
 		ContextLimits: builtinContextLimits["openrouter"],
@@ -225,6 +270,8 @@ var BuiltinProviders = []ProviderInfo{
 			"gemini-2.5-flash",
 			"gemini-2.5-pro",
 			"gemini-2.0-flash",
+			"gemini-3-flash-preview",
+			"gemini-3-pro-preview",
 		},
 		ContextLimits: builtinContextLimits["google"],
 	},
@@ -394,8 +441,12 @@ func DiscoverModels(cfg AppConfig) map[string][]string {
 		// Fetch the live model list: keyed providers fetch when a key exists;
 		// public (open-local-proxy) providers like FreeBuff fetch unconditionally.
 		if (d.APIKey != "" || d.Info.ModelsPublic) && d.Info.Protocol == "openai-compatible" && d.Info.DefaultBaseURL != "" {
-			fetched, err := FetchOpenAIModels(d.Info.DefaultBaseURL, d.APIKey)
+			fetched, liveLimits, err := FetchOpenAIModelsDetailed(d.Info.DefaultBaseURL, d.APIKey)
 			if err == nil && len(fetched) > 0 {
+				// Cache the gateway's reported context_length per model so
+				// ContextWindowFor can prefer the live per-deployment cap
+				// (e.g. poolside reports 262144 even though native is 1M).
+				recordLiveContextLimits(d.Info.ID, liveLimits)
 				if d.Info.ModelsPublic {
 					// Open proxy: the live list is authoritative — the proxy
 					// rejects any model not in it, so never offer dead models.
@@ -474,10 +525,28 @@ func ResolveModelID(models []string, model string) string {
 // GET /models endpoint. Used to populate a custom provider's model list when
 // the user didn't declare one.
 func FetchOpenAIModels(baseURL, apiKey string) ([]string, error) {
+	models, _, err := FetchOpenAIModelsDetailed(baseURL, apiKey)
+	return models, err
+}
+
+// ModelInfo is one entry from a gateway's /models endpoint: the wire model ID
+// plus its context_length when the gateway reports one (OpenAI-compatible
+// gateways expose context_length per model; poolside uses it to report the
+// real per-key deployment cap, which differs from the native model window).
+type ModelInfo struct {
+	ID            string `json:"id"`
+	ContextLength int    `json:"context_length"`
+}
+
+// FetchOpenAIModelsDetailed lists the models a gateway exposes via its
+// OpenAI-compatible GET /models endpoint, keeping each model's context_length.
+// Returns the deduplicated sorted IDs plus a map of model ID → context_length
+// for the entries that report one.
+func FetchOpenAIModelsDetailed(baseURL, apiKey string) ([]string, map[string]int, error) {
 	url := strings.TrimRight(baseURL, "/") + "/models"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -485,37 +554,62 @@ func FetchOpenAIModels(baseURL, apiKey string) ([]string, error) {
 
 	resp, err := httpClientModels.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var payload struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		Data []ModelInfo `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var models []string
+	limits := make(map[string]int)
 	seen := map[string]bool{}
 	for _, item := range payload.Data {
 		id := strings.TrimSpace(item.ID)
-		if id != "" && !seen[id] {
-			seen[id] = true
-			models = append(models, id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		models = append(models, id)
+		if item.ContextLength > 0 {
+			limits[id] = item.ContextLength
 		}
 	}
 	sort.Strings(models)
-	return models, nil
+	return models, limits, nil
+}
+
+// liveContextLimits caches the context_length values reported by a gateway's
+// /models endpoint (keyed by provider ID → model ID). Filled in during
+// DiscoverModels; ContextWindowFor consults it ahead of the static builtin
+// table because the API's per-deployment cap is authoritative (poolside
+// reports 262144 even though the model natively supports 1M).
+var liveContextLimits = map[string]map[string]int{}
+
+// recordLiveContextLimits stores per-model context_lengths fetched from a
+// provider's /models endpoint. Empty/nil input is a no-op so callers can pass
+// the fetch result unconditionally.
+func recordLiveContextLimits(providerID string, limits map[string]int) {
+	if len(limits) == 0 {
+		return
+	}
+	if liveContextLimits[providerID] == nil {
+		liveContextLimits[providerID] = make(map[string]int, len(limits))
+	}
+	for id, w := range limits {
+		liveContextLimits[providerID][id] = w
+	}
 }

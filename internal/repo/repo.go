@@ -30,6 +30,12 @@ type Map struct {
 	// EntryPoints are the files/commands a developer reaches for first
 	// (main.go, package.json bin, cmd/, index.ts, ...).
 	EntryPoints []string `json:"entry_points"`
+	// Stacks are the repo's primary languages, detected from manifest and
+	// entry-point files ("go", "node", "ts", "rust", ...), each with the
+	// files that evidence it. The prompt renders them as a one-line STACK
+	// hint ("STACK: go (go.mod, main.go)") and biases the skill catalog
+	// toward the repo's stack.
+	Stacks []Stack `json:"stacks,omitempty"`
 	// HotFiles are the top-N files by usage frequency ("" when no usage yet).
 	HotFiles []string `json:"hot_files"`
 	// Hash is the content hash of the file list this map was built from.
@@ -101,6 +107,7 @@ func BuildMap(workspaceDir string, usage *Usage) *Map {
 	m := &Map{
 		Tree:        buildTree(files, workspaceDir),
 		EntryPoints: detectEntryPoints(files),
+		Stacks:      DetectStackInfo(files),
 	}
 	if usage != nil {
 		m.HotFiles = usage.Top(10)
@@ -113,6 +120,9 @@ func BuildMap(workspaceDir string, usage *Usage) *Map {
 	if cached, err := loadMap(mapPath(workspaceDir)); err == nil &&
 		cached != nil && cached.Hash == hash {
 		cached.HotFiles = m.HotFiles // merge fresh usage
+		if len(cached.Stacks) == 0 { // maps cached before stack detection
+			cached.Stacks = DetectStackInfo(files)
+		}
 		return cached
 	}
 	m.Hash = hash
@@ -234,6 +244,87 @@ func buildTree(files []string, root string) []string {
 		}
 	}
 	return out
+}
+
+// Stack is one detected language plus the files that evidence it.
+type Stack struct {
+	Name  string   `json:"name"`
+	Files []string `json:"files,omitempty"`
+}
+
+// DetectStackInfo returns the repo's primary languages, derived
+// deterministically from manifest files (go.mod → "go", package.json →
+// "node", Cargo.toml → "rust", ...) refined by entry-point code files
+// (package.json alone cannot tell TS from JS; src/main.ts → "ts"). Each stack
+// carries its evidence files so the prompt can render "STACK: go (go.mod,
+// main.go)". Used to bias the skill catalog toward the repo's stack and to
+// emit a one-line STACK hint, so stack-specific skills follow the repo instead
+// of relying on the model to guess. Empty when no stack is detectable.
+func DetectStackInfo(files []string) []Stack {
+	byManifest := map[string]string{
+		"go.mod": "go", "go.work": "go",
+		"package.json":      "node",
+		"Cargo.toml":        "rust",
+		"pyproject.toml":    "python", "setup.py": "python", "requirements.txt": "python",
+		"pom.xml": "java", "build.gradle": "java", "build.gradle.kts": "java",
+		"Gemfile":      "ruby",
+		"composer.json": "php",
+	}
+	var stacks []Stack
+	find := func(name string) *Stack {
+		for i := range stacks {
+			if stacks[i].Name == name {
+				return &stacks[i]
+			}
+		}
+		return nil
+	}
+	add := func(name, file string) {
+		s := find(name)
+		if s == nil {
+			stacks = append(stacks, Stack{Name: name})
+			s = &stacks[len(stacks)-1]
+		}
+		for _, e := range s.Files {
+			if e == file {
+				return
+			}
+		}
+		s.Files = append(s.Files, file)
+	}
+	// Manifests first (strongest signal), then entry-point code files.
+	for _, f := range files {
+		if s, ok := byManifest[filepath.Base(f)]; ok {
+			add(s, f)
+		}
+	}
+	for _, f := range files {
+		switch filepath.Base(f) {
+		case "main.go", "cli.go":
+			add("go", f)
+		case "main.ts", "index.ts", "app.tsx", "main.tsx", "server.ts":
+			add("ts", f)
+		case "main.js", "index.js", "app.jsx", "server.js":
+			add("js", f)
+		case "main.py":
+			add("python", f)
+		case "main.rs":
+			add("rust", f)
+		case "main.java":
+			add("java", f)
+		}
+	}
+	return stacks
+}
+
+// DetectStack returns just the stack names (no evidence files).
+func DetectStack(files []string) []string {
+	info := DetectStackInfo(files)
+	names := make([]string, len(info))
+	for i, s := range info {
+		names[i] = s.Name
+	}
+	return names
 }
 
 // detectEntryPoints finds the files a developer reaches for first, by

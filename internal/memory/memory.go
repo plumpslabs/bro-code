@@ -19,12 +19,14 @@
 package memory
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/search"
@@ -47,6 +49,34 @@ type Store struct {
 	path string
 	// facts holds the current parsed facts, keyed by section.
 	facts map[string][]string
+	// embedder, when set, enables hybrid retrieval: WarmStartRelevant re-ranks
+	// the BM25 candidates by embedding cosine similarity (search_code's pattern).
+	// Nil keeps BM25-only operation.
+	embedder *search.Embedder
+	// warmMaxBytes overrides the default warm-start byte cap when the engine
+	// decides the remaining window cannot afford the full 25KB block (adaptive
+	// context budgeting). 0 keeps the default maxWarmStartBytes.
+	warmMaxBytes int
+}
+
+// SetWarmStartBudget caps the warm-start injection for the NEXT warm-start
+// call (adaptive context budgeting: when the active turn is already close to
+// the window limit, a 25KB memory block could itself trigger compaction).
+// Pass n <= 0 to restore the default cap.
+func (s *Store) SetWarmStartBudget(n int) {
+	if s == nil {
+		return
+	}
+	s.warmMaxBytes = n
+}
+
+// SetEmbedder wires an embeddings endpoint for hybrid memory retrieval. Nil
+// (or a later nil) disables it — retrieval gracefully degrades to BM25-only.
+func (s *Store) SetEmbedder(e *search.Embedder) {
+	if s == nil {
+		return
+	}
+	s.embedder = e
 }
 
 // NewStore opens (or creates on first write) the project memory file under
@@ -165,14 +195,19 @@ func (s *Store) WarmStart() string {
 	if out == "" {
 		return ""
 	}
-	// Cap by lines then bytes.
+	// Cap by lines then bytes. The byte cap is adaptive: SetWarmStartBudget
+	// (the engine's remaining-window calculation) can shrink the default 25KB.
+	maxBytes := maxWarmStartBytes
+	if s.warmMaxBytes > 0 && s.warmMaxBytes < maxBytes {
+		maxBytes = s.warmMaxBytes
+	}
 	lines := strings.Split(out, "\n")
 	if len(lines) > maxWarmStartLines {
 		lines = lines[:maxWarmStartLines]
 		out = strings.Join(lines, "\n") + "\n… (truncated)"
 	}
-	if len(out) > maxWarmStartBytes {
-		out = out[:maxWarmStartBytes] + "\n… (truncated)"
+	if len(out) > maxBytes {
+		out = out[:maxBytes] + "\n… (truncated)"
 	}
 	return out
 }
@@ -210,6 +245,14 @@ func (s *Store) WarmStartRelevant(query string) string {
 	results := idx.Search(query, 8)
 	if len(results) == 0 {
 		return s.WarmStart()
+	}
+	// Hybrid retrieval: when an embeddings endpoint is wired, re-rank the BM25
+	// candidates by semantic similarity (the top-8 cap keeps the embedding
+	// batch bounded). Any embedding failure falls back to BM25 order untouched.
+	if s.embedder != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		results = search.ReRankDocs(ctx, query, results, s.embedder, 8)
+		cancel()
 	}
 
 	var sb strings.Builder
@@ -391,6 +434,74 @@ func (s *Store) CaptureMinerFindings(answer string, files []string) error {
 		return s.Save()
 	}
 	return nil
+}
+
+// SkillGotchas returns the distilled repair lessons recorded for a skill
+// (## Skill Notes entries prefixed "<skill>: "), oldest first. The engine uses
+// it to decide when a skill has accumulated enough real gotchas (≥2) to
+// warrant proposing a patch to its SKILL.md.
+func (s *Store) SkillGotchas(skill string) []string {
+	if s == nil || skill == "" {
+		return nil
+	}
+	s.load() // ensure cross-session facts are in memory before scanning
+	prefix := skill + ": "
+	var out []string
+	for _, f := range s.facts["Skill Notes"] {
+		if after, ok := strings.CutPrefix(f, prefix); ok && strings.TrimSpace(after) != "" {
+			out = append(out, after)
+		}
+	}
+	return out
+}
+
+// CaptureOutOfScopeFindings persists the "### OUT-OF-SCOPE FINDINGS" section a
+// BUILDER turn's answer ends with (rule b13: capture off-task issues instead of
+// chasing them mid-task) into project memory, so a follow-up task can pick them
+// up instead of losing them to the chat history. Returns how many facts were
+// retained (0 when the answer has no such section or nothing new).
+func (s *Store) CaptureOutOfScopeFindings(answer string) int {
+	if s == nil || strings.TrimSpace(answer) == "" {
+		return 0
+	}
+	lines := strings.Split(answer, "\n")
+	inSection := false
+	var facts []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		// Header matches "### OUT-OF-SCOPE FINDINGS" (also bare "## " and
+		// case variations); a later '#' header ends the section.
+		if strings.HasPrefix(lower, "#") {
+			if strings.Contains(lower, "out-of-scope") || strings.Contains(lower, "out of scope") {
+				inSection = true
+			} else {
+				inSection = false
+			}
+			continue
+		}
+		if !inSection {
+			continue
+		}
+		fact := strings.TrimPrefix(strings.TrimPrefix(trimmed, "- "), "* ")
+		if len(fact) < 15 {
+			continue
+		}
+		facts = append(facts, fact)
+	}
+	if len(facts) > 5 {
+		facts = facts[:5] // keep the memory file lean
+	}
+	changed := 0
+	for _, f := range facts {
+		if ok, err := s.Retain("Notes", "Out-of-scope: "+f); err == nil && ok {
+			changed++
+		}
+	}
+	if changed > 0 {
+		_ = s.Save()
+	}
+	return changed
 }
 
 // MergeCompaction persists durable facts from a compaction summary into the

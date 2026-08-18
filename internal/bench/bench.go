@@ -52,6 +52,7 @@ type Result struct {
 	Error      string
 	Duration   time.Duration
 	Iterations int
+	ToolCalls  int // tool executions this turn (from persisted tool-result messages)
 	Tokens     int // estimated context tokens consumed by the turn
 	CostUSD    float64
 	Answer     string
@@ -104,7 +105,7 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []Result {
 				if !res.Pass {
 					status = "FAIL"
 				}
-				fmt.Fprintf(os.Stderr, "  [%s] %s (%s, %d iter, ~%d tok, $%.4f)\n", status, res.ID, res.Duration.Round(time.Millisecond), res.Iterations, res.Tokens, res.CostUSD)
+				fmt.Fprintf(os.Stderr, "  [%s] %s (%s, %d iter, %d tool calls, ~%d tok, $%.4f)\n", status, res.ID, res.Duration.Round(time.Millisecond), res.Iterations, res.ToolCalls, res.Tokens, res.CostUSD)
 			}
 		}
 	}
@@ -173,6 +174,16 @@ func (r *Runner) runCase(ctx context.Context, c Case) Result {
 	res.Iterations = iterations
 	res.Tokens = ctxMgr.TotalTokens()
 	res.CostUSD = provider.EstimateCostUSD(r.Model, ctxMgr.TotalTokens(), tokens.CountTokens(answer, r.Model))
+	// Tool calls = executed tool invocations, counted from the persisted
+	// tool-result messages (one per execution, robust across tool types —
+	// read/edit/bash/ask_user alike). The scorecard's "orchestration
+	// overhead" axis: fewer calls per task = leaner loop.
+	for _, msg := range ctxMgr.Messages() {
+		if msg.ToolCallID != "" {
+			res.ToolCalls++
+		}
+	}
+
 
 	// Verification script (optional; empty verify = pass by completing).
 	if strings.TrimSpace(c.Verify) == "" {
@@ -237,7 +248,7 @@ func RenderReport(rep Report) string {
 		if !r.Pass && r.Error != "" {
 			extra = " — " + firstLine(r.Error)
 		}
-		fmt.Fprintf(&sb, "  [%s] %-40s %6s  %3d iter  ~%5d tok  $%7.4f%s\n", status, r.ID, r.Duration.Round(time.Millisecond), r.Iterations, r.Tokens, r.CostUSD, extra)
+		fmt.Fprintf(&sb, "  [%s] %-40s %6s  %3d iter  %3d tools  ~%5d tok  $%7.4f%s\n", status, r.ID, r.Duration.Round(time.Millisecond), r.Iterations, r.ToolCalls, r.Tokens, r.CostUSD, extra)
 	}
 	return sb.String()
 }

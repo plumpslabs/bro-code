@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/memory"
+	"github.com/plumpslabs/bro-code/internal/prompt"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
@@ -636,6 +638,76 @@ func TestEngineToolBudgetResetsAfterAnswer(t *testing.T) {
 	}
 }
 
+// TestProportionalIterationBudget proves the iteration budget scales with task
+// complexity (rule b7 proportionality): a trivial ask gets a tight runway, a
+// medium ask gets 16, a cross-cutting refactor keeps the full 25.
+func TestProportionalIterationBudget(t *testing.T) {
+	e, _ := newEngineWith(&scriptedAdapter{responses: []provider.CompletionResponse{
+		{Content: "done"},
+	}})
+
+	// Simple ask -> reduced runway.
+	if _, err := e.RunTurn(context.Background(), "fix the typo in the comment", nil); err != nil {
+		t.Fatalf("simple RunTurn failed: %v", err)
+	}
+	if e.maxIterations != 10 {
+		t.Fatalf("simple task: expected 10 iterations, got %d", e.maxIterations)
+	}
+
+	// Medium ask -> 16.
+	if _, err := e.RunTurn(context.Background(), "add a new endpoint to the api", nil); err != nil {
+		t.Fatalf("medium RunTurn failed: %v", err)
+	}
+	if e.maxIterations != 16 {
+		t.Fatalf("medium task: expected 16 iterations, got %d", e.maxIterations)
+	}
+
+	// Complex cross-module refactor -> full 25.
+	if _, err := e.RunTurn(context.Background(), "refactor the payment flow and migrate the schema across modules", nil); err != nil {
+		t.Fatalf("complex RunTurn failed: %v", err)
+	}
+	if e.maxIterations != 25 {
+		t.Fatalf("complex task: expected 25 iterations, got %d", e.maxIterations)
+	}
+}
+
+// TestProportionalBudgetRespectsExplicitCap: an explicit base cap (config,
+// bench harness) always wins over the complexity tier classification.
+func TestProportionalBudgetRespectsExplicitCap(t *testing.T) {
+	e, _ := newEngineWith(&scriptedAdapter{responses: []provider.CompletionResponse{
+		{Content: "done"},
+	}})
+	e.baseMaxIterations = 40
+	if _, err := e.RunTurn(context.Background(), "fix the typo in the comment", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if e.maxIterations != 40 {
+		t.Fatalf("explicit cap must win over the tier, got %d", e.maxIterations)
+	}
+}
+
+// TestOutOfScopeFindingsCapturedToMemory: a BUILDER turn whose answer ends with
+// a ### OUT-OF-SCOPE FINDINGS section persists them to project memory (rule
+// b13) so a follow-up task can pick them up.
+func TestOutOfScopeFindingsCapturedToMemory(t *testing.T) {
+	dir := newTempGoModule(t, "package main\n\nfunc main() {}\n")
+	e, _ := newEngineWith(&scriptedAdapter{responses: []provider.CompletionResponse{
+		{Content: "Fixed the filter.\n\n### OUT-OF-SCOPE FINDINGS\n- utils.go: string-built SQL in queryUsers — use parameters\n"},
+	}})
+	e.mem = memory.NewStore(dir)
+
+	if _, err := e.RunTurn(context.Background(), "fix the filter", nil); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".brocode", "memory.md"))
+	if err != nil {
+		t.Fatalf("memory file not written: %v", err)
+	}
+	if !strings.Contains(string(data), "Out-of-scope: utils.go: string-built SQL") {
+		t.Fatalf("expected out-of-scope finding in memory, got:\n%s", data)
+	}
+}
+
 // captureAdapter records the system prompt of each request so tests can
 // assert what was injected.
 type captureAdapter struct {
@@ -655,7 +727,10 @@ func TestSkillsInjectedIntoSystemPrompt(t *testing.T) {
 	adapter := &captureAdapter{}
 
 	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
-	engine.SetSkills("- go-build: Build and test Go projects\n- team-rule: Team convention")
+	engine.SetSkillCatalog([]prompt.SkillEntry{
+		{Name: "go-build", Description: "Build and test Go projects"},
+		{Name: "team-rule", Description: "Team convention"},
+	})
 
 	if _, err := engine.RunTurn(context.Background(), "hello", nil); err != nil {
 		t.Fatalf("RunTurn failed: %v", err)
@@ -722,13 +797,108 @@ func TestNoSkillsNoBlock(t *testing.T) {
 	adapter := &captureAdapter{}
 
 	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
-	engine.SetSkills("")
+	engine.SetSkillCatalog(nil)
 
 	if _, err := engine.RunTurn(context.Background(), "hello", nil); err != nil {
 		t.Fatalf("RunTurn failed: %v", err)
 	}
 	if strings.Contains(adapter.sysPrompt, "AVAILABLE SKILLS:") {
 		t.Error("expected no AVAILABLE SKILLS block when skills are empty")
+	}
+}
+
+// TestSkillLoadTracing verifies the engine surfaces skill loads in the
+// activity HUD: a read_file on a known SKILL.md path emits a "Skill loaded"
+// event — exactly once per skill, even if the model reads the file twice —
+// while reads of ordinary files stay quiet.
+func TestSkillLoadTracing(t *testing.T) {
+	ctxMgr := bcontext.NewManager("sess", nil, 128000)
+	adapter := &mockAdapter{toolCalls: []provider.ToolCall{
+		{Name: "read_file", Arguments: `{"path": ".brocode/skills/go-workflow/SKILL.md"}`},
+		{Name: "read_file", Arguments: `{"path": ".brocode/skills/go-workflow/SKILL.md"}`}, // duplicate must dedupe
+		{Name: "read_file", Arguments: `{"path": "main.go"}`}, // not a skill file
+	}}
+	engine := NewEngine(adapter, tool.NewRegistry(), ctxMgr, "test-model")
+	engine.SetSkillCatalog([]prompt.SkillEntry{
+		{Name: "go-workflow", Description: "Verify Go projects", Path: ".brocode/skills/go-workflow/SKILL.md"},
+	})
+
+	var events []string
+	if _, err := engine.RunTurn(context.Background(), "fix the go build", func(_ LoopState, info string) {
+		events = append(events, info)
+	}); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	loaded := 0
+	for _, ev := range events {
+		if strings.Contains(ev, "Skill loaded: go-workflow") {
+			loaded++
+		}
+	}
+	if loaded != 1 {
+		t.Fatalf("expected exactly 1 skill-loaded event, got %d: %v", loaded, events)
+	}
+	// The turn summary must recap the loaded skill.
+	hasRecap := false
+	for _, ev := range events {
+		if strings.Contains(ev, "Skills loaded: go-workflow") {
+			hasRecap = true
+		}
+	}
+	if !hasRecap {
+		t.Errorf("expected turn-end skills recap, events: %v", events)
+	}
+}
+
+// TestSkillLoadMissVisible verifies a MISSED trigger is visible: a turn that
+// used tools but never loaded any catalog skill surfaces the absence in the
+// activity HUD instead of staying silent.
+func TestSkillLoadMissVisible(t *testing.T) {
+	ctxMgr := bcontext.NewManager("sess", nil, 128000)
+	adapter := &mockAdapter{toolCalls: []provider.ToolCall{
+		{Name: "list_dir", Arguments: `{"path": "."}`},
+	}}
+	engine := NewEngine(adapter, tool.NewRegistry(), ctxMgr, "test-model")
+	engine.SetSkillCatalog([]prompt.SkillEntry{
+		{Name: "go-workflow", Description: "Verify Go projects", Path: ".brocode/skills/go-workflow/SKILL.md"},
+	})
+
+	var events []string
+	if _, err := engine.RunTurn(context.Background(), "list the project", func(_ LoopState, info string) {
+		events = append(events, info)
+	}); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	found := false
+	for _, ev := range events {
+		if strings.Contains(ev, "No skills loaded this turn") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected visible no-skill-loaded miss, events: %v", events)
+	}
+}
+
+// TestSkillForRead verifies the SKILL.md path matcher resolves both relative
+// and absolute read paths, and ignores ordinary files.
+func TestSkillForRead(t *testing.T) {
+	eng := &Engine{}
+	eng.skillsEntries = []prompt.SkillEntry{
+		{Name: "go-workflow", Path: ".brocode/skills/go-workflow/SKILL.md"},
+		{Name: "ts-workflow", Path: "/abs/ws/.brocode/skills/ts-workflow/SKILL.md"},
+	}
+	cases := map[string]string{
+		".brocode/skills/go-workflow/SKILL.md":      "go-workflow",
+		"/abs/ws/.brocode/skills/go-workflow/SKILL.md": "go-workflow",
+		"/abs/ws/.brocode/skills/ts-workflow/SKILL.md": "ts-workflow",
+		"main.go":                                     "",
+		"/abs/ws/internal/loop/engine.go":              "",
+	}
+	for path, want := range cases {
+		if got := eng.skillForRead(path); got != want {
+			t.Errorf("skillForRead(%q) = %q, want %q", path, got, want)
+		}
 	}
 }
 
@@ -1133,6 +1303,40 @@ func TestGuardPreflightRedundant(t *testing.T) {
 	// Redundant lsp_scan re-call -> blocked.
 	if got := e.guardPreflightRedundant("lsp_scan", `{}`); got == "" {
 		t.Fatal("redundant lsp_scan after pre-flight must be blocked")
+	}
+}
+
+// TestCapToolOutputTruncateAndPointer verifies long tool outputs spill to
+// .brocode/artifacts/ with a head+tail digest + pointer in context, while
+// source reads and short outputs pass through untouched.
+func TestCapToolOutputTruncateAndPointer(t *testing.T) {
+	root := t.TempDir()
+	eng := &Engine{repoRoot: root}
+
+	var long strings.Builder
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&long, "line %d: some long test output\n", i)
+	}
+	full := long.String()
+
+	got := eng.capToolOutput("bash", full)
+	if !strings.Contains(got, "FULL output saved to .brocode/artifacts/bash-1.log") {
+		t.Fatalf("expected artifact pointer, got: %.300s", got)
+	}
+	if !strings.Contains(got, "line 0:") || !strings.Contains(got, "line 299:") {
+		t.Error("digest must keep head AND tail (stack traces live in the tail)")
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".brocode", "artifacts", "bash-1.log"))
+	if err != nil || string(data) != full {
+		t.Errorf("artifact file must hold the FULL output (err=%v)", err)
+	}
+	// Source reads are what the model asked for — never truncated.
+	if got := eng.capToolOutput("read_file", full); got != full {
+		t.Error("read_file must not be truncated")
+	}
+	// Short outputs pass through untouched.
+	if got := eng.capToolOutput("bash", "ok"); got != "ok" {
+		t.Errorf("short output must pass through, got %q", got)
 	}
 }
 

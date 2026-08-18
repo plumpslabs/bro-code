@@ -131,6 +131,15 @@ func (m *Manager) AddServer(name string, cfg ServerConfig) {
 	m.configs[name] = cfg
 }
 
+// Config returns the config registered for a server name (ok=false when
+// unknown). Used by the CLI list command.
+func (m *Manager) Config(name string) (ServerConfig, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cfg, ok := m.configs[name]
+	return cfg, ok
+}
+
 // ServerNames returns the configured server names in stable (sorted) order.
 func (m *Manager) ServerNames() []string {
 	m.mu.Lock()
@@ -213,6 +222,19 @@ func (m *Manager) Tools() []*MCPTool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.tools
+}
+
+// ToolNames returns the tool names exposed by one server (empty when unknown).
+func (m *Manager) ToolNames(server string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for _, t := range m.tools {
+		if t.Server() == server {
+			out = append(out, t.ToolName())
+		}
+	}
+	return out
 }
 
 // Close shuts down all running servers.

@@ -130,6 +130,89 @@ func TestSemanticCacheRoundtrip(t *testing.T) {
 	}
 }
 
+// TestReRankDocsNeverBreaksBM25 verifies the in-memory variant (used by
+// project-memory hybrid retrieval) degrades gracefully: nil embedder and
+// failing endpoint both return the BM25 order untouched.
+func TestReRankDocsNeverBreaksBM25(t *testing.T) {
+	docs := []Document{
+		{ID: "auth", Title: "Auth", Body: "func login(token string) { }"},
+		{ID: "pay", Title: "Pay", Body: "func charge(amount int) { }"},
+	}
+	idx := NewBM25(docs)
+	results := idx.Search("login token", 2)
+
+	// Nil embedder → BM25 order unchanged.
+	nilOut := ReRankDocs(context.Background(), "login token", results, nil, 2)
+	if len(nilOut) != len(results) || nilOut[0].Doc.ID != results[0].Doc.ID {
+		t.Errorf("nil embedder must keep BM25 order: %v", idsOf(nilOut))
+	}
+
+	// Failing endpoint → BM25 order unchanged.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", 500)
+	}))
+	defer srv.Close()
+	bad := NewEmbedder(srv.URL, "k", "m")
+	if out := ReRankDocs(context.Background(), "login token", results, bad, 2); len(out) != len(results) || out[0].Doc.ID != results[0].Doc.ID {
+		t.Errorf("failing embedder must keep BM25 order: %v", idsOf(out))
+	}
+}
+
+// TestReRankDocsSemanticReorder verifies a working endpoint re-ranks by cosine
+// similarity: a semantically relevant doc surfaces first even when BM25 ranked
+// it lower. The stub returns [1,0] for anything mentioning "login" and [0,1]
+// otherwise, so the login doc always wins the re-rank.
+func TestReRankDocsSemanticReorder(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad", 400)
+			return
+		}
+		var data []map[string]any
+		for _, in := range body.Input {
+			if strings.Contains(in, "login") {
+				data = append(data, map[string]any{"embedding": []float32{1, 0}})
+			} else {
+				data = append(data, map[string]any{"embedding": []float32{0, 1}})
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer srv.Close()
+	e := NewEmbedder(srv.URL, "k", "m")
+
+	docs := []Document{
+		// "pay" matches "token" heavily in BM25 but is semantically a payment
+		// stub; "auth" is the truly relevant doc. Semantic re-rank must surface
+		// auth first even when BM25 would favor the token-heavy stub.
+		{ID: "pay", Title: "Pay", Body: "token token token token token token token token"},
+		{ID: "auth", Title: "Auth", Body: "func login(token string) login auth"},
+	}
+	idx := NewBM25(docs)
+	results := idx.Search("login token", 2)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 BM25 candidates, got %d", len(results))
+	}
+	out := ReRankDocs(context.Background(), "login token", results, e, 2)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(out))
+	}
+	if out[0].Doc.ID != "auth" {
+		t.Errorf("semantic re-rank must surface the auth doc first, got %v", idsOf(out))
+	}
+}
+
+func idsOf(results []bm25Result) []string {
+	out := make([]string, len(results))
+	for i, r := range results {
+		out[i] = r.Doc.ID
+	}
+	return out
+}
+
 func TestReRankFallsBackOnEmbeddingFailure(t *testing.T) {
 	root := t.TempDir()
 	// A server that always errors — ReRank must return BM25 candidates intact.

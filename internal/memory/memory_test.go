@@ -11,6 +11,72 @@ import (
 	"github.com/plumpslabs/bro-code/internal/store"
 )
 
+// TestCaptureOutOfScopeFindings verifies the ### OUT-OF-SCOPE FINDINGS parser:
+// bullets under the section are persisted to Notes (prefixed), other sections
+// are ignored, and an answer without the section retains nothing.
+func TestCaptureOutOfScopeFindings(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+
+	ans := `Fixed the filter. Done.
+
+### OUT-OF-SCOPE FINDINGS
+- src/orders.go: N+1 query in listOrders — batch the fetch
+- auth.go: hardcoded secret left in a test fixture
+
+## Notes
+- unrelated note
+`
+	n := s.CaptureOutOfScopeFindings(ans)
+	if n != 2 {
+		t.Fatalf("expected 2 findings retained, got %d", n)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".brocode", "memory.md"))
+	if err != nil {
+		t.Fatalf("memory file not written: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "Out-of-scope: src/orders.go: N+1 query in listOrders") {
+		t.Errorf("N+1 finding missing from memory:\n%s", got)
+	}
+	if !strings.Contains(got, "Out-of-scope: auth.go: hardcoded secret") {
+		t.Errorf("secret finding missing from memory:\n%s", got)
+	}
+	if strings.Contains(got, "unrelated note") {
+		t.Errorf("content outside the findings section must NOT be captured:\n%s", got)
+	}
+
+	// No section -> 0 retained, and a repeat call must not duplicate.
+	if n := s.CaptureOutOfScopeFindings("just an answer, no findings"); n != 0 {
+		t.Fatalf("expected 0 retained without the section, got %d", n)
+	}
+	if n := s.CaptureOutOfScopeFindings(ans); n != 0 {
+		t.Fatalf("repeat capture must dedupe, got %d retained", n)
+	}
+}
+
+// TestSkillGotchas verifies the Skill Notes collector: per-skill distilled
+// lessons come back in order, other sections are ignored, unknown skills get
+// nothing.
+func TestSkillGotchas(t *testing.T) {
+	s := NewStore(t.TempDir())
+	_, _ = s.Retain("Skill Notes", "go-workflow: Verification failed on main.go — fixed after 1 repair attempt")
+	_, _ = s.Retain("Skill Notes", "ts-workflow: tsc --noEmit failed on a stale build artifact")
+	_, _ = s.Retain("Skill Notes", "go-workflow: interface satisfaction usually means a missing method")
+	_, _ = s.Retain("Gotchas", "go-workflow: wrong section — must not be picked up")
+
+	got := s.SkillGotchas("go-workflow")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 go-workflow gotchas, got %d: %v", len(got), got)
+	}
+	if !strings.Contains(got[0], "Verification failed") || !strings.Contains(got[1], "interface satisfaction") {
+		t.Errorf("wrong order/content: %v", got)
+	}
+	if s.SkillGotchas("rust-workflow") != nil {
+		t.Error("expected no gotchas for a skill with no entries")
+	}
+}
+
 func TestRetainAndList(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir)
@@ -61,6 +127,41 @@ func TestWarmStartRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(ws, "jangan pake npx tsc") {
 		t.Errorf("warm start missing gotchas:\n%s", ws)
+	}
+}
+
+// TestAdaptiveWarmStartBudget verifies SetWarmStartBudget shrinks the warm-start
+// byte cap below the default (adaptive context budgeting when the window is
+// nearly full), without ever growing past the built-in max.
+func TestAdaptiveWarmStartBudget(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	bigFact := strings.Repeat("content line to pad warm start output beyond cap ", 800)
+	s.Retain("Notes", bigFact)
+
+	full := s.WarmStart()
+	if len(full) <= maxWarmStartBytes {
+		t.Errorf("fixture too small: warm start = %d bytes, want > default cap %d", len(full), maxWarmStartBytes)
+	}
+	if !strings.HasSuffix(full, "… (truncated)") {
+		t.Error("default cap should truncate the oversized warm start")
+	}
+
+	s.SetWarmStartBudget(512)
+	capped := s.WarmStart()
+	// The byte budget caps the CONTENT; the "… (truncated)" marker adds a
+	// fixed suffix on top, so assert the content portion stays within budget.
+	if len(capped) > 512+len("\n… (truncated)") {
+		t.Errorf("adaptive budget ignored: %d bytes > 512+suffix", len(capped))
+	}
+	if !strings.Contains(capped, "content line to pad warm start") {
+		t.Error("adaptive budget should keep the leading content")
+	}
+
+	s.SetWarmStartBudget(0)
+	restored := s.WarmStart()
+	if len(restored) != len(full) {
+		t.Errorf("budget reset should restore default cap: got %d, want %d", len(restored), len(full))
 	}
 }
 

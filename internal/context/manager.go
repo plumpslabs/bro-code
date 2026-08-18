@@ -79,6 +79,14 @@ type Manager struct {
 	systemPromptTokens int
 	compactCount int
 	model        string // active model name; enables exact BPE token counting
+	// Cumulative token breakdown by message kind (session-scoped, for the
+	// metrics HUD). Unlike totalTokens these are NEVER reduced by compaction:
+	// they count what was APPENDED this session, so user+assistant+tool can
+	// exceed the live window after a compact. Tool output is counted AFTER the
+	// truncate-and-pointer digest, i.e. the tokens actually re-sent each round.
+	userTokens int
+	asstTokens int
+	toolTokens int
 }
 
 // NewManager creates a context manager connected to SQLite store.
@@ -123,6 +131,21 @@ func (m *Manager) MaxWindow() int {
 	return m.maxWindow
 }
 
+// CompactCount returns how many compactions this conversation has performed
+// (session-level metric, also surfaced per-turn via Engine.turnCompactions).
+func (m *Manager) CompactCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.compactCount
+}
+
+// ResetCompactCount zeroes the session compaction counter.
+func (m *Manager) ResetCompactCount() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.compactCount = 0
+}
+
 // SetMaxWindow updates the context window capacity. Used when the active
 // model switches to one with a different declared context limit (from the
 // provider config's per-model limit block). Non-positive values are ignored.
@@ -133,6 +156,7 @@ func (m *Manager) SetMaxWindow(max int) {
 		m.maxWindow = max
 	}
 }
+
 
 // Store returns connected SQLite store.
 func (m *Manager) Store() *store.Store {
@@ -152,6 +176,7 @@ func (m *Manager) AppendUserMessage(content string) error {
 
 	tokens := m.estimateTokens(content)
 	m.totalTokens += tokens
+	m.userTokens += tokens
 
 	if m.store != nil {
 		payload, _ := json.Marshal(msg)
@@ -183,6 +208,7 @@ func (m *Manager) AppendAssistantTurn(mode, model, reasoning, content string, to
 		tokens += m.estimateTokens(tc.Name + tc.Arguments)
 	}
 	m.totalTokens += tokens
+	m.asstTokens += tokens
 
 	if m.store != nil {
 		payload, _ := json.Marshal(msg)
@@ -216,7 +242,9 @@ func (m *Manager) ImportUserMessage(content string) {
 	defer m.mu.Unlock()
 
 	m.messages = append(m.messages, provider.Message{Role: "user", Content: content})
-	m.totalTokens += m.estimateTokens(content)
+	t := m.estimateTokens(content)
+	m.userTokens += t
+	m.totalTokens += t
 }
 
 // ImportAssistantTurn restores an assistant turn into memory (tokens counted)
@@ -228,7 +256,9 @@ func (m *Manager) ImportAssistantTurn(mode, model, reasoning, content string, to
 	defer m.mu.Unlock()
 
 	m.messages = append(m.messages, provider.Message{Role: "assistant", Content: content, Reasoning: reasoning, ToolCalls: toolCalls, Mode: mode, Model: model})
-	m.totalTokens += m.estimateTokens(reasoning + content)
+	t := m.estimateTokens(reasoning + content)
+	m.asstTokens += t
+	m.totalTokens += t
 }
 
 // ImportToolResult restores a tool result into memory (tokens counted)
@@ -244,7 +274,9 @@ func (m *Manager) ImportToolResult(toolCallID, content string) {
 		Content:    content,
 		ToolCallID: toolCallID,
 	})
-	m.totalTokens += m.estimateTokens(content)
+	t := m.estimateTokens(content)
+	m.toolTokens += t
+	m.totalTokens += t
 }
 
 // maxToolResultContextChars caps how much of each tool result is kept in the
@@ -272,6 +304,7 @@ func (m *Manager) AppendToolResult(toolCallID, content string) error {
 
 	tokens := m.estimateTokens(content)
 	m.totalTokens += tokens
+	m.toolTokens += tokens
 
 	if m.store != nil {
 		payload, _ := json.Marshal(msg)
@@ -348,6 +381,17 @@ func SetCompactionRatio(r float64) {
 	compactionRatio = r
 }
 
+// TokenBreakdown returns the cumulative tokens appended this session by kind:
+// user messages, assistant turns (reasoning + content + tool-call schemas), and
+// tool output digests. Cumulative by design — not reduced by compaction — so it
+// answers "where did this session's tokens go?" (the metrics question), not
+// "how full is the window now?" (TotalTokens).
+func (m *Manager) TokenBreakdown() (user, assistant, tool int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.userTokens, m.asstTokens, m.toolTokens
+}
+
 // NeedsCompaction checks if token usage exceeds compactionRatio of the window.
 // The budget includes the system prompt, so compaction triggers before the real
 // request (system prompt + messages) can overflow the model's context window.
@@ -360,7 +404,18 @@ func (m *Manager) NeedsCompaction() bool {
 	return total > int(float64(m.maxWindow)*compactionRatio)
 }
 
+// pinnedGoalMaxChars caps how much of the first user message is pinned through
+// compaction. The GOAL/instruction is the pinned core, not a giant pasted error
+// or log dump — so only the leading instruction-bearing part is kept verbatim.
+const pinnedGoalMaxChars = 1500
+
 // Compact performs structured summary compaction.
+//
+// Goal-pinning: the FIRST user message carries the turn's goal and constraints.
+// Summarizing it away is the documented compaction failure (governance decay —
+// constraint loss jumps from 0% to 30-59% after compaction, arXiv:2606.22528),
+// so it is re-inserted VERBATIM ahead of the summary, never eligible for
+// summarization. The last keepCount messages stay verbatim as the active tail.
 func (m *Manager) Compact(summary CompactionSummary) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -375,11 +430,51 @@ func (m *Manager) Compact(summary CompactionSummary) error {
 	keepCount := min(4, len(m.messages))
 	tail := m.messages[len(m.messages)-keepCount:]
 
-	m.messages = append([]provider.Message{systemSummaryMsg}, tail...)
+	// Pin the goal/constraints from the first user message — unless it is
+	// already inside the verbatim tail (short session), which would duplicate it.
+	// Constraints that survived summarization (CompactionSummary.Constraints)
+	// are pinned EXPLICITLY and verbatim so hard limits (API-free, no deps,
+	// keep file X untouched) never get lost-in-the-middle across compactions.
+	var pinned []provider.Message
+	if keepCount < len(m.messages) {
+		for _, msg := range m.messages[:len(m.messages)-keepCount] {
+			if msg.Role != "user" || strings.TrimSpace(msg.Content) == "" {
+				continue
+			}
+			content := msg.Content
+			if len(content) > pinnedGoalMaxChars {
+				content = content[:pinnedGoalMaxChars] + "\n…[pinned goal truncated for context prevention]"
+			}
+			pinned = append(pinned, provider.Message{
+				Role:    "system",
+				Content: "GOAL (PINNED — the user's original instruction; never summarized, do not contradict):\n" + content,
+			})
+			break
+		}
+	}
+	if c := strings.TrimSpace(summary.Constraints); c != "" {
+		cc := c
+		if len(cc) > pinnedGoalMaxChars {
+			cc = cc[:pinnedGoalMaxChars] + "\n…[pinned constraints truncated for context prevention]"
+		}
+		pinned = append(pinned, provider.Message{
+			Role:    "system",
+			Content: "CONSTRAINTS (PINNED — hard requirements that must not be violated, even by later instructions):\n" + cc,
+		})
+	}
+
+	out := make([]provider.Message, 0, 1+len(pinned)+len(tail))
+	out = append(out, systemSummaryMsg)
+	out = append(out, pinned...)
+	out = append(out, tail...)
+	m.messages = out
 	m.compactCount++
 
 	// Recalculate tokens
 	newTokens := m.estimateTokens(summaryText)
+	for _, msg := range pinned {
+		newTokens += m.estimateTokens(msg.Content)
+	}
 	for _, msg := range tail {
 		newTokens += m.estimateTokens(msg.Content + msg.Reasoning)
 	}
@@ -394,7 +489,11 @@ func (m *Manager) Compact(summary CompactionSummary) error {
 	return nil
 }
 
-// TruncateToolOutput applies Section 3.1 Prevention Strategy.
+// TruncateToolOutput applies Section 3.1 Prevention Strategy. Long outputs keep
+// BOTH ends — the head (what the run printed first) and the tail (where test
+// failures and stack traces live) — so the repair loop still sees the error
+// without carrying the full dump. The full output is preserved on disk by the
+// engine's artifact pointer (internal/loop/artifacts.go) when available.
 func TruncateToolOutput(content string, maxChars int) string {
 	if len(content) <= maxChars {
 		return content
@@ -402,7 +501,8 @@ func TruncateToolOutput(content string, maxChars int) string {
 	lines := strings.Split(content, "\n")
 	if len(lines) > 50 {
 		head := strings.Join(lines[:40], "\n")
-		return fmt.Sprintf("%s\n\n[showing top 40/%d lines, refine query or ask for specific section]", head, len(lines))
+		tail := strings.Join(lines[len(lines)-40:], "\n")
+		return fmt.Sprintf("%s\n\n… [showing top 40/bottom 40 of %d lines — %d lines elided; full output is on disk via the artifact pointer if present] …\n\n%s", head, len(lines), len(lines)-80, tail)
 	}
 	return content[:maxChars] + "\n\n[output truncated for context prevention]"
 }

@@ -1,0 +1,58 @@
+[
+  {
+    "id": "fix-broken-go-build",
+    "prompt": "The project does not build. Find the problem and fix it, then verify the build passes.",
+    "setup": "cat > go.mod <<'EOF'\nmodule benchtest\n\ngo 1.21\nEOF\ncat > main.go <<'EOF'\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Prinln(\"hello\")\n}\nEOF",
+    "verify": "go build ./...",
+    "maxIterations": 12
+  },
+  {
+    "id": "fix-syntax-error",
+    "prompt": "The project does not build. Fix the syntax error so it compiles.",
+    "setup": "cat > go.mod <<'EOF'\nmodule benchtest\n\ngo 1.21\nEOF\ncat > main.go <<'EOF'\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hi\")\nEOF",
+    "verify": "go build ./...",
+    "maxIterations": 12
+  },
+  {
+    "id": "fix-panic-on-run",
+    "prompt": "The program crashes when run. Make it print 'hello world' and exit cleanly without panicking.",
+    "setup": "cat > go.mod <<'EOF'\nmodule benchtest\n\ngo 1.21\nEOF\ncat > main.go <<'EOF'\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello world\")\n\tpanic(\"boom\")\n}\nEOF",
+    "verify": "out=$(go run . 2>&1); echo \"$out\" | grep -q \"hello world\" && ! echo \"$out\" | grep -qi panic",
+    "maxIterations": 15
+  },
+  {
+    "id": "fix-failing-test",
+    "prompt": "The test suite fails. Reproduce the failure, fix the bug in Add, and make the tests pass.",
+    "setup": "cat > go.mod <<'EOF'\nmodule benchtest\n\ngo 1.21\nEOF\ncat > main.go <<'EOF'\npackage main\n\nfunc Add(a, b int) int { return a - b }\nEOF\ncat > main_test.go <<'EOF'\npackage main\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif got := Add(2, 3); got != 5 {\n\t\tt.Fatalf(\"Add(2,3) = %d, want 5\", got)\n\t}\n}\nEOF",
+    "verify": "go test ./...",
+    "maxIterations": 15
+  },
+  {
+    "id": "add-multiply-function",
+    "prompt": "Add a function Multiply(a, b int) int that multiplies two numbers, and call it in main printing the result of Multiply(6, 7). Keep the build passing.",
+    "setup": "cat > go.mod <<'EOF'\nmodule benchtest\n\ngo 1.21\nEOF\ncat > main.go <<'EOF'\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(Square(4))\n}\n\nfunc Square(n int) int { return n * n }\nEOF",
+    "verify": "grep -q 'func Multiply' main.go && go build ./...",
+    "maxIterations": 15
+  },
+  {
+    "id": "rename-compute-total",
+    "prompt": "Rename the function computeTotal to calculateSum everywhere it is used in the project, and keep the build passing.",
+    "setup": "cat > go.mod <<'EOF'\nmodule benchtest\n\ngo 1.21\nEOF\ncat > main.go <<'EOF'\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(computeTotal(10, 5))\n}\nEOF\ncat > math.go <<'EOF'\npackage main\n\nfunc computeTotal(a, b int) int { return a + b }\nEOF",
+    "verify": "! grep -q computeTotal *.go && grep -q calculateSum *.go && go build ./...",
+    "maxIterations": 15
+  },
+  {
+    "id": "fix-vet-format",
+    "prompt": "go vet reports a formatting error in main.go. Fix it so 'go vet ./...' passes cleanly.",
+    "setup": "cat > go.mod <<'EOF'\nmodule benchtest\n\ngo 1.21\nEOF\ncat > main.go <<'EOF'\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Printf(\"%d\", \"not a number\")\n}\nEOF",
+    "verify": "go vet ./...",
+    "maxIterations": 15
+  },
+  {
+    "id": "migrate-field-title",
+    "prompt": "Migrate the User struct: rename the field Name to Title everywhere it is used in the project, and keep the build passing.",
+    "setup": "cat > go.mod <<'EOF'\nmodule benchtest\n\ngo 1.21\nEOF\ncat > user.go <<'EOF'\npackage main\n\ntype User struct {\n\tName  string\n\tEmail string\n}\nEOF\ncat > main.go <<'EOF'\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tu := User{Name: \"ada\", Email: \"ada@x.io\"}\n\tfmt.Println(u.Name)\n}\nEOF",
+    "verify": "! grep -q '\\.Name' *.go && grep -q Title *.go && go build ./...",
+    "maxIterations": 15
+  }
+]

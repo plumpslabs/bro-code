@@ -21,6 +21,82 @@ func writeTree(t *testing.T, root string, files []string) {
 	}
 }
 
+// TestDetectStack pins the manifest/entry-point language detection that feeds
+// the STACK hint and the skill-catalog bias.
+func TestDetectStack(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []string
+		want  []string
+	}{
+		{name: "go repo", files: []string{"go.mod", "main.go", "internal/app/app.go"}, want: []string{"go"}},
+		{name: "ts repo via package.json + entry point", files: []string{"package.json", "src/main.ts"}, want: []string{"node", "ts"}},
+		{name: "js repo", files: []string{"package.json", "index.js"}, want: []string{"node", "js"}},
+		{name: "rust", files: []string{"Cargo.toml", "src/main.rs"}, want: []string{"rust"}},
+		{name: "python", files: []string{"pyproject.toml", "app/main.py"}, want: []string{"python"}},
+		{name: "no stack", files: []string{"README.md", "notes.txt"}, want: nil},
+		{name: "dedup", files: []string{"go.mod", "go.work", "cmd/main.go"}, want: []string{"go"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DetectStack(tc.files)
+			if len(got) != len(tc.want) {
+				t.Fatalf("DetectStack(%v) = %v, want %v", tc.files, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("DetectStack(%v) = %v, want %v", tc.files, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestDetectStackInfo verifies each detected stack carries its evidence files
+// (manifest + entry point) for the "STACK: go (go.mod, main.go)" prompt hint.
+func TestDetectStackInfo(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []string
+		want  map[string][]string
+	}{
+		{
+			name:  "go repo",
+			files: []string{"go.mod", "main.go", "internal/app/app.go"},
+			want:  map[string][]string{"go": {"go.mod", "main.go"}},
+		},
+		{
+			name:  "ts repo",
+			files: []string{"package.json", "src/main.ts"},
+			want:  map[string][]string{"node": {"package.json"}, "ts": {"src/main.ts"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DetectStackInfo(tc.files)
+			if len(got) != len(tc.want) {
+				t.Fatalf("DetectStackInfo(%v) = %+v, want %d stacks", tc.files, got, len(tc.want))
+			}
+			for _, s := range got {
+				wantFiles, ok := tc.want[s.Name]
+				if !ok {
+					t.Errorf("unexpected stack %q", s.Name)
+					continue
+				}
+				if len(s.Files) != len(wantFiles) {
+					t.Errorf("stack %q files = %v, want %v", s.Name, s.Files, wantFiles)
+				}
+				for i := range wantFiles {
+					if s.Files[i] != wantFiles[i] {
+						t.Errorf("stack %q files = %v, want %v", s.Name, s.Files, wantFiles)
+						break
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestBuildMapDetectsEntryPointsAndSkipsNoise(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, []string{

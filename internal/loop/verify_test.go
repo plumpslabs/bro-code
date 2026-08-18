@@ -110,6 +110,78 @@ func TestPlanVerificationPythonRustJava(t *testing.T) {
 	}
 }
 
+func TestPlanVerificationRuby(t *testing.T) {
+	// Gemfile without spec/test → nothing (no false failures).
+	writeFixture(t, map[string]string{"Gemfile": "source 'https://rubygems.org'\n"})
+	if cmds := planVerification(); len(cmds) != 0 {
+		t.Errorf("Gemfile without tests must plan nothing, got %v", cmds)
+	}
+	// Gemfile + spec/ → bundle exec rspec.
+	writeFixture(t, map[string]string{"Gemfile": "", "spec/foo_spec.rb": "RSpec.describe 'x' do\nend\n"})
+	cmds := planVerification()
+	if len(cmds) != 1 || cmds[0].name != "bundle" || strings.Join(cmds[0].args, " ") != "exec rspec" {
+		t.Errorf("unexpected ruby rspec check: %+v", cmds)
+	}
+	// Gemfile + test/ only → bundle exec rake test (minitest project).
+	writeFixture(t, map[string]string{"Gemfile": "", "test/foo_test.rb": "require 'minitest/autorun'\n"})
+	cmds = planVerification()
+	if len(cmds) != 1 || cmds[0].name != "bundle" || strings.Join(cmds[0].args, " ") != "exec rake test" {
+		t.Errorf("unexpected ruby minitest check: %+v", cmds)
+	}
+}
+
+func TestPlanVerificationPHP(t *testing.T) {
+	// Bare composer.json (deps never installed) → nothing, not a false failure.
+	writeFixture(t, map[string]string{"composer.json": "{}"})
+	if cmds := planVerification(); len(cmds) != 0 {
+		t.Errorf("uninstalled composer.json must plan nothing, got %v", cmds)
+	}
+	// composer.lock + vendor → composer validate (+ phpunit when configured+installed).
+	writeFixture(t, map[string]string{
+		"composer.json":      "{}",
+		"composer.lock":      "{}",
+		"phpunit.xml":        "<phpunit/>",
+		"vendor/bin/phpunit": "#!/usr/bin/env php",
+	})
+	cmds := planVerification()
+	if len(cmds) != 2 {
+		t.Fatalf("expected composer validate + phpunit, got %v", cmds)
+	}
+	if cmds[0].name != "composer" || strings.Join(cmds[0].args, " ") != "validate --no-check-publish" {
+		t.Errorf("unexpected composer cmd: %+v", cmds[0])
+	}
+	if cmds[1].name != "vendor/bin/phpunit" {
+		t.Errorf("expected vendor/bin/phpunit, got %+v", cmds[1])
+	}
+	// phpunit.xml configured but vendor NOT installed → no phpunit step.
+	writeFixture(t, map[string]string{"composer.json": "{}", "composer.lock": "{}", "phpunit.xml": "<phpunit/>"})
+	cmds = planVerification()
+	if len(cmds) != 1 || cmds[0].name != "composer" {
+		t.Errorf("uninstalled phpunit must not be planned, got %v", cmds)
+	}
+}
+
+func TestPlanVerificationDotNet(t *testing.T) {
+	// .csproj → dotnet build.
+	writeFixture(t, map[string]string{"App.csproj": "<Project/>"})
+	cmds := planVerification()
+	if len(cmds) != 1 || cmds[0].name != "dotnet" || strings.Join(cmds[0].args, " ") != "build --nologo" {
+		t.Errorf("unexpected dotnet check: %+v", cmds)
+	}
+	// Test project (*Tests.csproj) → build + test --no-build.
+	writeFixture(t, map[string]string{"App.Tests.csproj": "<Project/>"})
+	cmds = planVerification()
+	if len(cmds) != 2 || cmds[1].args[0] != "test" {
+		t.Errorf("expected dotnet build + test, got %v", cmds)
+	}
+	// .sln also detected.
+	writeFixture(t, map[string]string{"App.sln": ""})
+	cmds = planVerification()
+	if len(cmds) != 1 || cmds[0].name != "dotnet" {
+		t.Errorf("expected dotnet build for sln, got %v", cmds)
+	}
+}
+
 func TestPlanVerificationNoConfig(t *testing.T) {
 	writeFixture(t, map[string]string{"README.md": "hi"})
 	if cmds := planVerification(); len(cmds) != 0 {

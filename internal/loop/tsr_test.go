@@ -217,6 +217,77 @@ func TestLessonAutoExtractOnRepairSuccess(t *testing.T) {
 	}
 }
 
+// TestProposeSkillEvolution verifies the full self-evolution flow: below the
+// 2-gotcha threshold nothing is written; at the threshold the engine proposes
+// a GOTCHAS.md patch next to the skill's SKILL.md and surfaces a HUD note.
+func TestProposeSkillEvolution(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "go-workflow")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := newEngineWith(&scriptedAdapter{})
+	e.mem = memory.NewStore(dir)
+	e.skillDirs = map[string]string{"go-workflow": skillDir}
+	e.loadedSkills = map[string]bool{"go-workflow": true}
+
+	noted := false
+	e.progressHandler = func(state LoopState, info string) {
+		if strings.Contains(info, "proposed patch") {
+			noted = true
+		}
+	}
+
+	// One gotcha — below the 2+ threshold, no proposal.
+	e.tagSkillLesson("Verification failed on main.go — fixed after 1 repair attempt")
+	e.proposeSkillEvolution("go-workflow")
+	if _, err := os.Stat(filepath.Join(skillDir, "GOTCHAS.md")); err == nil {
+		t.Fatal("proposal must not be written below the 2-gotcha threshold")
+	}
+
+	// Second gotcha — threshold met, proposal written + HUD note.
+	e.tagSkillLesson("interface satisfaction usually means a missing method")
+	e.proposeSkillEvolution("go-workflow")
+	data, err := os.ReadFile(filepath.Join(skillDir, "GOTCHAS.md"))
+	if err != nil {
+		t.Fatalf("proposal not written at threshold: %v", err)
+	}
+	if !strings.Contains(string(data), "Verification failed") || !strings.Contains(string(data), "interface satisfaction") {
+		t.Errorf("proposal missing gotchas:\n%s", data)
+	}
+	if !noted {
+		t.Error("expected HUD note about the proposed patch")
+	}
+}
+
+// TestTagSkillLessonSelfEvolution verifies the minimal self-evolution hook: a
+// lesson distilled after a repair is tagged to the skill that was loaded during
+// the turn (## Skill Notes), so future sessions learn which workflow the
+// gotcha belongs to.
+func TestTagSkillLessonSelfEvolution(t *testing.T) {
+	dir := t.TempDir()
+	e, _ := newEngineWith(&scriptedAdapter{})
+	e.mem = memory.NewStore(dir)
+	e.loadedSkills = map[string]bool{"go-workflow": true}
+
+	e.tagSkillLesson("Verification failed on main.go — fixed after 1 repair attempt")
+	data, err := os.ReadFile(filepath.Join(dir, ".brocode", "memory.md"))
+	if err != nil {
+		t.Fatalf("memory file not written: %v", err)
+	}
+	if !strings.Contains(string(data), "go-workflow: Verification failed on main.go") {
+		t.Fatalf("expected lesson tagged to the loaded skill, got:\n%s", data)
+	}
+	// No skill loaded → nothing tagged.
+	e2, _ := newEngineWith(&scriptedAdapter{})
+	e2.mem = memory.NewStore(t.TempDir())
+	e2.tagSkillLesson("lesson without a skill")
+	data2, err := os.ReadFile(filepath.Join(t.TempDir(), ".brocode", "memory.md"))
+	if err == nil && strings.Contains(string(data2), "Skill Notes") {
+		t.Errorf("no skill loaded → no Skill Notes tag expected, got:\n%s", data2)
+	}
+}
+
 // reviewCaptureAdapter serves main-loop replies from a script, and answers the
 // LLM review passes from a different lens: the correctness prompt returns CLEAN,
 // the security prompt returns a finding. It records which review lenses fired.

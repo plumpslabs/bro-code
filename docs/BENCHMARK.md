@@ -4,7 +4,9 @@
 > *"don't claim efficiency without measuring"* doctrine: BroCode's identity
 > is throughput and efficiency, so those claims must be **numbers**, not
 > feelings.
-> **Status**: Draft — recorded from design discussion (Aug 2026).
+> **Status**: Harness live (`internal/bench` + `bench/cases.json`). The
+> scorecard axes below are the contract; the harness currently measures the
+> core ones (pass rate, latency, iterations, tool calls, tokens, cost).
 
 ---
 
@@ -30,14 +32,29 @@ benchmark harness, or it does not claim efficiency at all.
 
 ```
 bench/
-├── simple/
-├── medium/
-├── large/
-├── debugging/
-├── refactor/
-├── feature/
-└── regression/
+├── cases.json         # the real suite (self-contained Go tasks, no network)
+└── cases.example.json # shape reference
+
+internal/bench/        # the harness: Runner → Result → Summarize → RenderReport
 ```
+
+Cases live in **one JSON file** (`bench/cases.json`), each a self-contained Go
+sandbox (setup writes `go.mod` + sources; verify is a shell script whose exit 0
+= pass). The suite covers the daily-work profile from DIRECTION.md §12: broken
+builds, syntax errors, panic debugging, failing tests (reproduce-first),
+feature adds, symbol renames, vet warnings, and field migrations.
+
+**Run it:**
+
+```bash
+# needs a provider API key + Go toolchain
+BROCODE_PROVIDER=openai BROCODE_API_KEY=... go test ./internal/bench -run TestNothing -bench . 2>/dev/null || true
+# or write a tiny main that builds a bench.Runner with your adapter and calls Run(cases)
+```
+
+**CI keeps the suite honest without keys:** `TestCasesValid` loads
+`bench/cases.json` and syntax-checks every setup/verify script (`sh -n`) — a
+malformed case fails CI before it can silently corrupt a benchmark run.
 
 Tasks are chosen from the actual daily-work profile (DIRECTION.md §12):
 fixes, refactors, endpoints, error diagnosis, migrations, API changes, tests —
@@ -51,15 +68,16 @@ Every benchmark run reports at least:
 
 | Metric | Notes |
 |---|---|
-| **Task Success** | most important |
-| Correctness | |
-| Time to First Token (TTFT) | perceived speed |
-| Time to Done | full task latency |
-| Tokens / Task | token efficiency |
-| Tool Calls / Task | orchestration overhead |
-| Repair Attempts | self-correction quality (bounded ≤ 3) |
-| Peak RAM | resource control |
-| CPU | |
+| Metric | Measured by the harness? | Notes |
+|---|---|---|
+| **Task Success** | ✅ `Pass` (verify script exit 0) | most important |
+| Correctness | ✅ via verify script | behavioral, not just compiles |
+| Time to First Token (TTFT) | ⏳ future (streaming timing) | perceived speed |
+| Time to Done | ✅ `Duration` | full task latency |
+| Tokens / Task | ✅ `Tokens` (context total) | token efficiency |
+| Tool Calls / Task | ✅ `ToolCalls` (executed invocations) | orchestration overhead |
+| Repair Attempts | ⏳ future (verify-retry loop counter) | self-correction quality (bounded ≤ 3) |
+| Peak RAM / CPU | ⏳ future (measure in a wrapper) | resource control |
 
 ---
 

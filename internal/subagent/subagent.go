@@ -30,7 +30,12 @@ import (
 type Runner struct {
 	Adapter provider.ProviderAdapter
 	Model   string
-	Tools   *tool.Registry // the main registry; sub-agents get a safe subset
+	// CheapModel, when set, routes mechanical specialist roles (swarm BUILDER /
+	// AUDITOR) to a cheaper model so reasoning-heavy roles (ARCHITECT) can use
+	// the strong Model without paying flagship prices for mechanical work.
+	// Empty = every role uses Model. Sub-agent/scout tasks always use Model.
+	CheapModel string
+	Tools      *tool.Registry // the main registry; sub-agents get a safe subset
 	// BudgetUSD, when > 0, caps each sub-agent turn's estimated provider spend
 	// (hard stop → graceful synthesis). Runaway sub-agents can no longer burn
 	// tokens to the 10-minute wall-clock cap with no cost limit.
@@ -62,11 +67,28 @@ type SubAgent struct {
 	Mutates bool `json:"mutates,omitempty"`
 }
 
-// runOne executes one sub-agent in its own isolated loop and returns its final
-// answer. onUpdate (may be nil) receives progress lines from the sub-loop.
-func (r *Runner) runOne(ctx context.Context, id, task, mode, targetDir string, onUpdate loop.TurnOutputHandler) (string, error) {
+// RunMetrics carries a finished sub-agent run's answer plus the tokens and
+// estimated cost it consumed, so callers (the swarm, /cost breakdowns) can
+// attribute usage to a specific phase instead of lumping everything together.
+type RunMetrics struct {
+	Answer       string
+	Tokens       int
+	Cost         float64
+	Compactions  int
+}
+
+// runOneResult executes one sub-agent in its own isolated loop and returns the
+// final answer plus usage metrics. onUpdate (may be nil) receives progress
+// lines from the sub-loop. model overrides the runner's default for this run
+// ("" = Runner.Model) so the swarm can route per-role models.
+func (r *Runner) runOneResult(ctx context.Context, id, task, mode, targetDir, model string, onUpdate loop.TurnOutputHandler) (RunMetrics, error) {
+	var metrics RunMetrics
 	if strings.TrimSpace(task) == "" {
-		return "", fmt.Errorf("empty task for sub-agent %q", id)
+		return metrics, fmt.Errorf("empty task for sub-agent %q", id)
+	}
+
+	if model == "" {
+		model = r.Model
 	}
 
 	if targetDir != "" {
@@ -85,7 +107,7 @@ func (r *Runner) runOne(ctx context.Context, id, task, mode, targetDir string, o
 
 	subTools := r.Tools.SubRegistry()
 
-	eng := loop.NewEngine(r.Adapter, subTools, ctxMgr, r.Model)
+	eng := loop.NewEngine(r.Adapter, subTools, ctxMgr, model)
 	if mode == "" {
 		mode = "BUILDER"
 	}
@@ -96,12 +118,20 @@ func (r *Runner) runOne(ctx context.Context, id, task, mode, targetDir string, o
 
 	// One turn with a focused directive. The loop guard, tool budget and
 	// verification ladder all apply inside the sub-loop as well.
-	return eng.RunTurn(ctx, task, onUpdate)
+	var err error
+	metrics.Answer, metrics.Tokens, metrics.Cost, metrics.Compactions, err = eng.RunTurnWithUsage(ctx, task, onUpdate)
+	return metrics, err
+}
+
+// runOne is the convenience wrapper for callers that only want the answer.
+func (r *Runner) runOne(ctx context.Context, id, task, mode, targetDir, model string, onUpdate loop.TurnOutputHandler) (string, error) {
+	m, err := r.runOneResult(ctx, id, task, mode, targetDir, model, onUpdate)
+	return m.Answer, err
 }
 
 // Run executes a single sub-agent and returns its answer.
 func (r *Runner) Run(ctx context.Context, task string) (string, error) {
-	return r.runOne(ctx, "1", task, "BUILDER", "", nil)
+	return r.runOne(ctx, "1", task, "BUILDER", "", "", nil)
 }
 
 // RunMany executes the given tasks — concurrently when parallel is true,
@@ -147,7 +177,7 @@ func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, 
 			}
 			return
 		}
-		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, agents[i].Mode, agents[i].TargetDir, onUpdate)
+		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, agents[i].Mode, agents[i].TargetDir, "", onUpdate)
 		if onUpdate != nil {
 			status := "DONE"
 			if errs[i] != nil {
@@ -310,7 +340,7 @@ func (sm *ScoutManager) StartWithProgress(ctx context.Context, task string, onPr
 		if onProgress != nil {
 			upd = func(st loop.LoopState, info string) { onProgress(info) }
 		}
-		result, err := sm.Runner.runOne(tctx, id, task, "PLANNER", "", upd)
+		result, err := sm.Runner.runOne(tctx, id, task, "PLANNER", "", "", upd)
 		sm.mu.Lock()
 		job.Done = true
 		job.Result = result

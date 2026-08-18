@@ -18,7 +18,9 @@ import (
 	"github.com/plumpslabs/bro-code/internal/hooks"
 	"github.com/plumpslabs/bro-code/internal/learn"
 	"github.com/plumpslabs/bro-code/internal/memory"
+	"github.com/plumpslabs/bro-code/internal/prompt"
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/skill"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
@@ -137,6 +139,14 @@ type Engine struct {
 	// changes have already been surfaced to the activity slot this turn, so
 	// the real-time diff (P2 #2) emits only on a NEW change (not every round).
 	turnTokens int
+	// turnCompactions counts how many context compactions fired during this
+	// turn (delta of the manager's session counter, captured at turn start).
+	// Surfaced alongside tokens so a token spike is explainable: a turn that
+	// compacted twice consumed tokens to summarize, not to explore.
+	turnCompactions int
+	// compactionBaseline snapshots the manager's session compaction counter at
+	// turn start so TurnCompactions() can report the turn-local delta.
+	compactionBaseline int
 	// lastChangeEmit counts changes surfaced to the one-line activity HUD;
 	// lastChangeDiffEmit is the same watermark for the live chat DIFF entries,
 	// so a path that gained a change this round re-emits its cumulative diff.
@@ -247,9 +257,38 @@ type Engine struct {
 	// files by usage) injected alongside the project context so the agent
 	// knows where to start without spending tokens re-discovering it.
 	repoMap string
-	// skillsCtx lists the available skills (from .agents/skills, .brocode/skills,
-	// and the global skills dir) so the model knows what it can load and use.
-	skillsCtx string
+	// skillsEntries is the installed skill catalog (name + description only).
+	// The prompt builder renders it as the AVAILABLE SKILLS block, relevance-
+	// filtering it once the catalog grows past the tuning threshold, and the
+	// model loads the full SKILL.md itself via read_file when relevant.
+	skillsEntries []prompt.SkillEntry
+	// tuning is the runtime tuning surface for the system prompt: block and
+	// rule toggles plus skill-catalog budgets, loaded from
+	// ~/.config/brocode/tuning.json. Nil falls back to prompt.DefaultTuning.
+	tuning *prompt.Tuning
+	// stacks are the repo's detected languages ("go", "node", "ts", ...) with
+	// their evidence files. They render a one-line STACK hint ("STACK: go
+	// (go.mod, main.go)") and bias the skill catalog toward the repo's stack
+	// so stack-specific skills follow the repo, not the model's guess (e.g.
+	// "fix the build" in a Go repo boosts go-workflow).
+	stacks []prompt.Stack
+	// artifactSeq numbers this turn's spilled tool outputs (.brocode/artifacts)
+	// so each gets a unique, stable path for on-demand reads. Reset per turn;
+	// cleanupArtifacts wipes the dir at turn start (bounded store).
+	artifactSeq int
+	// loadedSkills tracks which catalog skills the model actually reached for
+	// this turn (a read_file on a known SKILL.md path). Surfaced live in the
+	// activity HUD and summarized at turn end, so skill usage — and MISSED
+	// triggers (tools used, no skill loaded) — are visible instead of silent.
+	loadedSkills map[string]bool
+	// skillDirs records, per skill loaded this turn, the directory its SKILL.md
+	// lives in — so the self-evolution proposal (GOTCHAS.md patch) lands next
+	// to the real skill file, whatever source it was loaded from.
+	skillDirs map[string]string
+	// turnUsedTools records whether any tool call actually executed this turn
+	// (not blocked by a guard). The turn-end skill summary uses it to decide
+	// whether a skill COULD have been loaded — a pure-chat turn stays quiet.
+	turnUsedTools bool
 	// mem is the cross-session project memory store. When set, a warm-start
 	// excerpt is injected into the system prompt and compaction summaries are
 	// auto-merged into memory so future sessions start warm.
@@ -452,6 +491,66 @@ const (
 
 // CalculateAdaptiveToolBudget dynamically scales the tool budget based on
 // prompt complexity, active mode, and task keywords (Fase 2.2).
+// complexityTier classifies a task's effort by prompt signals so the engine
+// budgets iterations proportionally — a one-line typo fix must not be granted
+// the same 25-round runway as a cross-module refactor. Deterministic and free
+// (no LLM): keyword + length signals, matching the spirit of rule b7
+// (PROPORTIONALITY). The autonomous extension path still rescues a
+// misclassified task, so a wrong tier never traps a genuinely big task.
+type complexityTier int
+
+const (
+	tierSimple complexityTier = iota
+	tierMedium
+	tierComplex
+)
+
+// classifyTaskComplexity scores a user query into simple / medium / complex.
+func classifyTaskComplexity(query string) complexityTier {
+	p := strings.ToLower(strings.TrimSpace(query))
+	words := len(strings.Fields(p))
+
+	simpleHits := 0
+	for _, kw := range []string{"typo", "rename", "explain", "what does", "why does", "what is", "why is", "format", "comment", "spelling", "fix the doc"} {
+		if strings.Contains(p, kw) {
+			simpleHits++
+		}
+	}
+	complexHits := 0
+	for _, kw := range []string{"refactor", "migrate", "migration", "audit", "architecture", "implement", "feature", "rewrite", "integrate", "add support", "end-to-end", "multi-file", "multiple files", "schema", "cross-module", "monorepo"} {
+		if strings.Contains(p, kw) {
+			complexHits++
+		}
+	}
+
+	// Multi-part task lists (bulleted/numbered lines) signal real scope.
+	multiPart := strings.Contains(p, "\n-") || strings.Contains(p, "\n*") || strings.Contains(p, "\n1.")
+
+	switch {
+	case complexHits >= 2 || (complexHits >= 1 && words >= 25) || (complexHits >= 1 && multiPart):
+		return tierComplex
+	case (simpleHits >= 2 && complexHits == 0) || (simpleHits >= 1 && words <= 8 && complexHits == 0):
+		return tierSimple
+	default:
+		return tierMedium
+	}
+}
+
+// iterationsForComplexity maps a task tier to its per-turn iteration budget.
+// Simple tasks get a tight runway (finish fast, no ceremony); complex tasks
+// keep the historical 25; the autonomous extension still adds +15 on top when
+// the model proves the task needs more room.
+func iterationsForComplexity(t complexityTier) int {
+	switch t {
+	case tierSimple:
+		return 10
+	case tierComplex:
+		return 25
+	default:
+		return 16
+	}
+}
+
 func CalculateAdaptiveToolBudget(prompt string, mode string) int {
 	base := 16
 	if mode == "MINER" || mode == "PLANNER" {
@@ -497,10 +596,51 @@ func (e *Engine) SetProjectContext(pc string) {
 	e.projectCtx = pc
 }
 
-// SetSkills injects the list of available skills into every turn's system
-// prompt. Empty disables.
-func (e *Engine) SetSkills(sc string) {
-	e.skillsCtx = sc
+// SetSkillCatalog injects the installed skill catalog (name + description
+// only; the model loads each SKILL.md itself). Empty disables the skills
+// block. The catalog is relevance-filtered by the prompt builder when it
+// exceeds the tuning threshold.
+func (e *Engine) SetSkillCatalog(entries []prompt.SkillEntry) {
+	e.skillsEntries = entries
+}
+
+// SetTuning replaces the runtime tuning surface (block/rule toggles, skill
+// catalog budgets). Nil keeps the defaults.
+func (e *Engine) SetTuning(t *prompt.Tuning) {
+	if t != nil {
+		e.tuning = t
+	}
+}
+
+// SetDetectedStacks wires the repo's detected languages (with evidence files)
+// so the prompt builder can render a STACK hint and bias the skill-catalog
+// ranking toward the repo.
+func (e *Engine) SetDetectedStacks(stacks []prompt.Stack) {
+	e.stacks = stacks
+}
+
+// skillForRead returns the catalog name of the skill whose SKILL.md a read_file
+// call targets, or "" when the path is not a known skill file. Matching is
+// suffix-based so both relative (.brocode/skills/go-workflow/SKILL.md) and
+// absolute read paths resolve to the same skill.
+func (e *Engine) skillForRead(path string) string {
+	if len(e.skillsEntries) == 0 {
+		return ""
+	}
+	clean := filepath.ToSlash(strings.TrimSpace(path))
+	if filepath.Base(clean) != "SKILL.md" {
+		return ""
+	}
+	for _, s := range e.skillsEntries {
+		if s.Path == "" {
+			continue
+		}
+		rel := filepath.ToSlash(s.Path)
+		if strings.HasSuffix(clean, rel) || strings.HasSuffix(clean, "/"+s.Name+"/SKILL.md") {
+			return s.Name
+		}
+	}
+	return ""
 }
 
 // SetRepoMap injects the deterministic project map (entry points, structure,
@@ -658,7 +798,11 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		model:             model,
 		mode:              "BUILDER",
 		maxIterations:     25,
-		baseMaxIterations: 25,
+		// baseMaxIterations 0 = unset: the per-turn reset then derives the
+		// iteration budget from the task's complexity tier (simple 10 / medium
+		// 16 / complex 25) instead of a flat 25. SetMaxIterations (config,
+		// bench harness) raises it above 0 so an explicit cap always wins.
+		baseMaxIterations: 0,
 		hardCapIterations: 100,
 		state:             StateThinking,
 		usage:             NewUsageTracker(),
@@ -667,6 +811,7 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		fallbackPolicy:    FallbackAuto,
 		repoRoot:          tools.RepoRoot(),
 		planGateEnabled:  true,
+		tuning:            prompt.DefaultTuning(),
 	}
 }
 
@@ -692,7 +837,9 @@ func (e *Engine) applyModePolicy() {
 }
 
 // SetMaxIterations overrides the loop iteration cap (default 25). Used by the
-// benchmark harness to bound each case.
+// benchmark harness to bound each case. Setting it also marks the cap as
+// explicit (baseMaxIterations > 0), so the per-turn reset honors it instead of
+// re-deriving a complexity tier.
 func (e *Engine) SetMaxIterations(n int) {
 	if n > 0 {
 		e.maxIterations = n
@@ -718,6 +865,12 @@ func (e *Engine) TurnTokens() int {
 	return e.turnTokens
 }
 
+// TurnCompactions returns how many context compactions fired during the most
+// recent turn (delta of the session counter, so repeated turns accumulate).
+func (e *Engine) TurnCompactions() int {
+	return e.turnCompactions
+}
+
 func (e *Engine) Mode() string {
 	if e.mode == "" {
 		return "BUILDER"
@@ -732,6 +885,16 @@ func (e *Engine) State() LoopState {
 
 // RunTurn executes the ReAct loop until a terminal state is reached.
 type TurnOutputHandler func(state LoopState, info string)
+
+// RunTurnWithUsage runs a full turn and additionally returns the raw token
+// count and estimated cost attributed to it. Both are available on the error
+// path too, so callers (sub-agents, phase attribution) can bill partial work
+// when a turn fails partway through.
+func (e *Engine) RunTurnWithUsage(ctx context.Context, userQuery string, onUpdate TurnOutputHandler) (answer string, tokens int, cost float64, compactions int, err error) {
+	answer, err = e.RunTurn(ctx, userQuery, onUpdate)
+	e.turnCompactions = e.context.CompactCount() - e.compactionBaseline
+	return answer, e.TurnTokens(), e.CostUSD(), e.TurnCompactions(), err
+}
 
 func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOutputHandler) (answer string, err error) {
 	// Self-improving control layer: after the turn settles, observe context
@@ -762,8 +925,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	// Reset the per-turn cost budget counter.
 	e.costUSD = 0
 	e.turnTokens = 0
+	e.turnCompactions = 0
+	e.compactionBaseline = e.context.CompactCount()
 	e.lastChangeEmit = 0
 	e.lastChangeDiffEmit = 0
+	e.artifactSeq = 0
+	e.loadedSkills = map[string]bool{}
+	e.skillDirs = map[string]string{}
+	e.turnUsedTools = false
 	// Reset the turn's recorded file changes so the review complexity gate and
 	// the UI summary only ever see THIS turn's edits (headless contexts like
 	// the bench harness and tests have no UI ResetChanges call).
@@ -778,7 +947,16 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		if e.baseMaxIterations > 0 {
 			e.maxIterations = e.baseMaxIterations
 		} else {
-			e.maxIterations = 25
+			// Proportional effort: the iteration budget matches the task's
+			// complexity tier (simple 10 / medium 16 / complex 25) instead of
+			// granting every task the same 25-round runway. The autonomous
+			// extension still adds +15 when the task proves bigger than its
+			// tier, so a misclassification never traps a real task.
+			tier := classifyTaskComplexity(userQuery)
+			e.maxIterations = iterationsForComplexity(tier)
+			if tier == tierSimple && onUpdate != nil {
+				onUpdate(e.state, fmt.Sprintf("⚡ Simple task detected — reduced iteration budget (%d, complex tasks get 25)", e.maxIterations))
+			}
 		}
 	}
 	// Pre-flight context packing: for a diagnostic/LSP-fix task, FIRST auto-fix
@@ -825,6 +1003,26 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		}
 	}
 	defer func() { e.progressHandler = nil }()
+	// Skill-load summary: surface the turn's skill usage in the activity HUD so
+	// a MISSED trigger — the agent used tools but never loaded any of the
+	// catalog's skills — is visible instead of silent. Fires before the
+	// progress handler is cleared, and only on successful turns that actually
+	// used tools (a pure-chat turn cannot have loaded a skill, so it is quiet).
+	defer func() {
+		if err != nil || onUpdate == nil || len(e.skillsEntries) == 0 || !e.turnUsedTools {
+			return
+		}
+		if len(e.loadedSkills) == 0 {
+			onUpdate(e.state, fmt.Sprintf("📚 No skills loaded this turn — %d skills in the catalog (list .agents/skills and .brocode/skills)", len(e.skillsEntries)))
+			return
+		}
+		names := make([]string, 0, len(e.loadedSkills))
+		for n := range e.loadedSkills {
+			names = append(names, n)
+		}
+		slices.Sort(names)
+		onUpdate(e.state, "📚 Skills loaded: "+strings.Join(names, ", "))
+	}()
 	// Lifecycle hook on every exit path: fire on-turn-end when the turn
 	// produced an answer (or a hard abort message), on-turn-error otherwise.
 	defer func() {
@@ -845,6 +1043,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	if cleaned := tool.CleanupStaleSnapshots(); cleaned > 0 && onUpdate != nil {
 		onUpdate(e.state, fmt.Sprintf("Cleaned %d stale snapshots", cleaned))
 	}
+	// Wipe last turn's tool-output artifacts: the store is bounded to one turn
+	// (Principle 5 — every persistent store has a lifetime).
+	e.cleanupArtifacts()
 
 	if userQuery != "" {
 		if err := e.context.AppendUserMessage(userQuery); err != nil {
@@ -1318,6 +1519,26 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				// answer now") instead of a generic stop message.
 				e.recordExplored(tc)
 
+				// SKILL-LOAD TRACING: a read_file aimed at a known skill's
+				// SKILL.md means the model reached for that skill — surface it in
+				// the activity HUD (once per skill per turn). Skills fail
+				// silently in other agents when the model never triggers them;
+				// tracing every load makes both usage and absence visible.
+				if tc.Name == "read_file" {
+					var am map[string]any
+					if json.Unmarshal([]byte(tc.Arguments), &am) == nil {
+						if p, _ := am["path"].(string); p != "" {
+						if name := e.skillForRead(p); name != "" && !e.loadedSkills[name] {
+							e.loadedSkills[name] = true
+							e.skillDirs[name] = filepath.Dir(p)
+							if onUpdate != nil {
+								onUpdate(e.state, "📚 Skill loaded: "+name)
+							}
+							}
+						}
+					}
+				}
+
 				// Same-call repetition detection: identical consecutive calls
 				// (same tool + same arguments) indicate the model is stuck.
 				// The repeat counter lives on the engine (not per iteration) so
@@ -1406,6 +1627,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				}
 
 				pending[i] = pendingTool{tc: tc, exec: true}
+				e.turnUsedTools = true // any tool reaching execution = tools used this turn
 				execCount++
 			}
 
@@ -1450,6 +1672,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						if err != nil {
 							out = fmt.Sprintf("Tool error: %v", err)
 						}
+						// Truncate-and-pointer: long outputs spill to
+						// .brocode/artifacts/ and only a head+tail digest enters
+						// context (the tail holds test failures/stack traces).
+						out = e.capToolOutput(pending[idx].tc.Name, out)
 						pending[idx].output = out
 						e.hookRun(ctx, hooks.EventToolResult, map[string]string{
 							"tool":   pending[idx].tc.Name,
@@ -1483,6 +1709,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					if err != nil {
 						out = fmt.Sprintf("Tool error: %v", err)
 					}
+					// Truncate-and-pointer: long outputs spill to
+					// .brocode/artifacts/ and only a head+tail digest enters
+					// context (the tail holds test failures/stack traces).
+					out = e.capToolOutput(pending[i].tc.Name, out)
 					pending[i].output = out
 
 					// Plan-then-act: the user approving the plan (any ask_user result
@@ -1678,6 +1908,19 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			_ = e.mem.CaptureMinerFindings(resp.Content, explored)
 		}
 
+		// Out-of-scope findings capture (rule b13): a BUILDER turn that
+		// noticed real issues OUTSIDE its task scope ends its answer with a
+		// "### OUT-OF-SCOPE FINDINGS" section; persist those to project
+		// memory so a follow-up task can pick them up instead of losing them
+		// to the chat history. Deterministic parse, no extra LLM call.
+		if e.Mode() == "BUILDER" && e.mem != nil {
+			if n := e.mem.CaptureOutOfScopeFindings(resp.Content); n > 0 {
+				if onUpdate != nil {
+					onUpdate(e.state, fmt.Sprintf("📋 %d out-of-scope finding(s) captured to project memory", n))
+				}
+			}
+		}
+
 		// Lesson auto-extract: a repair that started failing and ended passing
 		// is the highest-value failure signal a harness can capture — distill a
 		// one-line durable lesson into project memory (## Gotchas) so future
@@ -1685,7 +1928,17 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		if e.repairSucceeded && e.mem != nil && e.lastVerifyErr != "" {
 			if lesson := e.distillLesson(ctx); lesson != "" {
 				_, _ = e.mem.Retain("Gotchas", lesson)
+				e.tagSkillLesson(lesson)
 			}
+		}
+
+		// Full self-evolution: when the same skill has accumulated ≥2 distilled
+		// gotchas from real repairs, propose a patch to its SKILL.md (written as
+		// GOTCHAS.md next to the skill — never into SKILL.md itself, so official
+		// skill updates keep applying). Runs once per loaded skill, best-effort.
+		for sk := range e.loadedSkills {
+			e.proposeSkillEvolution(sk)
+			break
 		}
 		e.explored = nil
 
@@ -1693,6 +1946,44 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			onUpdate(e.state, "Completed")
 		}
 		return resp.Content, nil
+	}
+}
+
+// proposeSkillEvolution proposes a patch when a skill has accumulated enough
+// real gotchas: ≥2 distilled lessons for the same skill across sessions. The
+// proposal is written as GOTCHAS.md in the skill's directory (never SKILL.md)
+// and surfaced in the HUD for review. Best-effort — a failure changes nothing.
+func (e *Engine) proposeSkillEvolution(sk string) {
+	if e.mem == nil || sk == "" {
+		return
+	}
+	gotchas := e.mem.SkillGotchas(sk)
+	if len(gotchas) < 2 {
+		return // threshold: the same skill needs 2+ distilled gotchas
+	}
+	dir := e.skillDirs[sk]
+	if dir == "" {
+		return // skill location unknown — never guess where to write
+	}
+	if n := skill.ProposeGotchasPatch(dir, sk, gotchas); n > 0 {
+		if e.progressHandler != nil {
+			e.progressHandler(e.state, fmt.Sprintf("📝 %s: %d gotcha(s) from your repairs — proposed patch in %s (review & merge into SKILL.md)", sk, n, filepath.Join(dir, "GOTCHAS.md")))
+		}
+	}
+}
+
+// tagSkillLesson is the minimal self-evolution hook: when a repair produced a
+// durable lesson and a skill was loaded this turn, tag the lesson with that
+// skill's name in project memory (## Skill Notes) so future sessions learn
+// WHICH workflow the gotcha belongs to — the first step toward skills that
+// evolve from real repairs. Memory-only; skill files are never written.
+func (e *Engine) tagSkillLesson(lesson string) {
+	if e.mem == nil || lesson == "" {
+		return
+	}
+	for sk := range e.loadedSkills {
+		_, _ = e.mem.Retain("Skill Notes", sk+": "+lesson)
+		break
 	}
 }
 
@@ -1755,110 +2046,50 @@ func formatTSRAttempts(n int) string {
 	}
 }
 
-// buildSystemPrompt renders the full system prompt for the current mode. It is
-// called ONCE per turn and the result is cached on the engine so every loop
-// iteration sends byte-identical leading tokens (provider prompt caching).
-// The warm-start memory excerpt is derived from the user's initial query.
+// buildSystemPrompt renders the full system prompt for the current mode via the
+// layered prompt builder (internal/prompt): identity + project context, repo
+// map, skills catalog (relevance-filtered), LSP state, memory warm start,
+// pre-flight diagnostics, plan-mode gate, and the tunable mode rules. Called
+// ONCE per turn and cached on the engine so every loop iteration sends
+// byte-identical leading tokens (provider prompt caching). The warm-start
+// memory excerpt is derived from the user's initial query.
 func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate TurnOutputHandler) string {
-	// Mode descriptions are language-agnostic on purpose: the model is told to
-	// answer in whatever language the user writes in, and must not be biased
-	// by hardcoded phrases or foreign product names.
-	modeDesc := "BUILDER (autonomous coding agent: can read, edit, and run terminal commands)"
-	switch currentMode {
-	case "PLANNER":
-		modeDesc = "PLANNER (architecture & strategy agent: read-only — analyze and plan without editing files)"
-	case "MINER":
-		modeDesc = "MINER (project knowledge agent: read-only exploration that persists verified facts into project memory — learn the codebase, then remember it)"
-	}
-
-	sysPrompt := fmt.Sprintf(`You are BroCode CLI, an autonomous AI coding assistant.
-%s`, e.projectContextBlock())
-	if e.repoMap != "" {
-		sysPrompt += "\n\n" + e.repoMap
-	}
-	if e.skillsCtx != "" {
-		sysPrompt += "\n\nAVAILABLE SKILLS:\n" + e.skillsCtx + "\nWhen a task matches a skill, load its SKILL.md file (read_file) and follow its instructions."
-	}
-	// LSP availability: tell the model up front whether lsp_scan is usable so
-	// it does not waste a round discovering (or, worse, trying to install) a
-	// linter. Reinforces the SENIOR REVIEW guidance not to `go install`.
-	if e.lspAvailable > 0 {
-		sysPrompt += fmt.Sprintf("\n\nLSP AVAILABLE (%d language server(s)): use `lsp_scan` for project-wide type/lint/deprecated diagnostics and `lsp_diagnostics` per file — that IS your linter, no external install needed.", e.lspAvailable)
-	} else {
-		sysPrompt += "\n\nLSP NOT AVAILABLE this session: `lsp_scan` will fail. Do NOT `go install` external linters (golangci-lint/staticcheck/revive) — ask the user to run `/lsp-install` once, or rely on the project's own `go vet`/`go build`/`tsc --noEmit`."
+	in := &prompt.Input{
+		Mode:          currentMode,
+		Iteration:     iteration,
+		ProjectCtx:    e.projectCtx,
+		RepoMap:       e.repoMap,
+		Stacks:        e.stacks,
+		Skills:        e.skillsEntries,
+		UserPrompt:    e.context.LastUserPrompt(),
+		LSPAvailable:  e.lspAvailable,
+		Preflight:     e.preflightBlock,
+		PreflightAuto: e.preflightAutoFix,
+		PlanMode:      e.planMode,
+		Tuning:        e.tuning,
 	}
 	if e.mem != nil {
-		if ws := e.mem.WarmStartRelevant(e.context.LastUserPrompt()); ws != "" {
-			sysPrompt += "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + ws
-			if onUpdate != nil && iteration == 1 {
-				onUpdate(e.state, "🧠 Warm Start: Recalled project memory & hot files")
+		// Adaptive warm-start budget (memory/adaptive caps): before injecting
+		// memory into the system prompt, shrink its byte cap to fit the
+		// REMAINING window. A 25KB default block is affordable on a fresh turn
+		// but counter-productive when the turn is already near the compaction
+		// threshold — it would just buy a compaction the model didn't need.
+		if remain := e.context.MaxWindow() - e.context.TotalContextTokens(); remain < 32*1024 {
+			budget := remain / 2
+			if budget < 4*1024 {
+				budget = 4 * 1024
 			}
+			e.mem.SetWarmStartBudget(budget)
+		} else {
+			e.mem.SetWarmStartBudget(0)
+		}
+		in.MemoryWarm = e.mem.WarmStartRelevant(in.UserPrompt)
+		if in.MemoryWarm != "" && onUpdate != nil && iteration == 1 {
+			onUpdate(e.state, "🧠 Warm Start: Recalled project memory & hot files")
 		}
 	}
-	// Pre-flight packed diagnostics: when present, the engine already gathered the
-	// diagnostics + code windows this turn, so the model fixes in place instead of
-	// re-scanning and re-reading. Shown once (iteration 1) to keep the cached
-	// prompt stable across later iterations.
-	if e.preflightBlock != "" && iteration == 1 {
-		sysPrompt += "\n\n" + e.preflightBlock
-	}
-	// Pre-flight auto-fix result: the safe diagnostics were ALREADY fixed by the
-	// engine before the turn started, so the model must NOT re-apply them — it only
-	// handles the manual items listed in the diagnostics above.
-	if e.preflightAutoFix != "" && iteration == 1 {
-		sysPrompt += "\n\nPRE-APPLIED AUTO-FIXES (already done by the engine — DO NOT redo):\n" + e.preflightAutoFix
-	}
-	// Plan-then-act: when gating an implementation task, this turn is a read-only
-	// PLAN pass. The model researches and proposes a plan, then must confirm via
-	// ask_user (whose "Approve" result flips the session to BUILDER) before edits.
-	// Mutating tools are structurally blocked while planMode is set, so this is a
-	// hard guard, not just a suggestion.
-	if e.planMode {
-		sysPrompt += `
-
-📋 PLAN MODE (this turn is a read-only PLANNING pass): For this implementation task, RESEARCH the codebase with read-only tools (read_file, code_locate, grep, glob, lsp_* inspect tools), then output a concise numbered implementation plan. BEFORE any file is edited you MUST call ask_user to confirm it, with options: "Approve & build", "Revise plan", "Cancel". Do NOT call any mutating tool (write_file, edit_file, delete_file, lsp_fix, lsp_autofix, lsp_rename) — they are blocked until the plan is approved. Once the user picks "Approve & build", you may implement in the next step.`
-	}
-	sysPrompt += fmt.Sprintf(`
-🔥 ACTIVE ENGINE MODE: %s (%s).
-CRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as PLANNER or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY. You are NOW operating strictly in %s mode.
-If the user asks about your mode (in any language), answer directly with the mode name (%s) and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.
-
-Engine Mode Rules (%s):
-`, currentMode, modeDesc, currentMode, currentMode, currentMode, currentMode)
-
-	switch currentMode {
-	case "PLANNER":
-		sysPrompt += `1. Focus on inspecting codebase, analyzing files, and proposing high-level step-by-step implementation plans.
-2. DO NOT modify any source files or execute write_file/edit_file tools.
-3. Use read_file, list_dir, grep, and glob to research before writing your plan.`
-	case "MINER":
-		sysPrompt += `1. MISSION: learn the project deeply and persist VERIFIED knowledge into PROJECT MEMORY using the memory tool (retain). This is how BroCode gets smarter the more it is used.
-2. Read-only: DO NOT modify source files (write_file/edit_file are blocked). You may run read-only bash (git log, git status, ls) to understand history.
-3. VERIFY BEFORE RETAINING: only store facts you confirmed in the code — architecture (service -> repo -> DB), build/test commands that actually exist, conventions (naming, error handling, package manager), decisions, gotchas. Never store guesses; if unsure, read more or skip.
-4. Organize with good sections: Architecture, Build & Test, Conventions, Decisions, Gotchas. Keep each fact short, concrete, and actionable.
-5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`
-	default:
-		sysPrompt += `1. CONTEXT-FIRST & PLAN-BEFORE-ACT: NEVER edit code, decide architecture, or guess blind. Always explore and verify the real context first using search and surgical reads. Reason through your plan before modifying anything.
-	2. READ SURGICALLY (biggest token saver): NEVER read an entire file to find or change one symbol. Use code_locate to get line numbers, then read_file(start_line, end_line) for the exact span, or edit_file(start_line, end_line) to change it WITHOUT reading the whole file first. For a large file's structure, call read_file(shrinkwrap) — it returns signatures/types only (~70% smaller). NEVER write ad-hoc Python, Node, or bash scripts to inspect files, search strings, or validate JSON/YAML — use read_file, grep, and code_locate directly (they are instant, zero-friction, and validated automatically in Go). Pick ONE search tool (below); do NOT spray grep+glob+code_locate together.
-	   SEARCH TOOL DECISION TREE:
-	   • "where is symbol X defined/used?"  → code_locate (repo-wide symbol + reference graph, no server)
-	   • understand ONE file's structure     → read_file(shrinkwrap)  (code_symbols is deprecated — use this)
-	   • find text / regex inside files     → grep
-	   • find files by name/pattern         → glob
-	   • "code that does X" (semantic)      → search_code
-	3. EXPLORE BEFORE ANSWERING: form a hypothesis, then verify it with ONE batched round of targeted reads (code_locate/grep/glob/read_file). Never answer from memory — read the real code and verify your claims. If a result is unhelpful, adapt; do NOT re-run the same narrow search.
-	3b. BATCH & STAY LEAN (cost): every round re-sends the ENTIRE conversation, so the number of rounds is the single biggest cost driver. Issue 3-4 independent read/grep/glob calls in ONE message. read_file auto-returns a STRUCTURAL OVERVIEW for files over 150 lines — ask for the specific span with start_line/end_line instead of re-reading the whole file. NEVER fight truncation with bash sed/head/tail/grep loops on the same file.
-	4. INTENT DISCOVERY & ASK WHEN IN DOUBT: for underspecified requirements, user preferences, architectural tradeoffs, or destructive operations, DO NOT guess or assume — search first; if ambiguity remains, call ask_user with 1-3 clear multiple-choice questions. If a risky command is denied or blocked, do NOT retry it — adapt with a safe alternative.
-	5. REUSE FIRST & STRUCTURE INTEGRITY (DRY): before writing new code or updating translations/configs (JSON, YAML, TS), inspect the file with grep/code_locate to see if the target key, parent object, or namespace already exists (e.g. 'roleModal' in id.json). MERGE new keys into the existing block — NEVER duplicate object keys or create duplicate declarations in the same scope. Reimplementing existing code wastes tokens, introduces bugs, and creates duplicates. Always prefer composing and extending existing modules.
-	6. TYPE SAFETY & PERFORMANCE: treat type errors as blockers — fix them after the auto-verification (build/typecheck) flags them. Avoid N+1 queries, SELECT *, missing WHERE on updates/deletes, string-built SQL (injection), quadratic loops, and unbounded fetches.
-	7. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony, no new abstractions. Extract a helper only at 3+ uses; keep a file under ~300 LOC; inline one-off logic. Over-engineering is a review finding.
-	8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth and run lsp_scan at most once per task (and call it ONCE at the START of any "find/fix warnings/lint" task — that IS your linter: gopls already covers go vet + type errors + deprecated + unused). NEVER go install external linters (golangci-lint/staticcheck/revive/eslint) mid-task — they are redundant with LSP and network-heavy; if LSP is unavailable, ask the user to run /lsp-install or fall back to the project's own go vet/go build. lsp_rename is the right tool for project-wide symbol renames, lsp_fix auto-applies quick-fixes (imports, organize), and lsp_symbols/lsp_outline find symbols by name without guessing a cursor position. LSP diagnostics also run automatically on your edited files after verification.
-	9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.
-	10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.
-	11. ANTI-LOOP EFFICIENCY (critical): do NOT re-read a file you have already seen, and do NOT keep opening "one more section" hoping for context — once you have enough to act, ACT. When a PRE-GATHERED LSP DIAGNOSTICS block is present, the diagnostics AND their code windows are already in context: fix each item DIRECTLY with edit_file(start_line,end_line)/lsp_fix — you must NOT call read_file for any item you already have a window for, and you must NOT call lsp_scan again. Whole-file reads are forbidden while that block is present. For any task, batch all edits, then run verification ONCE (the project's own go build/vet/test, or tsc --noEmit). STOP after that single verification pass — re-running the same checks repeatedly is a loop, not progress.
-	12. PLAN-THEN-ACT (multi-step tasks): for an implementation task the engine first runs a read-only PLAN pass and asks you to confirm before any edit. When you are in PLAN MODE, follow its instructions — research, propose a concise plan, then ask_user to confirm. After approval, execute that agreed plan; do NOT silently re-plan or re-decide architecture mid-execution. If you discover the plan is wrong, surface it and re-confirm rather than wandering.`
-	}
-	return sysPrompt
+	p, _ := prompt.Assemble(in)
+	return p
 }
 
 // toolsForMode returns the tool surface exposed to the model for the current
@@ -2023,12 +2254,6 @@ func (e *Engine) exploredPathList() string {
 
 // projectContextBlock renders the injected project overview (tree + docs) as
 // a system-prompt section, or an empty string when none was provided.
-func (e *Engine) projectContextBlock() string {
-	if strings.TrimSpace(e.projectCtx) == "" {
-		return ""
-	}
-	return "You are working in this project:\n\n" + e.projectCtx
-}
 
 // exploredSummary renders the list of files/directories the model has already
 // read or searched, used by the tool-budget reminders and the abort message.
@@ -2271,7 +2496,9 @@ func (e *Engine) finalSynth(ctx context.Context, reason string, marker string) (
 	// byte-identical prefix (provider prompt cache hits).
 	localSysPrompt := e.sysPromptCached
 	if localSysPrompt == "" {
-		localSysPrompt = fmt.Sprintf("You are BroCode CLI, an autonomous AI coding assistant.\n%s", e.projectContextBlock())
+		// Rare: the turn aborted before the first iteration built the cached
+		// prompt. Build a full one via the layered prompt builder.
+		localSysPrompt = e.buildSystemPrompt(e.Mode(), 1, nil)
 	}
 	reqMessages := append([]provider.Message{
 		{Role: "system", Content: localSysPrompt},
