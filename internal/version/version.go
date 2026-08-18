@@ -23,9 +23,10 @@ const Logo = `
 // Tagline is the CLI's one-line motto.
 const Tagline = "ship less, ship right"
 
-// Banner returns the logo plus tagline (used by `brocode -v`).
+// Banner returns the logo plus tagline (used by `brocode -v`), both flush
+// left so the brand block reads as one neat column.
 func Banner() string {
-	return Logo + "\n  " + Tagline
+	return Logo + "\n" + Tagline
 }
 
 // Info returns the formatted version information for CLI output.

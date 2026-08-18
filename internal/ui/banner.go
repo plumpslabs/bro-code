@@ -29,7 +29,7 @@ func welcomeBanner() string {
 		sb.WriteString("\n")
 	}
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	sb.WriteString(dim.Render("  " + version.Tagline))
+	sb.WriteString(dim.Render(version.Tagline))
 	sb.WriteString("\n")
 	sb.WriteString(dim.Render("BroCode " + version.Version))
 	sb.WriteString("\n\n⚡ Type a prompt or /help for commands.")
