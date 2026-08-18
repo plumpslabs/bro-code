@@ -48,7 +48,7 @@ var heavyDirNames = map[string]bool{
 var sensitiveFileNames = map[string]bool{
 	".env": true, ".env.local": true, ".env.production": true,
 	".env.development": true, ".env.test": true, ".env.staging": true,
-	".env.example": true, ".env.sample": true, ".env.backup": true,
+	".env.backup": true,
 	".npmrc": true, ".pypirc": true, ".netrc": true, ".pgpass": true,
 	".htpasswd": true, "id_rsa": true, "id_ed25519": true, "id_ecdsa": true,
 	"id_dsa": true, ".dockercfg": true, "credentials.json": true,
@@ -62,6 +62,13 @@ var sensitiveExts = []string{
 	".gpg", ".asc", ".kdbx", ".ovpn", ".mobileprovision",
 }
 
+// isTemplateEnv reports whether a filename is a safe, documented environment template.
+func isTemplateEnv(base string) bool {
+	lower := strings.ToLower(base)
+	return lower == ".env.example" || lower == ".env.sample" || lower == ".env.template" ||
+		lower == "env.example" || lower == "env.sample" || lower == "env.template"
+}
+
 // IsHeavyDir reports whether a directory name is a dependency/build/VCS dir
 // the agent must not read. Exported so glob walking and the repo map reuse
 // the same rule.
@@ -72,6 +79,9 @@ func IsHeavyDir(name string) bool { return heavyDirNames[name] }
 // it learns the path is off-limits instead of silently getting nothing.
 func GuardSensitivePath(path string) error {
 	base := filepath.Base(path)
+	if isTemplateEnv(base) {
+		return nil
+	}
 	if sensitiveFileNames[base] {
 		return fmt.Errorf("⛔ blocked: %q is a sensitive file (secrets/credentials) and BroCode never reads it. If you need to know which env vars exist, read .env.example docs or ask the user.", base)
 	}

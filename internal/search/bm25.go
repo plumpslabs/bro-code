@@ -148,9 +148,14 @@ func IndexDir(dir string) ([]Document, error) {
 		switch ext {
 		case ".go", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rs",
 			".c", ".cpp", ".cc", ".h", ".hpp", ".java", ".kt", ".rb", ".php",
-			".swift", ".cs", ".md", ".json", ".yaml", ".yml", ".toml", ".sql", ".css", ".html":
+			".swift", ".cs", ".md", ".markdown", ".txt", ".json", ".jsonc",
+			".yaml", ".yml", ".toml", ".sql", ".css", ".scss", ".html",
+			".sh", ".bash", ".zsh", ".proto", ".graphql", ".xml", ".mod", ".sum":
 		default:
-			return nil
+			base := strings.ToLower(d.Name())
+			if base != "dockerfile" && base != "makefile" && base != "gemfile" && base != "rakefile" {
+				return nil
+			}
 		}
 		if info, err := d.Info(); err == nil && info.Size() > 2*1024*1024 {
 			return nil

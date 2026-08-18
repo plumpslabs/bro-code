@@ -1,6 +1,7 @@
 package context
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -12,6 +13,19 @@ func ShrinkwrapAST(content string, filename string) string {
 	lines := strings.Split(content, "\n")
 	if len(lines) <= 150 {
 		return content // Keep small files intact
+	}
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".go", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rs",
+		".c", ".cpp", ".cc", ".h", ".hpp", ".java", ".kt", ".rb", ".php", ".swift", ".cs":
+		// Supported source code files: proceed with AST body stripping
+	default:
+		// Non-code files (JSON, YAML, Markdown, HTML, SQL, etc.): return head+tail overview
+		if len(lines) > 200 {
+			return strings.Join(lines[:100], "\n") + "\n\n// ... [truncated for size — use read_file with start_line/end_line to view specific spans] ...\n\n" + strings.Join(lines[len(lines)-30:], "\n")
+		}
+		return content
 	}
 
 	var sb strings.Builder

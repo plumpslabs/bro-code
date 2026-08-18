@@ -25,6 +25,10 @@ func TestGuardSensitivePath(t *testing.T) {
 		{"README.md", true},
 		{"package.json", true},
 		{"src/index.ts", true},
+		{".env.example", true},
+		{"backend/.env.sample", true},
+		{"Dockerfile", true},
+		{"Makefile", true},
 	}
 	for _, c := range cases {
 		err := GuardSensitivePath(c.path)
