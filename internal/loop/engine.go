@@ -440,28 +440,28 @@ const (
 	// otherwise toothless: the model kept reading "one more section" forever.
 	finalWarnHardStop = 2
 	// exploredWarnCap — once the agent has read this many DISTINCT files/paths in
-	// a row without answering, accelerate the final warning. Reading a dozen
-	// files for a simple cleanup task is over-exploration, not progress.
-	exploredWarnCap = 8
+	// a row without answering, accelerate the final warning. Reading several
+	// files for a codebase task is normal exploration, but unbounded reading is capped.
+	exploredWarnCap = 12
 )
 
 // CalculateAdaptiveToolBudget dynamically scales the tool budget based on
 // prompt complexity, active mode, and task keywords (Fase 2.2).
 func CalculateAdaptiveToolBudget(prompt string, mode string) int {
-	base := 14
+	base := 16
 	if mode == "MINER" || mode == "PLANNER" {
-		base = 18
+		base = 20
 	}
 	p := strings.ToLower(prompt)
 	words := len(strings.Fields(p))
-	if words > 30 || strings.Contains(p, "refactor") || strings.Contains(p, "audit") || strings.Contains(p, "migrate") || strings.Contains(p, "architecture") {
+	if words > 30 || strings.Contains(p, "refactor") || strings.Contains(p, "audit") || strings.Contains(p, "migrate") || strings.Contains(p, "architecture") || strings.Contains(p, "fix") {
 		base += 6
 	}
-	if base > 25 {
-		return 25
+	if base > 28 {
+		return 28
 	}
-	if base < 8 {
-		return 8
+	if base < 10 {
+		return 10
 	}
 	return base
 }
@@ -1070,7 +1070,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				synthResp, synthErr = e.complete(ctx, synthReq)
 			}
 			if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) != "" {
-				res := synthResp.Content + "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (Batas Tool Limit Tercapai).* "
+				res := synthResp.Content + "\n\n---\n*💡 Eksplorasi dihentikan untuk efisiensi token. Kirim prompt lanjutan jika ingin melanjutkan pendalaman.*"
 				_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", res, nil)
 				e.state = StateDone
 				if onUpdate != nil {
@@ -1080,19 +1080,17 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 
 			// Deterministic fallback when the synthesis completion itself fails
-			// or returns empty: NEVER dump a raw error or a cold "paused"
-			// status line — construct a helpful answer from what the agent
-			// already explored, mirroring the success path so the conversation
-			// stays connected instead of ending on an abrupt notice.
+			// or returns empty: construct a helpful answer from what the agent
+			// already explored.
 			e.state = StateDone
-			msg := "⚠️ Tool budget limit reached — here is what was verified from the explored context:\n" + e.exploredSummary()
+			msg := "Eksplorasi dihentikan untuk efisiensi token — berikut ringkasan konteks yang telah terverifikasi:\n" + e.exploredSummary()
 			if autoFixResult != "" {
-				msg = "⚠️ Tool budget limit reached, but the engine applied these auto-fixes first:\n" + autoFixResult + "\n\n" + msg
+				msg = "Eksplorasi dihentikan untuk efisiensi token, namun sistem telah menerapkan perbaikan otomatis terlebih dahulu:\n" + autoFixResult + "\n\n" + msg
 			}
 			if e.lastReasoning != "" {
-				msg += "\n\n**Last Working Focus**: " + e.lastReasoning
+				msg += "\n\n**Fokus Analisis Terakhir**: " + e.lastReasoning
 			}
-			msg += "\n\n---\n*⚠️ Respon ini dirangkum dari hasil eksplorasi parsial (Batas Tool Limit Tercapai).* "
+			msg += "\n\n---\n*💡 Kirim prompt lanjutan jika ingin melanjutkan pendalaman.*"
 			_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", msg, nil)
 			if onUpdate != nil {
 				onUpdate(e.state, "Completed with fallback context synthesis")
