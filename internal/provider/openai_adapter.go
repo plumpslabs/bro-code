@@ -86,6 +86,13 @@ type openAIChatResponse struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		// DeepSeek reports cache hits at the top level; OpenAI nests them
+		// under prompt_tokens_details.cached_tokens. Both are summed so cost
+		// pricing can apply the cache-hit discount.
+		PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+		PromptTokensDetails  struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -107,9 +114,13 @@ type openAIStreamChunk struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens         int `json:"prompt_tokens"`
+		CompletionTokens     int `json:"completion_tokens"`
+		TotalTokens          int `json:"total_tokens"`
+		PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+		PromptTokensDetails  struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -225,9 +236,10 @@ func (a *OpenAIAdapter) Complete(ctx context.Context, req CompletionRequest) (*C
 		Content:   choice.Message.Content,
 		Reasoning: reasoning,
 		Usage: Usage{
-			PromptTokens:     apiResp.Usage.PromptTokens,
-			CompletionTokens: apiResp.Usage.CompletionTokens,
-			TotalTokens:      apiResp.Usage.TotalTokens,
+			PromptTokens:         apiResp.Usage.PromptTokens,
+			CompletionTokens:     apiResp.Usage.CompletionTokens,
+			TotalTokens:          apiResp.Usage.TotalTokens,
+			PromptCacheHitTokens: apiResp.Usage.PromptCacheHitTokens + apiResp.Usage.PromptTokensDetails.CachedTokens,
 		},
 		FinishReason: choice.FinishReason,
 	}
@@ -308,9 +320,10 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 		if len(chunk.Choices) == 0 {
 			if chunk.Usage.TotalTokens > 0 {
 				res.Usage = Usage{
-					PromptTokens:     chunk.Usage.PromptTokens,
-					CompletionTokens: chunk.Usage.CompletionTokens,
-					TotalTokens:      chunk.Usage.TotalTokens,
+					PromptTokens:         chunk.Usage.PromptTokens,
+					CompletionTokens:     chunk.Usage.CompletionTokens,
+					TotalTokens:          chunk.Usage.TotalTokens,
+					PromptCacheHitTokens: chunk.Usage.PromptCacheHitTokens + chunk.Usage.PromptTokensDetails.CachedTokens,
 				}
 			}
 			continue

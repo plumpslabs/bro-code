@@ -2,10 +2,12 @@
 //
 // It prefers an exact BPE tokenizer (tiktoken-go with bundled offline
 // vocabularies, so NO runtime network is required) for the common encodings
-// (cl100k_base for GPT-3.5/4 legacy, o200k_base for GPT-4o/o1). When the real
-// tokenizer cannot initialize (unsupported model, missing vocab, sandbox),
-// EstimateTokens provides a deterministic char-count heuristic fallback so a
-// tokenizer failure never breaks context-budget decisions.
+// (cl100k_base for GPT-3.5/4 legacy, o200k_base for GPT-4o/o1/GPT-5,
+// p50k_base for Claude — Anthropic ships no offline tokenizer, so p50k_base is
+// the documented community approximation). When the real tokenizer cannot
+// initialize (unsupported model, missing vocab, sandbox), EstimateTokens
+// provides a deterministic char-count heuristic fallback so a tokenizer
+// failure never breaks context-budget decisions.
 package tokens
 
 import (
@@ -21,10 +23,20 @@ var modelEncoding = map[string]string{
 	"gpt-4o":        tiktoken.MODEL_O200K_BASE,
 	"gpt-4o-mini":   tiktoken.MODEL_O200K_BASE,
 	"o1":            tiktoken.MODEL_O200K_BASE,
+	"o3":            tiktoken.MODEL_O200K_BASE,
+	"o4":            tiktoken.MODEL_O200K_BASE,
 	"gpt-4.5":       tiktoken.MODEL_O200K_BASE,
 	"gpt-4.1":       tiktoken.MODEL_O200K_BASE,
+	"gpt-5":         tiktoken.MODEL_O200K_BASE,
 	"gpt-3.5-turbo": tiktoken.MODEL_CL100K_BASE,
 	"gpt-4":         tiktoken.MODEL_CL100K_BASE,
+	// Claude family: no public BPE vocabulary. p50k_base is the closest
+	// documented offline approximation (community standard for counting
+	// Claude tokens locally). Note: Claude 4.7+ uses a tokenizer Anthropic
+	// reports produces ~30% more tokens — so the p50k estimate is low by
+	// ~25-30% for the newest Claude models. The only exact count is the
+	// count_tokens API (not billed).
+	"claude-": tiktoken.MODEL_P50K_BASE,
 }
 
 const (
@@ -102,15 +114,16 @@ func realEncoding(model string) (*tiktoken.Tiktoken, bool) {
 }
 
 // CountTokens returns the exact BPE token count for text using the encoding
-// appropriate to model. Falls back to the heuristic EstimateTokens when the
-// real tokenizer is unavailable — token counting must never fail.
+// appropriate to model. Falls back to the model-aware heuristic
+// EstimateTokensForModel when the real tokenizer is unavailable — token
+// counting must never fail.
 func CountTokens(text, model string) int {
 	if text == "" {
 		return 0
 	}
 	tk, ok := realEncoding(model)
 	if !ok {
-		return EstimateTokens(text)
+		return EstimateTokensForModel(text, model)
 	}
 	return len(tk.Encode(text, nil, nil))
 }

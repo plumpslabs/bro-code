@@ -16,4 +16,14 @@ func TestTiktokenOfflineSmoke(t *testing.T) {
 	if CountTokens("halo dunia", "") <= 0 {
 		t.Fatal("default count should be positive")
 	}
+	// Claude resolves offline via the p50k_base approximation (no network).
+	claude := CountTokens("The quick brown fox jumps over the lazy dog.", "claude-sonnet-4-5")
+	if claude <= 0 {
+		t.Fatal("claude count should be positive")
+	}
+	t.Logf("claude-sonnet-4-5 tokens=%d", claude)
+	// GPT-5 resolves via o200k_base.
+	if c := CountTokens("The quick brown fox jumps over the lazy dog.", "gpt-5"); c <= 0 {
+		t.Fatal("gpt-5 count should be positive")
+	}
 }

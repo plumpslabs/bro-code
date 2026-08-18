@@ -1,12 +1,12 @@
 package provider
 
 import (
-	"slices"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -59,6 +59,8 @@ var builtinContextLimits = map[string]map[string]int{
 		"deepseek-chat":     128_000,
 		"deepseek-coder":    128_000,
 		"deepseek-reasoner": 128_000,
+		"deepseek-v4-flash": 1_000_000,
+		"deepseek-v4-pro":   1_000_000,
 	},
 	"poolside": {
 		// VERIFIED HARD CAP (2026-08, live test with a padded request): the
@@ -455,8 +457,8 @@ func ResolveModelID(models []string, model string) string {
 		return model
 	}
 	if slices.Contains(models, model) {
-			return model
-		}
+		return model
+	}
 	seg := lastSegment(model)
 	if seg != "" {
 		for _, m := range models {

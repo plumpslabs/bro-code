@@ -79,8 +79,10 @@ type anthropicRequest struct {
 type anthropicResponse struct {
 	Content []anthropicContentBlock `json:"content"`
 	Usage   struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
 	StopReason string `json:"stop_reason"`
 }
@@ -105,7 +107,8 @@ func (a *AnthropicAdapter) Complete(ctx context.Context, req CompletionRequest) 
 	var systemPrompt strings.Builder
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
-			systemPrompt.WriteString(msg.Content);systemPrompt.WriteString("\n")
+			systemPrompt.WriteString(msg.Content)
+			systemPrompt.WriteString("\n")
 			continue
 		}
 
@@ -236,9 +239,10 @@ func (a *AnthropicAdapter) Complete(ctx context.Context, req CompletionRequest) 
 
 	res := &CompletionResponse{
 		Usage: Usage{
-			PromptTokens:     apiResp.Usage.InputTokens,
-			CompletionTokens: apiResp.Usage.OutputTokens,
-			TotalTokens:      apiResp.Usage.InputTokens + apiResp.Usage.OutputTokens,
+			PromptTokens:         apiResp.Usage.InputTokens,
+			CompletionTokens:     apiResp.Usage.OutputTokens,
+			TotalTokens:          apiResp.Usage.InputTokens + apiResp.Usage.OutputTokens,
+			PromptCacheHitTokens: apiResp.Usage.CacheReadInputTokens,
 		},
 		FinishReason: apiResp.StopReason,
 	}

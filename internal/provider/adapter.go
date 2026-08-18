@@ -55,6 +55,11 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// PromptCacheHitTokens is the portion of the input served from the prompt
+	// cache, billed at the model's cache-hit rate instead of the full input
+	// price. Mapped from DeepSeek prompt_cache_hit_tokens, OpenAI
+	// prompt_tokens_details.cached_tokens, and Claude cache_read_input_tokens.
+	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
 }
 
 // ProviderAdapter defines the unified contract for LLM communication.

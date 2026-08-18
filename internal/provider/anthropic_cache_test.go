@@ -154,3 +154,28 @@ func TestAnthropicPromptCacheDefaultEnabled(t *testing.T) {
 		t.Error("BROCODE_NO_PROMPT_CACHE=1 should disable prompt caching")
 	}
 }
+
+// TestAnthropicCacheReadUsageParsing proves cache_read_input_tokens is mapped
+// onto Usage.PromptCacheHitTokens so /cost can apply the cache discount.
+func TestAnthropicCacheReadUsageParsing(t *testing.T) {
+	t.Setenv("BROCODE_NO_PROMPT_CACHE", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1000,"output_tokens":50,"cache_read_input_tokens":800,"cache_creation_input_tokens":200}}`))
+	}))
+	defer srv.Close()
+
+	a := NewAnthropicAdapter(srv.URL, "sk-test")
+	resp, err := a.Complete(t.Context(), CompletionRequest{
+		Model:    "claude-sonnet-5",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+	if resp.Usage.PromptTokens != 1000 {
+		t.Errorf("PromptTokens = %d, want 1000", resp.Usage.PromptTokens)
+	}
+	if resp.Usage.PromptCacheHitTokens != 800 {
+		t.Errorf("PromptCacheHitTokens = %d, want 800 (cache_read_input_tokens)", resp.Usage.PromptCacheHitTokens)
+	}
+}

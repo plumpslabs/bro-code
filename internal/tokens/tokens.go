@@ -11,6 +11,29 @@ import "strings"
 // is not available. Calibrated: code ≈3.2-3.8 chars/tok, English prose ≈4 chars/tok,
 // CJK ≈1.2 chars/tok.
 func EstimateTokens(text string) int {
+	return estimateWithRates(text, 3.3, 4.0, 0.85)
+}
+
+// EstimateTokensForModel is EstimateTokens with model-family calibration.
+// Model families with an officially documented character→token ratio use it
+// instead of the generic heuristic; unknown models fall back to EstimateTokens.
+//
+// DeepSeek (official docs, api-docs.deepseek.com/quick_start/token_usage):
+// 1 English char ≈ 0.3 token (≈3.33 chars/token), 1 Chinese char ≈ 0.6 token.
+// The generic heuristic (4 chars/tok English, 0.85 tok/char CJK) overestimates
+// DeepSeek CJK by ~40%, so the official ratios are applied for the family.
+func EstimateTokensForModel(text, model string) int {
+	if strings.HasPrefix(model, "deepseek-") || strings.HasPrefix(model, "deepseek/") {
+		return estimateWithRates(text, 10.0/3.0, 10.0/3.0, 0.6)
+	}
+	return EstimateTokens(text)
+}
+
+// estimateWithRates is the shared counting loop. Newlines count as one token
+// each; a line of ascii uses charsPerToken (code lines use codeCharsPerToken)
+// and each CJK rune contributes tokensPerChar. A non-empty line always counts
+// at least one token.
+func estimateWithRates(text string, codeCharsPerToken, proseCharsPerToken, tokensPerChar float64) int {
 	if text == "" {
 		return 0
 	}
@@ -36,12 +59,12 @@ func EstimateTokens(text string) int {
 		trimmed := strings.TrimSpace(line)
 		isCode := strings.ContainsAny(trimmed, "{}();=\"'") || strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "func ") || strings.HasPrefix(trimmed, "const ") || strings.HasPrefix(trimmed, "var ")
 
-		charsPerToken := 4.0
+		charsPerToken := proseCharsPerToken
 		if isCode {
-			charsPerToken = 3.3
+			charsPerToken = codeCharsPerToken
 		}
 
-		lineTokens := float64(ascii)/charsPerToken + float64(cjk)*0.85
+		lineTokens := float64(ascii)/charsPerToken + float64(cjk)*tokensPerChar
 		if lineTokens < 1 {
 			lineTokens = 1
 		}

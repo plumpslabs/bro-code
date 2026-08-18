@@ -42,7 +42,9 @@ func (u *UsageTracker) Record(model string, usg provider.Usage) {
 	mu.PromptTokens += usg.PromptTokens
 	mu.CompletionTokens += usg.CompletionTokens
 	mu.TotalTokens += usg.TotalTokens
-	mu.CostUSD += estimateCost(model, usg)
+	// Route through the shared provider cost function so /cost always matches
+	// the per-turn budget math (same table + prompt-cache discount).
+	mu.CostUSD += provider.EstimateCostUSDWithCache(model, usg.PromptTokens, usg.PromptCacheHitTokens, usg.CompletionTokens)
 }
 
 // TotalCost returns the summed estimated cost across all models.
@@ -81,66 +83,13 @@ func (u *UsageTracker) Summary() string {
 		totalTokens += m.TotalTokens
 		totalCost += m.CostUSD
 		fmt.Fprintf(&sb, "%s: %s tokens (in %s / out %s) — $%.4f\n",
-	model, fmtTokens(m.TotalTokens), fmtTokens(m.PromptTokens), fmtTokens(m.CompletionTokens), m.CostUSD)
+			model, fmtTokens(m.TotalTokens), fmtTokens(m.PromptTokens), fmtTokens(m.CompletionTokens), m.CostUSD)
 	}
 	fmt.Fprintf(&sb, "\nTOTAL: %s tokens — $%.4f", fmtTokens(totalTokens), totalCost)
 	return strings.TrimSpace(sb.String())
 }
 
-// pricingTable maps model name → (input $/1M, output $/1M). Research-backed
-// list prices; free/unknown models are $0 (honest: we'd rather under-report
-// than guess wrong).
-var pricingTable = map[string][2]float64{
-	// DeepSeek V3.1 / V4-era official pricing.
-	"deepseek-chat":          {0.27, 1.10},
-	"deepseek-coder":         {0.27, 1.10},
-	"deepseek-reasoner":      {0.55, 2.19},
-	"deepseek-v4-flash":      {0.27, 1.10},
-	"deepseek-v4-flash-free": {0, 0},
-	// Anthropic.
-	"claude-3-5-sonnet-20241022": {3.00, 15.00},
-	"claude-3-7-sonnet-20250219": {3.00, 15.00},
-	"claude-3-5-haiku-20241022":  {0.80, 4.00},
-	// OpenAI.
-	"gpt-4o":      {2.50, 10.00},
-	"gpt-4o-mini": {0.15, 0.60},
-	"o3-mini":     {1.10, 4.40},
-	// Poolside Laguna.
-	"laguna-s-2.1":   {0.50, 1.50},
-	"laguna-xs-2.1":  {0.20, 0.60},
-	"poolside-coder": {0.50, 1.50},
-	// Google.
-	"gemini-2.5-flash": {0.30, 2.50},
-	"gemini-2.5-pro":   {1.25, 10.00},
-	"gemini-2.0-flash": {0.10, 0.40},
-	// Groq (per-token, converted to per-1M).
-	"llama-3.3-70b-versatile": {0.59, 0.79},
-	// OpenRouter reference (deepseek-r1).
-	"deepseek/deepseek-r1": {0.55, 2.19},
-}
-
-// estimateCost computes USD cost for one completion from the pricing table.
-// Model IDs that are free (opencode free tier, suffix "-free") or unknown
-// report $0 — no hallucinated numbers.
-func estimateCost(model string, usg provider.Usage) float64 {
-	if strings.Contains(model, "-free") {
-		return 0
-	}
-	price, ok := pricingTable[model]
-	if !ok {
-		// Fallback: try a provider/ prefix stripped.
-		if i := strings.LastIndex(model, "/"); i >= 0 {
-			price, ok = pricingTable[model[i+1:]]
-		}
-		if !ok {
-			return 0
-		}
-	}
-	in := float64(usg.PromptTokens) / 1_000_000 * price[0]
-	out := float64(usg.CompletionTokens) / 1_000_000 * price[1]
-	return in + out
-}
-
+// fmtTokens renders a token count as a compact human-readable string.
 func fmtTokens(n int) string {
 	switch {
 	case n >= 1_000_000:
