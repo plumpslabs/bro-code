@@ -47,7 +47,7 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 type spinnerTickMsg struct{}
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return spinnerTickMsg{}
 	})
 }
@@ -552,7 +552,7 @@ func phaseBadge(s loop.LoopState) string {
 // (the message already carries its own visual marker, so skip the badge).
 func startsWithEmoji(s string) bool {
 	r, _ := utf8.DecodeRuneInString(s)
-	return r >= 0x2600
+	return r >= 0x2000
 }
 
 // diagnoseResultMsg carries the output of an async /diagnose project scan.
@@ -1074,7 +1074,7 @@ func skillEntries(workspaceDir string) []prompt.SkillEntry {
 }
 
 func (m Model) Init() tea.Cmd {
-	return m.promptInput.Focus()
+	return tea.Batch(m.promptInput.Focus(), tickCmd())
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1109,17 +1109,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case spinnerTickMsg:
-		// While any modal is open the content is static — skip the tick so we
-		// don't re-render every 150ms and flicker the modal.
-		if m.showAsk || m.showModels || m.showConnect || m.showDebug || m.showSessions {
-			return m, nil
+		// While any modal is open the content is static — keep ticker alive without advancing frames.
+		if m.showAsk || m.showModels || m.showConnect || m.showDebug || m.showSessions || m.showMCP {
+			return m, tickCmd()
 		}
-		// Keep the ticker ALIVE for the whole session. If we killed it on
-		// "Ready" (old behavior) it could die mid-turn and the spinner would
-		// freeze / never reappear. We only advance the frame while a turn is
-		// active, so an idle view re-renders identical content (cheap, no
-		// flicker) and any new turn animates immediately.
-		if m.status != "Ready" && m.status != "Failed" {
+		// Keep the ticker ALIVE for the whole session.
+		if m.turnRunning || (m.status != "Ready" && m.status != "Failed") {
 			m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
 		}
 		return m, tickCmd()
@@ -3388,7 +3383,7 @@ func (m *Model) buildLogChrome() (string, int) {
 			d := time.Since(m.turnStart)
 			elapsed = fmt.Sprintf("  ⏱ %d:%02d", int(d.Minutes()), int(d.Seconds())%60)
 		}
-		sb.WriteString(spinnerStyle.Render(frame+" "+m.status+elapsed) + "\n")
+		sb.WriteString(spinnerStyle.Render(frame) + " " + m.status + elapsed + "\n")
 		actStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 		for _, act := range m.activity {
 			sb.WriteString(actStyle.Render("  · "+act) + "\n")
