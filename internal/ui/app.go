@@ -1084,7 +1084,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Snapshot the partial stream BEFORE clearing it: an interrupted turn
 		// must leave a trace in history instead of vanishing (the user saw the
 		// text appear, so it must not silently disappear — that was a big
-		// source of "history tidak stabil" reports).
+		// source of "unstable history" reports).
 		partial := m.pendingStream
 		m.streaming = false
 		m.pendingStream = ""
@@ -1236,7 +1236,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendNote(diag)
 		// Nothing to fix — don't spawn a pointless turn.
 		if strings.Contains(diag, "No diagnostics found") {
-			m.appendNote("✅ Tidak ada diagnostik untuk diperbaiki.")
+			m.appendNote("✅ No diagnostics to fix.")
 			m.status = "Ready"
 			return m, nil
 		}
@@ -1533,7 +1533,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.turnRunning {
 					m.pendingMode = next
 					m.showModeConfirm = true
-					m.appendMessages(fmt.Sprintf("⚠️ Ganti mode ke %s saat sedang berjalan? Tekan y/Enter untuk lanjut, n/Esc untuk batal.", next))
+					m.appendMessages(fmt.Sprintf("⚠️ Change mode to %s while a turn is running? Press y/Enter to continue, n/Esc to cancel.", next))
 				} else {
 					m.mode = next
 					m.engine.SetMode(m.mode)
@@ -1940,7 +1940,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			if fixMode {
 				return diagnoseFixMsg(out)
 			}
-			out += "\n\n💡 Ketik `/diagnose fix` untuk BroCode langsung memperbaiki semua warning/error di atas secara otomatis."
+			out += "\n\n💡 Type `/diagnose fix` for BroCode to automatically fix all warnings/errors above."
 			return diagnoseResultMsg(out)
 		})
 
@@ -2872,10 +2872,10 @@ func (m *Model) parkLogAfterNewContent(log string, vpHeight, contentWidth int) {
 // navigation keys above the last assistant answer.
 func (m *Model) buildPagerContent(contentWidth int) string {
 	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).
-		Render("── JAWABAN TERAKHIR ── PgUp/PgDn/Home/End/↑/↓ scroll · q/Esc/Ctrl+P keluar") + "\n\n"
+		Render("── LATEST ANSWER ── PgUp/PgDn/Home/End/↑/↓ scroll · q/Esc/Ctrl+P exit") + "\n\n"
 	ans := m.lastAssistantAnswer()
 	if strings.TrimSpace(ans) == "" {
-		return header + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(tidak ada jawaban asisten untuk ditampilkan)")
+		return header + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(no assistant response to display)")
 	}
 	return header + formatMessage("BROCODE:\n"+ans, contentWidth, false)
 }
@@ -2993,11 +2993,11 @@ func (m *Model) buildLogChrome() (string, int) {
 	// queue mode (Alt+K) the selected row is highlighted and a hint names the
 	// management keys (e edit · d delete · ↑/↓ select · Esc exit).
 	if len(m.pendingQueue) > 0 {
-		qHead := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true).Render(fmt.Sprintf("⏳ ANTRIAN (%d)", len(m.pendingQueue)))
+		qHead := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true).Render(fmt.Sprintf("⏳ PROMPT QUEUE (%d)", len(m.pendingQueue)))
 		if m.queueMode {
-			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · e edit · d delete · ↑/↓ pilih · Esc keluar")
+			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · e edit · d delete · ↑/↓ select · Esc exit")
 		} else {
-			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · Alt+K kelola")
+			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · Alt+K manage")
 		}
 		sb.WriteString(qHead + "\n")
 		for i, q := range m.pendingQueue {
@@ -3016,7 +3016,7 @@ func (m *Model) buildLogChrome() (string, int) {
 	// pager mode the input gives way to a hint bar naming the pager keys.
 	if m.pagerActive {
 		pagerBar := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).
-			Render("── PAGER: JAWABAN TERAKHIR · PgUp/PgDn/Home/End/↑/↓ · q/Esc/Ctrl+P keluar ──")
+			Render("── PAGER: LATEST ANSWER · PgUp/PgDn/Home/End/↑/↓ · q/Esc/Ctrl+P exit ──")
 		sb.WriteString(pagerBar + "\n\n")
 	} else if m.showFileConfirm {
 		sb.WriteString(m.renderFileConfirmBar() + "\n\n")
@@ -3094,7 +3094,7 @@ func (m *Model) buildLogChrome() (string, int) {
 	}
 	// When prompts are queued, advertise the queue-management key. Only on wide
 	// terminals so the hint never pushes the help bar onto two wrapped lines;
-	// the queue block itself already shows "Alt+K kelola" on narrow screens.
+	// the queue block itself already shows "Alt+K manage" on narrow screens.
 	if len(m.pendingQueue) > 0 && m.width >= 120 {
 		helpStr += " · Alt+K queue "
 	}

@@ -48,7 +48,7 @@ func TestCostBudgetStopsTurnGracefully(t *testing.T) {
 	if !strings.Contains(res, "SYNTHESIZED") {
 		t.Fatalf("expected graceful synthesis answer, got %q", res)
 	}
-	if !strings.Contains(res, "Batas Biaya") {
+	if !strings.Contains(res, "Cost Budget") {
 		t.Fatalf("expected budget-abort marker in answer, got %q", res)
 	}
 	// 2 tool completions + 1 synth completion, each $2.50.

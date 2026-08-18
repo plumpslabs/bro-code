@@ -76,8 +76,8 @@ func TestAskModalNoOverflow(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m.showAsk = true
 	m.askQuestions = []provider.AskQuestion{
-		{Question: "Mau mulai dari mana? (this is a long question that wraps)", Options: []string{"Debug bug", "Tambah fitur baru yang sangat panjang sekali biar nge-wrap", "Review code"}, Multi: true},
-		{Question: "Area mana?", Options: []string{"Backend", "Frontend"}, Multi: false},
+		{Question: "Where should we start? (this is a long question that wraps across multiple lines)", Options: []string{"Debug existing bug", "Add a new feature that has a very long description to test wrapping", "Review code"}, Multi: true},
+		{Question: "Which area?", Options: []string{"Backend", "Frontend"}, Multi: false},
 	}
 	m.refreshAskModal()
 	out := m.renderAskModal()

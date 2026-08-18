@@ -107,13 +107,13 @@ func eventPayload(msg provider.Message) string {
 func TestRestoreSessionRendersToolCallsNotRawJSON(t *testing.T) {
 	mgr := NewManager("s", nil, 128000)
 	events := []store.Event{
-		{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: "halo"})},
+		{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: "hello"})},
 		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", ToolCalls: []provider.ToolCall{
 			{ID: "c1", Name: "grep", Arguments: `{"pattern": "inbox"}`},
 			{ID: "c2", Name: "read_file", Arguments: `{"path": "a.js"}`},
 		}})},
 		{Type: "tool_result", PayloadJSON: eventPayload(provider.Message{Role: "user", ToolCallID: "c1", Content: "line 1: inbox\n"})},
-		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", Content: "ini jawabannya"})},
+		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", Content: "this is the answer"})},
 	}
 
 	display := RestoreSession(mgr, events)
@@ -131,7 +131,7 @@ func TestRestoreSessionRendersToolCallsNotRawJSON(t *testing.T) {
 
 	// The final answer is present in display, tool-only turns are kept for model context.
 	joined := strings.Join(display, "\n")
-	if !strings.Contains(joined, "ini jawabannya") {
+	if !strings.Contains(joined, "this is the answer") {
 		t.Errorf("expected final answer in history, got: %v", display)
 	}
 
@@ -253,9 +253,9 @@ func TestNeedsCompactionEarlyRatio(t *testing.T) {
 func TestRestoreSessionStampsModeAndModel(t *testing.T) {
 	mgr := NewManager("s", nil, 128000)
 	events := []store.Event{
-		{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: "pahami arsitektur"})},
-		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", Content: "ini rencana", Mode: "PLANNER", Model: "poolside/laguna-s-2.1"})},
-		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", Content: "jawaban lama tanpa stamp"})},
+		{Type: "user_msg", PayloadJSON: eventPayload(provider.Message{Role: "user", Content: "understand architecture"})},
+		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", Content: "this is the plan", Mode: "PLANNER", Model: "poolside/laguna-s-2.1"})},
+		{Type: "assistant_msg", PayloadJSON: eventPayload(provider.Message{Role: "assistant", Content: "legacy answer without stamp"})},
 	}
 
 	display := RestoreSession(mgr, events)
@@ -279,7 +279,7 @@ func TestRestoreSessionStampsModeAndModel(t *testing.T) {
 // the turn with its mode and model and that the stored payload round-trips.
 func TestAppendAssistantTurnPersistsModeModel(t *testing.T) {
 	mgr := NewManager("s", nil, 128000)
-	if err := mgr.AppendAssistantTurn("MINER", "poolside/x", "why", "jawaban", nil); err != nil {
+	if err := mgr.AppendAssistantTurn("MINER", "poolside/x", "why", "answer", nil); err != nil {
 		t.Fatalf("AppendAssistantTurn failed: %v", err)
 	}
 	msgs := mgr.Messages()

@@ -234,7 +234,7 @@ func TestInterruptedPartialAnswerKept(t *testing.T) {
 
 	// The answer starts streaming.
 	m.streaming = true
-	m.pendingStream = "Mulai menjawab... dan terpotong di tengah kalimat"
+	m.pendingStream = "Starting to answer... and cut off mid sentence"
 	m.status = "Thinking..."
 	m.cancelTurn = func() {}
 
@@ -250,7 +250,7 @@ func TestInterruptedPartialAnswerKept(t *testing.T) {
 
 	found := false
 	for _, msg := range m.messages {
-		if strings.Contains(msg, "Mulai menjawab... dan terpotong") {
+		if strings.Contains(msg, "Starting to answer... and cut off") {
 			found = true
 			if !strings.Contains(msg, "interrupted") {
 				t.Fatalf("partial answer kept but not labeled as partial: %q", msg)
@@ -655,14 +655,14 @@ func TestViewportParksAtBottomForShortAnswer(t *testing.T) {
 	m.width = 100
 	m.height = 30
 	m.messages = append(m.messages, "YOU:\nok")
-	m.messages = append(m.messages, "BROCODE:\njawaban singkat")
+	m.messages = append(m.messages, "BROCODE:\nshort answer")
 	if _, err := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30}); err != nil {
 		t.Fatalf("window size update failed: %v", err)
 	}
 
 	v := m.View()
 	visible := ansiRegex.ReplaceAllString(v.Content, "")
-	if !contains(visible, "jawaban singkat") {
+	if !contains(visible, "short answer") {
 		t.Fatalf("short answer not visible; viewport YOffset=%d", m.logViewport.YOffset())
 	}
 	if !m.logViewport.AtBottom() {
@@ -712,7 +712,7 @@ func TestPagerModeCtrlPEnterExit(t *testing.T) {
 	if !m.pagerActive {
 		t.Fatal("expected pager active after ctrl+p")
 	}
-	if !contains(m.pagerContent, "JAWABAN TERAKHIR") {
+	if !contains(m.pagerContent, "LATEST ANSWER") {
 		t.Fatal("pager header missing from pager content")
 	}
 
@@ -814,7 +814,7 @@ func TestQueueBlockRendersAboveInput(t *testing.T) {
 	}
 	v := m.View()
 	visible := ansiRegex.ReplaceAllString(v.Content, "")
-	if !contains(visible, "ANTRIAN (2)") {
+	if !contains(visible, "PROMPT QUEUE (2)") {
 		t.Fatal("queue block header missing from View()")
 	}
 	if !contains(visible, "prompt satu") {
@@ -916,7 +916,7 @@ func TestQueueDrainStartsNextTurn(t *testing.T) {
 
 	// The returned Cmd is the next turn's runner (not an error) — startTurn
 	// fires the drained prompt, so Update returns a real tea.Cmd here.
-	m.Update(turnResultMsg{content: "jawaban"})
+	m.Update(turnResultMsg{content: "answer"})
 	if len(m.pendingQueue) != 1 || m.pendingQueue[0] != "q2" {
 		t.Fatalf("queue must drain the first item, got %v", m.pendingQueue)
 	}
@@ -926,7 +926,7 @@ func TestQueueDrainStartsNextTurn(t *testing.T) {
 	if len(m.messages) != before+2 { // 1 BROCODE answer + 1 YOU (drained prompt)
 		t.Fatalf("expected answer + drained prompt appended, got %d -> %d messages", before, len(m.messages))
 	}
-	if !contains(m.messages[len(m.messages)-2], "jawaban") {
+	if !contains(m.messages[len(m.messages)-2], "answer") {
 		t.Fatalf("drained turn answer missing from history")
 	}
 	if !contains(m.messages[len(m.messages)-1], "q1") {

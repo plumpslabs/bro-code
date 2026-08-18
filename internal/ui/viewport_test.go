@@ -286,15 +286,15 @@ func TestShortHistoryGrowsNaturallyNoBlankGap(t *testing.T) {
 		// The exact `-c` shape: a resume banner plus a couple of short messages.
 		m.messages = []string{
 			"✅ Resumed session sess_123 (5 events total)",
-			"YOU:\nhalo bro",
-			"BROCODE:\nhalo juga, mau lanjut dari mana?",
+			"YOU:\nhello bro",
+			"BROCODE:\nhello, where should we continue from?",
 		}
 
 		v := m.View()
 		visible := ansiRegex.ReplaceAllString(v.Content, "")
 
 		// All history must be visible — nothing hidden above the fold.
-		for _, want := range []string{"halo bro", "halo juga", "Resumed session"} {
+		for _, want := range []string{"hello bro", "hello, where", "Resumed session"} {
 			if !strings.Contains(visible, want) {
 				t.Fatalf("height %d: short history must render fully (natural growth), missing %q:\n%s", h, want, visible)
 			}
@@ -303,7 +303,7 @@ func TestShortHistoryGrowsNaturallyNoBlankGap(t *testing.T) {
 		// The chrome must sit right below the chat: the input prompt must appear
 		// within a few lines of the last history line, NOT at the bottom of a
 		// full-height padded viewport (that was the giant blank gap).
-		lastLogIdx := strings.LastIndex(visible, "halo juga")
+		lastLogIdx := strings.LastIndex(visible, "hello, where")
 		inputIdx := strings.Index(visible, "❯ ")
 		if inputIdx < 0 {
 			t.Fatalf("height %d: input prompt missing from view:\n%s", h, visible)
@@ -417,14 +417,14 @@ func TestResumeHistoryContinuity(t *testing.T) {
 	// seeded into the message list, then the user continues the conversation.
 	m.messages = []string{
 		"✅ Resumed session sess_123 (6 events total)",
-		"YOU:\nhalo bro, lanjutin task filter omnichannel",
-		"BROCODE:\nOke, kita lanjut. Jawaban lama baris satu.\nBaris dua.",
-		"YOU:\nbagus, lanjut",
-		"BROCODE:\nJawaban lama.\nBaris lagi.",
+		"YOU:\nhello, continue omnichannel filter task",
+		"BROCODE:\nSure, continuing now. Previous answer line one.\nLine two.",
+		"YOU:\ngreat, continue",
+		"BROCODE:\nPrevious answer.\nAnother line.",
 	}
 
 	// Continuation: new prompt + long answer.
-	m.appendMessages("YOU:\nlanjut bro, kerjain sekarang")
+	m.appendMessages("YOU:\ncontinue now, proceed with task")
 	m.appendMessages("BROCODE:BUILDER\n" + longAnswer(30))
 
 	v := m.View()
@@ -442,7 +442,7 @@ func TestResumeHistoryContinuity(t *testing.T) {
 	m.logViewport.GotoTop()
 	v = m.View()
 	top := ansiRegex.ReplaceAllString(v.Content, "")
-	if !strings.Contains(top, "halo bro, lanjutin task filter omnichannel") {
+	if !strings.Contains(top, "hello, continue omnichannel filter task") {
 		t.Fatalf("oldest restored message not reachable by scrolling up (continuity lost):\n%s", top)
 	}
 }

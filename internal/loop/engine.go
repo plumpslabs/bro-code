@@ -927,7 +927,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			if onUpdate != nil {
 				onUpdate(e.state, fmt.Sprintf("⚠️ Cost budget exceeded ($%.4f) — synthesizing final answer from explored context...", e.costUSD))
 			}
-			return e.finalSynth(ctx, fmt.Sprintf("COST BUDGET EXCEEDED ($%.4f): The per-task cost budget has been exhausted.", e.costUSD), "Batas Biaya Tercapai")
+			return e.finalSynth(ctx, fmt.Sprintf("COST BUDGET EXCEEDED ($%.4f): The per-task cost budget has been exhausted.", e.costUSD), "Cost Budget Reached")
 		}
 
 		// Progress detection: a tool-only round that examined NO new file is a
@@ -1070,7 +1070,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				synthResp, synthErr = e.complete(ctx, synthReq)
 			}
 			if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) != "" {
-				res := synthResp.Content + "\n\n---\n*💡 Eksplorasi dihentikan untuk efisiensi token. Kirim prompt lanjutan jika ingin melanjutkan pendalaman.*"
+				res := synthResp.Content + "\n\n---\n*💡 Exploration paused for token efficiency. Send a follow-up prompt to continue deep exploration.*"
 				_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", res, nil)
 				e.state = StateDone
 				if onUpdate != nil {
@@ -1083,14 +1083,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			// or returns empty: construct a helpful answer from what the agent
 			// already explored.
 			e.state = StateDone
-			msg := "Eksplorasi dihentikan untuk efisiensi token — berikut ringkasan konteks yang telah terverifikasi:\n" + e.exploredSummary()
+			msg := "Exploration paused for token efficiency — here is the verified context summary:\n" + e.exploredSummary()
 			if autoFixResult != "" {
-				msg = "Eksplorasi dihentikan untuk efisiensi token, namun sistem telah menerapkan perbaikan otomatis terlebih dahulu:\n" + autoFixResult + "\n\n" + msg
+				msg = "Exploration paused for token efficiency; automated fixes applied first:\n" + autoFixResult + "\n\n" + msg
 			}
 			if e.lastReasoning != "" {
-				msg += "\n\n**Fokus Analisis Terakhir**: " + e.lastReasoning
+				msg += "\n\n**Last Analysis Focus**: " + e.lastReasoning
 			}
-			msg += "\n\n---\n*💡 Kirim prompt lanjutan jika ingin melanjutkan pendalaman.*"
+			msg += "\n\n---\n*💡 Send a follow-up prompt to continue deep exploration.*"
 			_ = e.context.AppendAssistantTurn(e.Mode(), e.model, "", msg, nil)
 			if onUpdate != nil {
 				onUpdate(e.state, "Completed with fallback context synthesis")
