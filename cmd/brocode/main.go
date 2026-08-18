@@ -212,7 +212,7 @@ func main() {
 			initialMessages = append(initialMessages, fmt.Sprintf("⚡ Continued session %s.", sessionID))
 		}
 	} else {
-		initialMessages = append(initialMessages, "⚡ BroCode engine active. Type a prompt or /help for commands.")
+		initialMessages = append(initialMessages, ui.WelcomeBanner())
 		ws := repo.DiscoverWorkspace(cwd)
 		if len(ws.Repos) > 1 {
 			var names []string

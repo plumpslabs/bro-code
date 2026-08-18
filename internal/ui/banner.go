@@ -18,8 +18,13 @@ var bannerGradient = []string{"24", "33", "39"}
 // input. Only shown when the session has no history — a resumed conversation
 // starts from its own messages.
 func welcomeBanner() string {
+	return WelcomeBanner()
+}
+
+// WelcomeBanner renders the fresh-session hero banner with blue-gradient logo.
+func WelcomeBanner() string {
 	var sb strings.Builder
-	rows := strings.Split(version.Logo, "\n")
+	rows := strings.Split(strings.TrimSpace(version.Logo), "\n")
 	for i, row := range rows {
 		color := "24"
 		if i < len(bannerGradient) {
