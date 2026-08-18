@@ -417,6 +417,21 @@ func (m *Model) appendMessages(msgs ...string) {
 	}
 }
 
+// upsertDiffMessage appends a live DIFF entry, or replaces the most recent
+// one for the same path. The engine emits a cumulative diff per file, so
+// repeated edits grow a single entry in the history instead of one entry per
+// edit — while an edit to a NEW file still appends a fresh entry.
+func (m *Model) upsertDiffMessage(path, diff string) {
+	prefix := "DIFF:\n" + path + "\n"
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if strings.HasPrefix(m.messages[i], prefix) {
+			m.messages[i] = prefix + diff
+			return
+		}
+	}
+	m.appendMessages(prefix + diff)
+}
+
 // appendNote adds a UI/informational message to the chat AND persists it as a
 // system_msg event so slash-command output (e.g. /help, /diagnose) survives a
 // -c resume instead of disappearing on reload. Transient confirmations (copy,
@@ -1223,8 +1238,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fileDiffMsg:
 		// Live per-edit red/green diff entry in the chat. Kept compact
 		// (file path + collapsed-by-default diff lines) and rendered by
-		// formatMessage, which colorizes the +/- lines.
-		m.appendMessages("DIFF:\n" + msg.path + "\n" + msg.diff)
+		// formatMessage, which colorizes the +/- lines. Upserted per path:
+		// the engine sends a CUMULATIVE diff, so the file's previous entry
+		// is replaced and one file keeps one growing entry instead of a
+		// flood of per-edit duplicates in the history.
+		m.upsertDiffMessage(msg.path, msg.diff)
 		return m, nil
 
 	case diagnoseResultMsg:

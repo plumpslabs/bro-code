@@ -1136,17 +1136,42 @@ func TestGuardPreflightRedundant(t *testing.T) {
 	}
 }
 
-func TestLastChangeDiff(t *testing.T) {
+func TestCumulativeChangeDiff(t *testing.T) {
 	tool.ResetChanges()
 	p := t.TempDir() + "/f.go"
 	tool.RecordChange(tool.FileChange{Path: p, Action: "modified", Old: "a\nb\n", New: "a\nc\n"})
-	e := &Engine{}
-	got := e.lastChangeDiff(p)
+	got := tool.CumulativeChangeDiff(p)
 	if !strings.Contains(got, "+c") || !strings.Contains(got, "-b") {
-		t.Fatalf("lastChangeDiff = %q, want +/- markers", got)
+		t.Fatalf("CumulativeChangeDiff = %q, want +/- markers", got)
 	}
 	// Unknown path -> empty.
-	if e.lastChangeDiff(t.TempDir()+"/nope") != "" {
+	if tool.CumulativeChangeDiff(t.TempDir()+"/nope") != "" {
 		t.Fatal("expected empty diff for unknown path")
+	}
+	// Repeated edits to the same path fold into ONE diff from the ORIGINAL
+	// content to the LATEST content (cumulative), not a diff per edit.
+	tool.ResetChanges()
+	tool.RecordChange(tool.FileChange{Path: p, Action: "modified", Old: "a\nb\n", New: "a\nc\n"})
+	tool.RecordChange(tool.FileChange{Path: p, Action: "modified", Old: "a\nc\n", New: "a\nd\n"})
+	cum := tool.CumulativeChangeDiff(p)
+	if !strings.Contains(cum, "+d") {
+		t.Fatalf("cumulative diff must include the latest content, got %q", cum)
+	}
+	if strings.Contains(cum, "+c") {
+		t.Fatalf("cumulative diff must NOT re-show intermediate content, got %q", cum)
+	}
+	// created → modified keeps the + view of the whole final file.
+	tool.ResetChanges()
+	tool.RecordChange(tool.FileChange{Path: p, Action: "created", Old: "", New: "x\n"})
+	tool.RecordChange(tool.FileChange{Path: p, Action: "modified", Old: "x\n", New: "x\ny\n"})
+	if got := tool.CumulativeChangeDiff(p); !strings.Contains(got, "+ x") || !strings.Contains(got, "+ y") {
+		t.Fatalf("created→modified must render a whole-file add, got %q", got)
+	}
+	// modified → deleted renders the deleted content with - markers.
+	tool.ResetChanges()
+	tool.RecordChange(tool.FileChange{Path: p, Action: "modified", Old: "a\nb\n", New: "a\nb\nc\n"})
+	tool.RecordChange(tool.FileChange{Path: p, Action: "deleted", Old: "a\nb\nc\n", New: ""})
+	if got := tool.CumulativeChangeDiff(p); !strings.Contains(got, "- a") || !strings.Contains(got, "- c") {
+		t.Fatalf("modified→deleted must render - markers, got %q", got)
 	}
 }

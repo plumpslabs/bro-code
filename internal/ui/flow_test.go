@@ -949,6 +949,58 @@ func longAnswer(n int) string {
 	return s
 }
 
+// TestLiveDiffUpsertPerPath verifies live per-edit DIFF entries grow one entry
+// per file: a second diff for the same path replaces the first (the engine
+// sends cumulative diffs), while a different path appends a fresh entry — so
+// repeated edits don't flood the conversation history.
+func TestLiveDiffUpsertPerPath(t *testing.T) {
+	m := newTestApp()
+	countDiffs := func() int {
+		n := 0
+		for _, msg := range m.messages {
+			if strings.HasPrefix(msg, "DIFF:\n") {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Two different files -> two entries.
+	for _, d := range []fileDiffMsg{
+		{path: "src/a.ts", diff: "+1 -1"},
+		{path: "src/b.ts", diff: "+2 -2"},
+	} {
+		if _, err := m.Update(d); err != nil {
+			t.Fatalf("diff update failed: %v", err)
+		}
+	}
+	if n := countDiffs(); n != 2 {
+		t.Fatalf("expected 2 DIFF entries after two new files, got %d: %v", n, m.messages)
+	}
+
+	// Same file again -> replaces, does not append.
+	if _, err := m.Update(fileDiffMsg{path: "src/a.ts", diff: "+3 -3"}); err != nil {
+		t.Fatalf("upsert diff update failed: %v", err)
+	}
+	if n := countDiffs(); n != 2 {
+		t.Fatalf("repeated edit to the same file must not add a message, got %d", n)
+	}
+	entry := func(path string) string {
+		for _, msg := range m.messages {
+			if strings.HasPrefix(msg, "DIFF:\n"+path+"\n") {
+				return msg
+			}
+		}
+		return ""
+	}
+	if e := entry("src/a.ts"); !strings.Contains(e, "+3 -3") {
+		t.Fatalf("a.ts entry not replaced with the cumulative diff: %q", e)
+	}
+	if e := entry("src/b.ts"); !strings.Contains(e, "+2 -2") {
+		t.Fatalf("b.ts entry must be untouched: %q", e)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && (func() bool {
 		for i := 0; i+len(needle) <= len(haystack); i++ {

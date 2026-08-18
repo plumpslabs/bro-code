@@ -136,8 +136,12 @@ type Engine struct {
 	// (for the per-turn HUD, P2 #3). lastChangeEmit tracks how many file
 	// changes have already been surfaced to the activity slot this turn, so
 	// the real-time diff (P2 #2) emits only on a NEW change (not every round).
-	turnTokens      int
-	lastChangeEmit  int
+	turnTokens int
+	// lastChangeEmit counts changes surfaced to the one-line activity HUD;
+	// lastChangeDiffEmit is the same watermark for the live chat DIFF entries,
+	// so a path that gained a change this round re-emits its cumulative diff.
+	lastChangeEmit     int
+	lastChangeDiffEmit int
 	state           LoopState
 	fallbacks       []Fallback
 	streamHandler   func(delta string)
@@ -759,6 +763,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.costUSD = 0
 	e.turnTokens = 0
 	e.lastChangeEmit = 0
+	e.lastChangeDiffEmit = 0
 	// Reset the turn's recorded file changes so the review complexity gate and
 	// the UI summary only ever see THIS turn's edits (headless contexts like
 	// the bench harness and tests have no UI ResetChanges call).
@@ -1502,13 +1507,6 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						if e.onFileEdited != nil && err == nil {
 							e.onFileEdited(p)
 						}
-						// Surface a live red/green diff entry in the chat as each edit
-						// lands, so the user sees exactly what changed in real time.
-						if e.onChange != nil && err == nil {
-							if d := e.lastChangeDiff(p); d != "" {
-								e.onChange(p, d)
-							}
-						}
 					}
 				}
 
@@ -1549,6 +1547,29 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				if n := tool.ChangesLen(); n > e.lastChangeEmit {
 					e.lastChangeEmit = n
 					onUpdate(e.state, "📝 "+tool.FileChangesOneLine(tool.PeekChanges()))
+				}
+			}
+
+			// Live red/green diff entry per edit (P2 #2): surface a cumulative
+			// diff for every path that gained a NEW change this round. Driven
+			// by the change list rather than tool names, so write_file,
+			// edit_file, delete_file AND LSP-driven edits (lsp_fix/lsp_rename)
+			// all surface in the chat in real time. The UI replaces the path's
+			// previous entry, so one file keeps one growing diff.
+			if e.onChange != nil {
+				if n := tool.ChangesLen(); n > e.lastChangeDiffEmit {
+					chs := tool.PeekChanges()[e.lastChangeDiffEmit:n]
+					e.lastChangeDiffEmit = n
+					seen := make(map[string]bool)
+					for _, ch := range chs {
+						if seen[ch.Path] {
+							continue
+						}
+						seen[ch.Path] = true
+						if d := tool.CumulativeChangeDiff(ch.Path); d != "" {
+							e.onChange(ch.Path, d)
+						}
+					}
 				}
 			}
 
@@ -2175,23 +2196,6 @@ func atoiSafe(s string) int {
 	return n
 }
 
-// lastChangeDiff returns the unified diff of the most recent recorded change to
-// path this turn (from the tool layer's change log), so the engine can surface a
-// live red/green diff entry per edit — for both edit_file (surgical) and
-// write_file (new/overwrite) without parsing tool output text.
-func (e *Engine) lastChangeDiff(path string) string {
-	chs := tool.PeekChanges()
-	for _, ch := range slices.Backward(chs) {
-		if ch.Path != path {
-			continue
-		}
-		raw := tool.FileChangesDiff([]tool.FileChange{ch})
-		raw = strings.TrimPrefix(raw, ch.Path+"\n")
-		return strings.TrimRight(raw, "\n")
-	}
-	return ""
-}
-
 // guardPreflightRedundant returns a non-empty rejection when a tool call is
 // redundant with the pre-flight diagnostics already packed into context:
 //   - read_file on a file whose diagnostics + code window are ALREADY in the
@@ -2509,9 +2513,10 @@ func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, r
 		e.usage.Record(req.Model, resp.Usage)
 	}
 	// Per-turn cost accumulation for the USD budget: providers report exact
-	// token usage; multiply by the model list price.
+	// token usage; multiply by the model list price, applying the prompt-cache
+	// discount for cache-hit input tokens.
 	if resp != nil && (resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0) {
-		e.costUSD += provider.EstimateCostUSD(req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		e.costUSD += provider.EstimateCostUSDWithCache(req.Model, resp.Usage.PromptTokens, resp.Usage.PromptCacheHitTokens, resp.Usage.CompletionTokens)
 		e.turnTokens += resp.Usage.TotalTokens
 	}
 	return resp, nil

@@ -133,6 +133,39 @@ func FileChangesCompact(ch []FileChange) string {
 // Each file's diff is capped so a huge rewrite cannot flood the terminal.
 const maxDiffLinesPerFile = 60
 
+// CumulativeChangeDiff returns the unified diff for path from the FIRST
+// recorded change's original content to the LAST recorded change's content
+// this turn — one growing diff per file (created → modified → deleted), so the
+// live chat entry updates in place instead of spawning a new entry per edit.
+// Returns "" when path has no recorded change this turn.
+func CumulativeChangeDiff(path string) string {
+	chs := PeekChanges()
+	var first, last *FileChange
+	for i := range chs {
+		if chs[i].Path != path {
+			continue
+		}
+		if first == nil {
+			first = &chs[i]
+		}
+		last = &chs[i]
+	}
+	if first == nil {
+		return ""
+	}
+	merged := *last
+	switch {
+	case last.Action == "deleted":
+		merged = FileChange{Path: last.Path, Action: "deleted", Old: last.Old}
+	case first.Action == "created":
+		merged = FileChange{Path: last.Path, Action: "created", New: last.New}
+	default:
+		merged = FileChange{Path: last.Path, Action: "modified", Old: first.Old, New: last.New}
+	}
+	raw := FileChangesDiff([]FileChange{merged})
+	return strings.TrimRight(strings.TrimPrefix(raw, last.Path+"\n"), "\n")
+}
+
 // FileChangesOneLine renders a single compact summary line for the activity
 // slot: total file count, net line deltas, and a per-file breakdown. Used for
 // the real-time "what just changed" HUD during a turn (P2 #2) — kept to one
