@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -98,7 +99,16 @@ func runTestCommand(ctx context.Context, cmd string) testResult {
 	tctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
-	sh := exec.CommandContext(tctx, "sh", "-c", cmd)
+	var sh *exec.Cmd
+	if runtime.GOOS == "windows" {
+		if bashPath, err := exec.LookPath("bash"); err == nil {
+			sh = exec.CommandContext(tctx, bashPath, "-c", cmd)
+		} else {
+			sh = exec.CommandContext(tctx, "cmd.exe", "/c", cmd)
+		}
+	} else {
+		sh = exec.CommandContext(tctx, "sh", "-c", cmd)
+	}
 	out, err := sh.CombinedOutput()
 	tr.raw = string(out)
 	if tctx.Err() == context.DeadlineExceeded {

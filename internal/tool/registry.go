@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -1253,7 +1254,16 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		return t.execInContainer(tctx, args.Command)
 	}
 
-	cmd := exec.CommandContext(tctx, "sh", "-c", args.Command)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		if bashPath, err := exec.LookPath("bash"); err == nil {
+			cmd = exec.CommandContext(tctx, bashPath, "-c", args.Command)
+		} else {
+			cmd = exec.CommandContext(tctx, "cmd.exe", "/c", args.Command)
+		}
+	} else {
+		cmd = exec.CommandContext(tctx, "sh", "-c", args.Command)
+	}
 	out, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(out))
 	if tctx.Err() == context.DeadlineExceeded {
