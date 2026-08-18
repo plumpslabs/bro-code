@@ -45,6 +45,12 @@ var specs = []ServerSpec{
 	{Language: "rust", Command: "rust-analyzer"},
 	{Language: "c", Command: "clangd"},
 	{Language: "cpp", Command: "clangd"},
+	{Language: "vue", Command: "vue-language-server", Args: []string{"--stdio"}},
+	{Language: "svelte", Command: "svelteserver", Args: []string{"--stdio"}},
+	{Language: "astro", Command: "astro-ls", Args: []string{"--stdio"}},
+	{Language: "html", Command: "vscode-html-language-server", Args: []string{"--stdio"}},
+	{Language: "css", Command: "vscode-css-language-server", Args: []string{"--stdio"}},
+	{Language: "json", Command: "vscode-json-language-server", Args: []string{"--stdio"}},
 }
 
 // Client is a live connection to one language server.
@@ -136,6 +142,12 @@ func (m *Manager) InstallHints() map[string]string {
 		"typescript": "npm install -g typescript-language-server typescript",
 		"python":     "npm install -g pyright",
 		"rust":       "rustup component add rust-analyzer",
+		"vue":        "npm install -g @vue/language-server",
+		"svelte":     "npm install -g svelte-language-server",
+		"astro":      "npm install -g @astrojs/language-server",
+		"html":       "npm install -g vscode-langservers-extracted",
+		"css":        "npm install -g vscode-langservers-extracted",
+		"json":       "npm install -g vscode-langservers-extracted",
 	}
 	switch runtime.GOOS {
 	case "darwin":
@@ -182,12 +194,13 @@ func (m *Manager) ActiveServers() []string {
 	var out []string
 	for lang, c := range m.clients {
 		c.mu.Lock()
-		closed := c.closed
+		alive := !c.closed
 		c.mu.Unlock()
-		if !closed {
+		if alive {
 			out = append(out, lang)
 		}
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -222,7 +235,7 @@ func specForPath(path string) *ServerSpec {
 				return &specs[i]
 			}
 		case "typescript", "javascript":
-			if ext == ".ts" || ext == ".tsx" || ext == ".js" || ext == ".jsx" || ext == ".mjs" || ext == ".cjs" {
+			if ext == ".ts" || ext == ".tsx" || ext == ".js" || ext == ".jsx" || ext == ".mjs" || ext == ".cjs" || ext == ".mdx" {
 				return &specs[i]
 			}
 		case "python":
@@ -239,6 +252,30 @@ func specForPath(path string) *ServerSpec {
 			}
 		case "cpp":
 			if ext == ".cc" || ext == ".cpp" || ext == ".hpp" || ext == ".cxx" || ext == ".hxx" {
+				return &specs[i]
+			}
+		case "vue":
+			if ext == ".vue" {
+				return &specs[i]
+			}
+		case "svelte":
+			if ext == ".svelte" {
+				return &specs[i]
+			}
+		case "astro":
+			if ext == ".astro" {
+				return &specs[i]
+			}
+		case "html":
+			if ext == ".html" || ext == ".htm" {
+				return &specs[i]
+			}
+		case "css":
+			if ext == ".css" || ext == ".scss" || ext == ".sass" || ext == ".less" {
+				return &specs[i]
+			}
+		case "json":
+			if ext == ".json" || ext == ".jsonc" {
 				return &specs[i]
 			}
 		}

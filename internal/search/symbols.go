@@ -32,7 +32,9 @@ func ExtractSymbols(path string) ([]SymbolItem, error) {
 	switch ext {
 	case ".go":
 		return extractGoSymbols(path)
-	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rs", ".c", ".cpp", ".cc", ".h", ".hpp", ".java", ".kt", ".rb", ".php", ".swift", ".cs":
+	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rs", ".c", ".cpp", ".cc", ".h", ".hpp",
+		".java", ".kt", ".rb", ".php", ".swift", ".cs", ".vue", ".svelte", ".astro", ".mdx",
+		".prisma", ".graphql", ".gql", ".proto", ".sql", ".dart", ".scala", ".zig", ".lua", ".ex", ".exs":
 		return extractGenericSymbols(path)
 	}
 	return nil, nil
@@ -81,12 +83,15 @@ func extractGoSymbols(path string) ([]SymbolItem, error) {
 var genericDeclRe = regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:pub\s+)?(?:static\s+)?(?:const\s+)?(?:def|fn|function|class|interface|struct|enum|trait|impl|type)\s+([a-zA-Z0-9_]+)`)
 
 // extractGenericSymbols extracts declarations using fast regex for TS, Python,
-// Rust, C++, Java, JS, etc. Also catches arrow-function consts and CommonJS
-// module.exports for JS/TS projects.
+// Rust, C++, Java, JS, Vue, Svelte, Astro, GraphQL, Prisma, SQL, etc.
 var (
 	arrowFnRe     = regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:default\s+)?const\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?\(?`)
 	cjsExportRe   = regexp.MustCompile(`(?m)^\s*module\.exports\s*=\s*([a-zA-Z0-9_]+)`)
 	classMethodRe = regexp.MustCompile(`(?m)^\s{2,}(?:async\s+)?(?:static\s+)?(?:get\s+|set\s+)?([a-zA-Z0-9_]+)\s*\([^)]*\)\s*\{`)
+	prismaModelRe = regexp.MustCompile(`(?m)^\s*(?:model|enum)\s+([a-zA-Z0-9_]+)`)
+	graphqlTypeRe = regexp.MustCompile(`(?m)^\s*(?:type|input|interface|enum|union|schema)\s+([a-zA-Z0-9_]+)`)
+	protoMsgRe    = regexp.MustCompile(`(?m)^\s*(?:message|service|rpc|enum)\s+([a-zA-Z0-9_]+)`)
+	sqlTableRe    = regexp.MustCompile(`(?im)^\s*CREATE\s+(?:TABLE|VIEW|FUNCTION|PROCEDURE)\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_\.]+)`)
 )
 
 func extractGenericSymbols(path string) ([]SymbolItem, error) {
@@ -100,6 +105,7 @@ func extractGenericSymbols(path string) ([]SymbolItem, error) {
 
 	seen := map[string]bool{}
 	add := func(name, kind string, line int) {
+		name = strings.Trim(name, `"';`)
 		if name == "" || seen[name] {
 			return
 		}
@@ -136,7 +142,19 @@ func extractGenericSymbols(path string) ([]SymbolItem, error) {
 		if m := cjsExportRe.FindStringSubmatch(line); len(m) == 2 {
 			add(m[1], "func", ln)
 		}
-		// Indented method/property definitions inside classes (JS/TS).
+		if m := prismaModelRe.FindStringSubmatch(line); len(m) == 2 {
+			add(m[1], "model", ln)
+		}
+		if m := graphqlTypeRe.FindStringSubmatch(line); len(m) == 2 {
+			add(m[1], "type", ln)
+		}
+		if m := protoMsgRe.FindStringSubmatch(line); len(m) == 2 {
+			add(m[1], "proto", ln)
+		}
+		if m := sqlTableRe.FindStringSubmatch(line); len(m) == 2 {
+			add(m[1], "table", ln)
+		}
+		// Indented method/property definitions inside classes (JS/TS/Vue/Svelte).
 		if !strings.Contains(line, "function") && !strings.Contains(line, "=>") {
 			if m := classMethodRe.FindStringSubmatch(line); len(m) == 2 {
 				add(m[1], "method", ln)

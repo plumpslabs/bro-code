@@ -96,6 +96,64 @@ module.exports = ConversationService;
 	}
 }
 
+func TestExtractWebFrameworkSymbols(t *testing.T) {
+	dir := t.TempDir()
+
+	vueFile := filepath.Join(dir, "Button.vue")
+	vueContent := `<script setup>
+function handleClick() {}
+const calculateTotal = () => 100;
+</script>
+<template><button @click="handleClick">Click</button></template>`
+	if err := os.WriteFile(vueFile, []byte(vueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	prismaFile := filepath.Join(dir, "schema.prisma")
+	prismaContent := `model User {
+  id    Int    @id @default(autoincrement())
+  email String @unique
+}
+
+enum Role {
+  USER
+  ADMIN
+}`
+	if err := os.WriteFile(prismaFile, []byte(prismaContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vueSyms, err := ExtractSymbols(vueFile)
+	if err != nil {
+		t.Fatalf("ExtractSymbols vue: %v", err)
+	}
+	vueMap := map[string]string{}
+	for _, s := range vueSyms {
+		vueMap[s.Name] = s.Kind
+	}
+	if vueMap["handleClick"] != "func" {
+		t.Errorf("expected handleClick func in Vue, got %v", vueMap)
+	}
+	if vueMap["calculateTotal"] != "func" {
+		t.Errorf("expected calculateTotal func in Vue, got %v", vueMap)
+	}
+
+	prismaSyms, err := ExtractSymbols(prismaFile)
+	if err != nil {
+		t.Fatalf("ExtractSymbols prisma: %v", err)
+	}
+	prismaMap := map[string]string{}
+	for _, s := range prismaSyms {
+		prismaMap[s.Name] = s.Kind
+	}
+	if prismaMap["User"] != "model" {
+		t.Errorf("expected User model in Prisma, got %v", prismaMap)
+	}
+	if prismaMap["Role"] != "enum" {
+		t.Errorf("expected Role enum in Prisma, got %v", prismaMap)
+	}
+}
+
 func TestBM25RanksRelevantFileFirst(t *testing.T) {
 	docs := []Document{
 		{ID: "src/payment/gateway.js", Title: "gateway.js", Body: "handles payment gateway integration with midtrans and stripe billing"},

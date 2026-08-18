@@ -23,18 +23,23 @@ import (
 
 func TestSpecForPath(t *testing.T) {
 	cases := map[string]string{
-		"main.go":      "go",
-		"app.ts":       "typescript",
-		"App.tsx":      "typescript",
-		"index.js":     "typescript",
-		"util.py":      "python",
-		"lib.rs":       "rust",
-		"main.c":       "c",
-		"foo.hpp":      "cpp",
-		"README.md":    "",
-		"noext":        "",
-		"style.css":    "",
-		"package.json": "",
+		"main.go":       "go",
+		"app.ts":        "typescript",
+		"App.tsx":       "typescript",
+		"index.js":      "typescript",
+		"post.mdx":      "typescript",
+		"util.py":       "python",
+		"lib.rs":        "rust",
+		"main.c":        "c",
+		"foo.hpp":       "cpp",
+		"App.vue":       "vue",
+		"Widget.svelte": "svelte",
+		"Page.astro":    "astro",
+		"index.html":    "html",
+		"style.css":     "css",
+		"package.json":  "json",
+		"README.md":     "",
+		"noext":         "",
 	}
 	for path, want := range cases {
 		spec := specForPath(path)
