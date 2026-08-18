@@ -1,63 +1,63 @@
 <p align="center">
   <h1 align="center">🧠 BroCode</h1>
   <p align="center">
-    <strong>The Senior-Level Autonomous AI Coding Agent for Real-World Codebases.</strong><br>
-    <em>Fast, resilient, token-efficient, and cautious because it wastes nothing.</em>
+    <strong>Autonomous AI Coding Agent for Software Engineering</strong><br>
+    <em>High-performance, token-efficient, and deterministic coding assistant for real-world codebases.</em>
   </p>
   <p align="center">
-    <a href="#-features"><img src="https://img.shields.io/badge/version-v0.1.0-blue.svg?style=flat-square" alt="Version"></a>
-    <a href="#-installation"><img src="https://img.shields.io/badge/go-1.24+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
-    <a href="#-license"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
-    <a href="#-compatibility"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20BSD-lightgrey.svg?style=flat-square" alt="Platforms"></a>
+    <a href="https://github.com/plumpslabs/bro-code/releases"><img src="https://img.shields.io/badge/release-v0.1.0-blue.svg?style=flat-square" alt="Version"></a>
+    <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.24+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
+    <a href="#-platform-compatibility"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20BSD-lightgrey.svg?style=flat-square" alt="Platforms"></a>
   </p>
 </p>
 
 ---
 
-## ⚡ Why BroCode?
+## ⚡ Overview
 
-Most AI coding tools behave like impatient junior developers: they guess file paths, rewrite entire files unnecessarily, hallucinate nonexistent functions, swallow errors, and waste thousands of tokens per turn.
+BroCode is an autonomous AI coding agent designed for precision, reliability, and token efficiency. Rather than performing unconstrained file overwrites or speculative edits, BroCode follows a deterministic engineering cycle:
 
-**BroCode operates with the discipline of a Staff Engineer:**
-1. **Never edit blind:** Explores call graphs and verifies symbols before touching code.
-2. **5-Tier Resilient Editing:** Never fails with "target not found" due to whitespace, CRLF, or minor line drift.
-3. **Zero-Loss Atomic Rollback:** Creates shadow Git plumbing snapshots before modifications, allowing instantaneous `/undo` without corrupting your active branch history.
-4. **Exact Offline BPE Token Accounting:** Accurate token windows powered by `tiktoken-go`.
-5. **Continuous Project Memory:** Retains verified architectural decisions, build rules, and gotchas in `.brocode/memory.md` with bounded BM25 dynamic retrieval.
-6. **Multi-Agent Specialist Swarm:** Orchestrates Architect, Builder, and Auditor agents collaboratively for complex refactoring.
+**Analyze Context → Plan Architecture → Locate Symbols → Apply Resilient Edit → Verify Build/Tests → Retain Project Rules**
 
----
-
-## ✨ Key Architectural Highlights
-
-```
-┌────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                   BROCODE CORE CAPABILITIES                                    │
-├───────────────────────────────┬────────────────────────────────┬───────────────────────────────┤
-│ 🛡️ 5-Tier Resilient Editor    │ ⏪ Atomic Git Shadow Rollback  │ 🐝 Collaborative Swarm        │
-│ Exact, CRLF, trimmed-line,    │ Zero-loss tree snapshots under │ 3-stage pipeline (Architect   │
-│ indent-aligned & Levenshtein  │ `refs/brocode/snapshots`       │ -> Builder -> Auditor)        │
-├───────────────────────────────┼────────────────────────────────┼───────────────────────────────┤
-│ ⌨️ Interactive Autocomplete   │ 🧠 Continuous Project Memory   │ 🌐 Zero-Config Web Search     │
-│ Floating popup for `/` slash  │ Bounded gotcha retention with  │ Free DuckDuckGo Lite fallback │
-│ commands & `@` file mentions  │ dynamic BM25 warm-start        │ + Exa / Tavily API support    │
-├───────────────────────────────┼────────────────────────────────┼───────────────────────────────┤
-│ 🔍 Code Intelligence (LSP)    │ 🏢 Enterprise Ignore Matrix    │ ⚡ Pure Go / Zero-CGO         │
-│ Diagnostics, hover, go-to-def │ Auto-skips dependencies &      │ Blazing fast, statically      │
-│ for Go, TS/JS, Python, Rust   │ caches in 500k+ file repos     │ linked, <10ms startup time    │
-└───────────────────────────────┴────────────────────────────────┴───────────────────────────────┘
-```
+### Core Engineering Principles:
+1. **Targeted Precision:** Performs localized, surgical edits without unnecessary full-file rewrites.
+2. **5-Tier Resilient Code Editor:** Automatically resolves indentation shifts, line trimming, CRLF/LF line endings, and sliding-window fuzzy matching to prevent patch failures.
+3. **Atomic Shadow Tree Rollback:** Generates zero-loss Git plumbing snapshots under `refs/brocode/snapshots` before writing to disk, enabling instant `/undo` without corrupting working branches.
+4. **Exact Offline BPE Token Accounting:** Precise context calibration using native `tiktoken-go` without external network latency.
+5. **Continuous Project Knowledge:** Automatically extracts and persists verified rules, architecture patterns, and traps to `.brocode/memory.md` with dynamic BM25 retrieval.
+6. **Collaborative Specialist Swarm:** Multi-agent pipeline coordinating Architect, Builder, and Auditor roles for structured code transformations.
 
 ---
 
-## 🚀 Installation
+## 📦 Installation
 
-### Option 1: Go Install (Recommended)
+Choose the installation method that fits your workflow:
+
+### Method 1: One-Line Installer (macOS & Linux)
 ```bash
-go install github.com/plumpslabs/bro-code/cmd/brocode@v0.1.0
+curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash
 ```
 
-### Option 2: Build From Source
+### Method 2: Go Install
+```bash
+go install github.com/plumpslabs/bro-code/cmd/brocode@latest
+```
+
+### Method 3: Homebrew (macOS & Linux)
+```bash
+brew tap plumpslabs/tap
+brew install brocode
+```
+
+### Method 4: Pre-built Binaries
+Download pre-compiled binaries from [GitHub Releases](https://github.com/plumpslabs/bro-code/releases) for:
+* **macOS**: Apple Silicon (`arm64`) / Intel (`amd64`)
+* **Linux**: `amd64` / `arm64` / Alpine
+* **Windows**: `amd64` / `arm64` (`.zip`)
+* **FreeBSD**: `amd64`
+
+### Method 5: Build from Source
 ```bash
 git clone https://github.com/plumpslabs/bro-code.git
 cd bro-code
@@ -65,51 +65,51 @@ go build -ldflags="-s -w" -o brocode ./cmd/brocode
 sudo mv brocode /usr/local/bin/
 ```
 
-### Option 3: Check CLI Version
-```bash
-brocode --version
-# Output: BroCode v0.1.0
-```
-
 ---
 
 ## 🎮 Quick Start
 
 ```bash
-# Start an interactive session in current repository
+# Start an interactive session in the current directory
 brocode
 
-# Resume previous active session
+# Resume the most recent conversation session
 brocode -c
 
-# Run with a specific provider and model
+# Launch with a specific provider and model
 brocode -provider anthropic -model claude-3-7-sonnet
 
-# Set per-task budget cap (USD)
-brocode -budget 0.50
+# Set a per-task spending cap (USD)
+brocode -budget 1.00
+
+# Inspect CLI version
+brocode --version
 ```
 
 ---
 
 ## 🎭 Agent Operating Modes
 
-Switch modes instantly using **`Shift + Tab`**:
+Switch modes at any time using **`Shift + Tab`**:
 
 | Mode | Badge | Description |
 | :--- | :--- | :--- |
-| **`BUILDER`** | 🔵 `BUILDER` | Full autonomous mode: reads files, executes shell commands, applies resilient edits, and verifies tests. |
-| **`PLANNER`** | 🟣 `PLANNER` | Read-only mode: analyzes code architecture, explores call graphs, and drafts implementation roadmaps without modifying files. |
-| **`MINER`** | 🟡 `MINER` | Knowledge extraction mode: explores repository structure and persists verified rules and gotchas to `.brocode/memory.md`. |
+| **`BUILDER`** | 🔵 `BUILDER` | Autonomous implementation mode: inspects code, applies resilient edits, executes shell commands, and verifies tests. |
+| **`PLANNER`** | 🟣 `PLANNER` | Read-only analysis mode: surveys repositories, inspects call graphs, and drafts structured roadmaps without modifying files. |
+| **`MINER`** | 🟡 `MINER` | Knowledge extraction mode: analyzes repository structure and persists verified rules and patterns to `.brocode/memory.md`. |
 
 ---
 
-## ⌨️ Interactive Autocomplete & Mentions
+## ⌨️ Interactive Autocomplete & Navigation
 
-BroCode features a zero-latency floating suggestion box in the TUI:
+BroCode includes a floating suggestion popup in the terminal interface:
 
-* **⚡ Slash Commands (`/`)**: Type `/` to browse available commands.
-* **📂 File Mentions (`@`)**: Type `@` anywhere in your prompt (e.g. `@app.go`) for fuzzy file path completion.
-* **Controls**: Use `↑` / `↓` to navigate suggestions, `Tab` or `Enter` to select, and `Esc` to dismiss.
+* **⚡ Slash Commands (`/`)**: Type `/` to display built-in commands with live descriptions.
+* **📂 File Mentions (`@`)**: Type `@` anywhere in the input prompt (e.g. `@app.go`) for fuzzy path completions.
+* **Controls**:
+  * `↑` / `↓` — Navigate suggestions (with automatic sliding-window scrolling).
+  * `Tab` or `Enter` — Select and apply the active suggestion.
+  * `Esc` — Dismiss the popup.
 
 ---
 
@@ -118,41 +118,41 @@ BroCode features a zero-latency floating suggestion box in the TUI:
 | Command | Description |
 | :--- | :--- |
 | `/help` | Show available commands and shortcuts |
-| `/undo` | **Time-Travel Rollback**: Instantly revert all file changes from the last turn via Git shadow snapshots |
-| `/sessions` | Switch, resume, or manage past chat sessions (`d` delete, `D` delete all) |
-| `/models` | Open interactive model picker |
-| `/connect` | Setup LLM providers & API keys interactively (Anthropic, OpenAI, DeepSeek, Ollama, etc.) |
-| `/memory` | Inspect cross-session project memory, architectural decisions, and captured gotchas |
+| `/undo` | **Time-Travel Rollback**: Instantly revert all file modifications from the previous turn |
+| `/sessions` | Switch, resume, or manage saved chat sessions |
+| `/models` | Open the interactive AI model selector |
+| `/connect` | Configure LLM providers and API keys interactively |
+| `/memory` | Inspect cross-session project memory and verified rules |
 | `/cost` | View token usage and estimated spend breakdown |
-| `/lsp` | Inspect connected Language Server Protocol status |
-| `/diagnose` | Run self-contained type error and syntax diagnostics on modified files |
-| `/miner` | Switch to MINER mode |
+| `/lsp` | Inspect Language Server Protocol status and diagnostics |
+| `/diagnose` | Run self-contained syntax and type diagnostics on modified files |
+| `/miner` | Switch active mode to MINER |
 | `/new` | Start a fresh conversation session |
-| `/clear` | Clear the chat viewport |
+| `/clear` | Clear the current terminal viewport |
 
 ---
 
 ## 🌐 Supported Providers
 
-BroCode supports all major LLM providers out of the box with zero external gateways:
+BroCode connects natively to all major LLM providers:
 
-- **Anthropic** (`claude-3-7-sonnet`, `claude-3-5-sonnet`, `claude-3-5-haiku`)
-- **OpenAI** (`gpt-4o`, `o1`, `o3-mini`)
-- **DeepSeek** (`deepseek-chat`, `deepseek-reasoner`)
-- **Poolside / Laguna** (`laguna-s-2.1`)
-- **Ollama / Local Models** (`qwen2.5-coder`, `llama3.3`, `deepseek-r1`)
-- **OpenRouter** & **Groq**
-- **OpenCode** gateway
+* **Anthropic** (`claude-3-7-sonnet`, `claude-3-5-sonnet`, `claude-3-5-haiku`)
+* **OpenAI** (`gpt-4o`, `o1`, `o3-mini`)
+* **DeepSeek** (`deepseek-chat`, `deepseek-reasoner`)
+* **Poolside / Laguna** (`laguna-s-2.1`)
+* **Ollama / Local Models** (`qwen2.5-coder`, `llama3.3`, `deepseek-r1`)
+* **OpenRouter** & **Groq**
+* **OpenCode Gateway**
 
-Configure providers at any time by typing `/connect` inside BroCode.
+To configure providers, run `/connect` within the interactive interface.
 
 ---
 
-## 🛠️ Versioning & Release Workflow
+## 🛠️ Versioning & Release Automation
 
 BroCode follows [Semantic Versioning (SemVer)](https://semver.org/).
 
-Use the built-in version bump script to release new versions:
+Use the included helper script to release updates:
 ```bash
 # Bump patch version (v0.1.0 -> v0.1.1)
 ./scripts/bump_version.sh patch
@@ -168,11 +168,11 @@ Use the built-in version bump script to release new versions:
 
 ## 🌍 Platform Compatibility
 
-BroCode is built with 100% Pure Go (Zero-CGO) and is fully tested on:
-- **macOS** (Apple Silicon `arm64` & Intel `amd64`)
-- **Linux** (`amd64`, `arm64`, Alpine, Ubuntu, Debian, Arch)
-- **Windows** (Windows 10/11 `amd64` & `arm64` with PowerShell / CMD / Git Bash)
-- **FreeBSD / BSD** (`amd64`)
+BroCode is built with 100% Pure Go (Zero-CGO) and runs seamlessly on:
+* **macOS**: Apple Silicon (`arm64`) & Intel (`amd64`)
+* **Linux**: `amd64`, `arm64`, Alpine, Ubuntu, Debian, Arch, Fedora
+* **Windows**: Windows 10/11 `amd64` & `arm64` (PowerShell, CMD, Git Bash)
+* **FreeBSD**: `amd64`
 
 ---
 

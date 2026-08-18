@@ -1,0 +1,50 @@
+version: 2
+
+project_name: brocode
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: brocode
+    main: ./cmd/brocode
+    binary: brocode
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/plumpslabs/bro-code/internal/version.Version={{.Version}}
+      - -X github.com/plumpslabs/bro-code/internal/version.Commit={{.FullCommit}}
+      - -X github.com/plumpslabs/bro-code/internal/version.Date={{.Date}}
+
+archives:
+  - id: default
+    builds:
+      - brocode
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
