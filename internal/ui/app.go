@@ -2045,6 +2045,26 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "/clear":
 		m.messages = []string{"⚡ Chat history cleared."}
 
+	case "/workspace", "/repos":
+		cwd, _ := os.Getwd()
+		ws := repo.DiscoverWorkspace(cwd)
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("📦 **Multi-Repo Workspace: %s**\n\n", ws.RootPath))
+		if len(ws.Repos) == 0 {
+			sb.WriteString("No repositories detected in workspace.\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("Found %d repository/repositories in workspace:\n", len(ws.Repos)))
+			for i, r := range ws.Repos {
+				gitBadge := "git"
+				if !r.IsGit {
+					gitBadge = "non-git"
+				}
+				sb.WriteString(fmt.Sprintf("%d. **%s** `[%s]` — %s\n", i+1, r.Name, gitBadge, r.Path))
+			}
+		}
+		sb.WriteString("\n*Tips:* Delegated subagents and tools can target specific repos using `target_dir: \"<repo_name>\"`.")
+		m.appendNote(sb.String())
+
 	case "/undo":
 		count := tool.RestoreAllSnapshots()
 		if count > 0 {

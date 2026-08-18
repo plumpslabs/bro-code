@@ -16,6 +16,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/mcp"
 	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/repo"
 	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/subagent"
 	"github.com/plumpslabs/bro-code/internal/tool"
@@ -204,6 +205,14 @@ func main() {
 		}
 	} else {
 		initialMessages = append(initialMessages, "⚡ BroCode engine active. Type a prompt or /help for commands.")
+		ws := repo.DiscoverWorkspace(cwd)
+		if len(ws.Repos) > 1 {
+			var names []string
+			for _, r := range ws.Repos {
+				names = append(names, r.Name)
+			}
+			initialMessages = append(initialMessages, fmt.Sprintf("📦 Multi-Repo Workspace: %d repositories active (%s)", len(ws.Repos), strings.Join(names, ", ")))
+		}
 	}
 
 	// 6. Initialize Tool Registry (anchor the permission gate to the project dir)

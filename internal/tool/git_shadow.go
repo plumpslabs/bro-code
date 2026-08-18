@@ -139,3 +139,92 @@ func (m *GitShadowManager) PurgeAll() {
 	}
 	m.refs = nil
 }
+
+// MultiGitShadowManager manages shadow snapshots across multiple Git repositories
+// within a multi-repo workspace.
+type MultiGitShadowManager struct {
+	mu       sync.Mutex
+	rootPath string
+	repos    map[string]*GitShadowManager // repoPath -> GitShadowManager
+	turns    [][]repoSnapshotRef          // stack of turn snapshots
+}
+
+type repoSnapshotRef struct {
+	repoPath string
+	ref      string
+}
+
+// NewMultiGitShadowManager creates a multi-repo shadow manager for a workspace root.
+func NewMultiGitShadowManager(rootPath string, repoPaths []string) *MultiGitShadowManager {
+	m := &MultiGitShadowManager{
+		rootPath: rootPath,
+		repos:    make(map[string]*GitShadowManager),
+	}
+	if len(repoPaths) == 0 {
+		repoPaths = []string{rootPath}
+	}
+	for _, p := range repoPaths {
+		m.repos[p] = NewGitShadowManager(p)
+	}
+	return m
+}
+
+// CreateShadowSnapshot captures working tree snapshots across all active git repos.
+func (m *MultiGitShadowManager) CreateShadowSnapshot(sessionID string, seq int) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var turnRefs []repoSnapshotRef
+	var resultRefs []string
+
+	for p, g := range m.repos {
+		if !g.IsGit() {
+			continue
+		}
+		ref, err := g.CreateShadowSnapshot(sessionID, seq)
+		if err != nil {
+			continue
+		}
+		turnRefs = append(turnRefs, repoSnapshotRef{repoPath: p, ref: ref})
+		resultRefs = append(resultRefs, ref)
+	}
+
+	if len(turnRefs) > 0 {
+		m.turns = append(m.turns, turnRefs)
+	}
+	return resultRefs, nil
+}
+
+// RollbackLast restores all repositories in the workspace to the most recent turn snapshot.
+func (m *MultiGitShadowManager) RollbackLast() ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.turns) == 0 {
+		return nil, fmt.Errorf("no multi-repo git shadow snapshots available")
+	}
+
+	lastTurn := m.turns[len(m.turns)-1]
+	m.turns = m.turns[:len(m.turns)-1]
+
+	var restored []string
+	for _, item := range lastTurn {
+		if g, ok := m.repos[item.repoPath]; ok {
+			if r, err := g.RollbackLast(); err == nil {
+				restored = append(restored, r)
+			}
+		}
+	}
+	return restored, nil
+}
+
+// PurgeAll removes all shadow snapshot refs across all repos.
+func (m *MultiGitShadowManager) PurgeAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, g := range m.repos {
+		g.PurgeAll()
+	}
+	m.turns = nil
+}

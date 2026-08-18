@@ -51,9 +51,10 @@ type Runner struct {
 
 // SubAgent is a single delegated task.
 type SubAgent struct {
-	ID      string `json:"id,omitempty"`      // optional label for the result
-	Task    string `json:"task"`              // the isolated task description
-	Mode    string `json:"mode,omitempty"`    // "BUILDER" (default) or "PLANNER" (read-only)
+	ID        string `json:"id,omitempty"`         // optional label for the result
+	Task      string `json:"task"`                 // the isolated task description
+	Mode      string `json:"mode,omitempty"`       // "BUILDER" (default) or "PLANNER" (read-only)
+	TargetDir string `json:"target_dir,omitempty"` // optional target sub-repository or working directory (e.g. 'services/payment' or 'auth-service')
 	// Mutates marks a task that may write/delete/execute. Mutating parallel
 	// agents are never run without explicit user confirmation (see Runner.Ask);
 	// this keeps fan-out fast and read-only by default but still lets the model
@@ -63,9 +64,13 @@ type SubAgent struct {
 
 // runOne executes one sub-agent in its own isolated loop and returns its final
 // answer. onUpdate (may be nil) receives progress lines from the sub-loop.
-func (r *Runner) runOne(ctx context.Context, id, task, mode string, onUpdate loop.TurnOutputHandler) (string, error) {
+func (r *Runner) runOne(ctx context.Context, id, task, mode, targetDir string, onUpdate loop.TurnOutputHandler) (string, error) {
 	if strings.TrimSpace(task) == "" {
 		return "", fmt.Errorf("empty task for sub-agent %q", id)
+	}
+
+	if targetDir != "" {
+		task = fmt.Sprintf("[Target Working Directory / Repository: %s]\n%s", targetDir, task)
 	}
 
 	// Fresh, isolated context: the sub-agent cannot see the main conversation
@@ -96,7 +101,7 @@ func (r *Runner) runOne(ctx context.Context, id, task, mode string, onUpdate loo
 
 // Run executes a single sub-agent and returns its answer.
 func (r *Runner) Run(ctx context.Context, task string) (string, error) {
-	return r.runOne(ctx, "1", task, "BUILDER", nil)
+	return r.runOne(ctx, "1", task, "BUILDER", "", nil)
 }
 
 // RunMany executes the given tasks — concurrently when parallel is true,
@@ -142,7 +147,7 @@ func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, 
 			}
 			return
 		}
-		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, agents[i].Mode, onUpdate)
+		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, agents[i].Mode, agents[i].TargetDir, onUpdate)
 		if onUpdate != nil {
 			status := "DONE"
 			if errs[i] != nil {
@@ -305,7 +310,7 @@ func (sm *ScoutManager) StartWithProgress(ctx context.Context, task string, onPr
 		if onProgress != nil {
 			upd = func(st loop.LoopState, info string) { onProgress(info) }
 		}
-		result, err := sm.Runner.runOne(tctx, id, task, "PLANNER", upd)
+		result, err := sm.Runner.runOne(tctx, id, task, "PLANNER", "", upd)
 		sm.mu.Lock()
 		job.Done = true
 		job.Result = result
@@ -450,9 +455,10 @@ func (t *Tool) Parameters() map[string]any {
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"id":   map[string]any{"type": "string", "description": "Optional short label (e.g. 'frontend')"},
-						"task": map[string]any{"type": "string", "description": "The isolated task description"},
-						"mutates": map[string]any{"type": "boolean", "description": "Set true ONLY if the task writes, deletes, or executes commands. Mutating parallel tasks require explicit user confirmation before running — read-only research should leave this false."},
+						"id":         map[string]any{"type": "string", "description": "Optional short label (e.g. 'frontend' or 'auth-service')"},
+						"task":       map[string]any{"type": "string", "description": "The isolated task description"},
+						"target_dir": map[string]any{"type": "string", "description": "Optional target sub-repository or working directory (e.g. 'auth-service' or 'services/payment')"},
+						"mutates":    map[string]any{"type": "boolean", "description": "Set true ONLY if the task writes, deletes, or executes commands. Mutating parallel tasks require explicit user confirmation before running — read-only research should leave this false."},
 					},
 					"required": []string{"task"},
 				},

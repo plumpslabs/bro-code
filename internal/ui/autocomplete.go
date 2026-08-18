@@ -46,6 +46,7 @@ var BuiltinSlashCommands = []AutocompleteItem{
 	{Value: "/diagnose", Label: "/diagnose", Desc: "Jalankan diagnostik kode mandiri"},
 	{Value: "/lsp-install", Label: "/lsp-install", Desc: "Panduan instalasi LSP binary"},
 	{Value: "/miner", Label: "/miner", Desc: "Mode MINER: eksplorasi mendalam"},
+	{Value: "/workspace", Label: "/workspace", Desc: "Kelola multi-repo workspace & repos"},
 	{Value: "/clear", Label: "/clear", Desc: "Bersihkan layar riwayat"},
 	{Value: "/new", Label: "/new", Desc: "Mulai sesi percakapan baru"},
 	{Value: "/mcp", Label: "/mcp", Desc: "Daftar Model Context Protocol tools"},
