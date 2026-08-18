@@ -595,18 +595,25 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	// targets the exact span with read_file(start_line/end_line), or requests a
 	// structural overview with read_file(shrinkwrap:true). Files <=150 lines are
 	// still returned in full (cheap).
+	var jsonWarning string
+	if strings.HasSuffix(strings.ToLower(args.Path), ".json") {
+		if err := ValidateJSONNoDuplicateKeys(string(data)); err != nil {
+			jsonWarning = fmt.Sprintf("[⚠️ JSON STRUCTURAL WARNING: %v]\n\n", err)
+		}
+	}
+
 	if len(lines) > 150 {
 		headN := 60
 		if len(lines) < headN {
 			headN = len(lines)
 		}
 		head := strings.Join(lines[:headN], "\n")
-		out := fmt.Sprintf("[File %s has %d lines — showing first %d as a preview. Use read_file(start_line/end_line) for the exact span; or read_file(shrinkwrap:true) for a structural (signatures/types) overview. Use code_locate to find symbols across the project.]\n\n%s", args.Path, len(lines), headN, head)
+		out := fmt.Sprintf("%s[File %s has %d lines — showing first %d as a preview. Use read_file(start_line/end_line) for the exact span; or read_file(shrinkwrap:true) for a structural (signatures/types) overview. Use code_locate to find symbols across the project.]\n\n%s", jsonWarning, args.Path, len(lines), headN, head)
 		toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
 		return out, nil
 	}
 
-	out := CapOutput(string(data))
+	out := jsonWarning + CapOutput(string(data))
 	toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
 	return out, nil
 }
