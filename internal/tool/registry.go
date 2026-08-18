@@ -703,6 +703,13 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 		action = "modified"
 	}
 
+	// JSON structural validation: ensure no duplicate keys in object scope
+	if strings.HasSuffix(strings.ToLower(args.Path), ".json") {
+		if err := ValidateJSONNoDuplicateKeys(final); err != nil {
+			return "", fmt.Errorf("JSON structural error in %s: %w", args.Path, err)
+		}
+	}
+
 	// Invalidate any cached reads/greps so a subsequent read sees the new content.
 	toolResultCache.InvalidatePath(args.Path)
 
@@ -803,6 +810,14 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	if newContent == content {
 		return fmt.Sprintf("No change made to %s", args.Path), nil
 	}
+
+	// JSON structural validation: ensure no duplicate keys in object scope
+	if strings.HasSuffix(strings.ToLower(args.Path), ".json") {
+		if err := ValidateJSONNoDuplicateKeys(newContent); err != nil {
+			return "", fmt.Errorf("JSON structural error in %s: %w", args.Path, err)
+		}
+	}
+
 	// Invalidate any cached reads/greps so a subsequent read sees the new content.
 	toolResultCache.InvalidatePath(args.Path)
 
