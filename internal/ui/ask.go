@@ -296,7 +296,11 @@ func (m *Model) submitAsk() {
 
 	id := m.askID
 	m.showAsk = false
-	m.status = "Ready"
+	if m.turnRunning {
+		m.status = "Thinking..."
+	} else {
+		m.status = "Ready"
+	}
 
 	// Persist the answers into conversation history as a YOU entry.
 	m.appendAskToHistory(results)
@@ -310,7 +314,11 @@ func (m *Model) submitAsk() {
 func (m *Model) skipAsk() {
 	id := m.askID
 	m.showAsk = false
-	m.status = "Ready"
+	if m.turnRunning {
+		m.status = "Thinking..."
+	} else {
+		m.status = "Ready"
+	}
 	if m.ask != nil {
 		m.ask.Answer(id, nil)
 	}

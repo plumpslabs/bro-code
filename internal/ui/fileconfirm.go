@@ -101,7 +101,11 @@ func (m *Model) submitFileConfirm() {
 	kind := m.fileConfirmKind
 	path := m.fileConfirmPath
 	m.showFileConfirm = false
-	m.status = "Ready"
+	if m.turnRunning {
+		m.status = "Acting..."
+	} else {
+		m.status = "Ready"
+	}
 
 	verb := "Allowed"
 	if dec.Always {
@@ -124,7 +128,11 @@ func (m *Model) discardFileConfirm() {
 	kind := m.fileConfirmKind
 	path := m.fileConfirmPath
 	m.showFileConfirm = false
-	m.status = "Ready"
+	if m.turnRunning {
+		m.status = "Acting..."
+	} else {
+		m.status = "Ready"
+	}
 	m.appendMessages(fmt.Sprintf("• Discarded %s: %s", strings.ReplaceAll(kind, "_file", ""), path))
 	if m.fileConfirm != nil {
 		m.fileConfirm.Answer(id, tool.FileActionDecision{Allow: false})

@@ -2971,7 +2971,7 @@ func (m *Model) buildLogChrome() (string, int) {
 	// calls, rendered ABOVE the input. Activity is transient — it never
 	// enters the conversation history (that's what made process rows pile
 	// up above the answer and hide the user's prompt).
-	if m.status != "Ready" && m.status != "Failed" {
+	if (m.turnRunning || (m.status != "Ready" && m.status != "Failed")) && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug {
 		spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 		frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
 		elapsed := ""
