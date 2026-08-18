@@ -48,11 +48,22 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
+		isSourceCode := false
 		switch ext {
 		case ".go", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rs",
 			".c", ".cpp", ".cc", ".h", ".hpp", ".java", ".kt", ".rb", ".php", ".swift", ".cs":
+			isSourceCode = true
+		case ".json", ".jsonc", ".yaml", ".yml", ".toml", ".md", ".markdown", ".txt",
+			".html", ".css", ".scss", ".sql", ".sh", ".bash", ".zsh", ".proto", ".graphql",
+			".xml", ".mod", ".sum", ".env.example", ".lock":
+			// Tracked in project file index for autocomplete & search
 		default:
-			return nil
+			base := strings.ToLower(d.Name())
+			if base == "dockerfile" || base == "makefile" || base == "gemfile" || base == "rakefile" {
+				// common extensionless config files
+			} else {
+				return nil
+			}
 		}
 		// Never index sensitive files (.env, credentials, keys) — their
 		// contents must not leak into code_locate results.
@@ -62,13 +73,15 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 		if len(g.files) >= 30000 {
 			return filepath.SkipAll
 		}
-		syms, _ := ExtractSymbols(path)
-		for _, s := range syms {
-			g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: path, Line: s.Line})
-			g.rag.IndexSymbol(s.Name, path)
-		}
-		if refs := extractImportNames(path); len(refs) > 0 {
-			g.imports[path] = refs
+		if isSourceCode {
+			syms, _ := ExtractSymbols(path)
+			for _, s := range syms {
+				g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: path, Line: s.Line})
+				g.rag.IndexSymbol(s.Name, path)
+			}
+			if refs := extractImportNames(path); len(refs) > 0 {
+				g.imports[path] = refs
+			}
 		}
 		g.files = append(g.files, path)
 		return nil

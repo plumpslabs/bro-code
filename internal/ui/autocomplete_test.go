@@ -51,7 +51,7 @@ func TestDetectAutocompletePreservesSelection(t *testing.T) {
 }
 
 func TestDetectAutocompleteFileMentions(t *testing.T) {
-	files := []string{"cmd/brocode/main.go", "internal/ui/app.go", "internal/ui/autocomplete.go"}
+	files := []string{"cmd/brocode/main.go", "internal/ui/app.go", "internal/ui/autocomplete.go", "locales/id.json", ".goreleaser.yaml"}
 
 	state := DetectAutocomplete("please inspect @app", files, AutocompleteState{})
 	if !state.Active {
@@ -62,6 +62,11 @@ func TestDetectAutocompleteFileMentions(t *testing.T) {
 	}
 	if len(state.Items) == 0 || state.Items[0].Value != "internal/ui/app.go" {
 		t.Errorf("expected match for app.go, got %+v", state.Items)
+	}
+
+	jsonState := DetectAutocomplete("check @id", files, AutocompleteState{})
+	if !jsonState.Active || len(jsonState.Items) == 0 || jsonState.Items[0].Value != "locales/id.json" {
+		t.Errorf("expected match for locales/id.json, got %+v", jsonState.Items)
 	}
 }
 

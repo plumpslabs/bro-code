@@ -719,7 +719,20 @@ func (m *Model) contextWindow() int {
 
 func (m *Model) allProjectFiles() []string {
 	if m.globalIndex != nil {
-		return m.globalIndex.Files()
+		raw := m.globalIndex.Files()
+		cwd, _ := os.Getwd()
+		if cwd == "" {
+			return raw
+		}
+		res := make([]string, 0, len(raw))
+		for _, f := range raw {
+			if rel, err := filepath.Rel(cwd, f); err == nil && !strings.HasPrefix(rel, "..") {
+				res = append(res, filepath.ToSlash(rel))
+			} else {
+				res = append(res, filepath.ToSlash(f))
+			}
+		}
+		return res
 	}
 	return nil
 }
