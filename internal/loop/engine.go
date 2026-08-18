@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -1237,6 +1238,48 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 
 				// TSR REPRODUCE gate: while the task is armed as a bug fix and no
 				// reproduction has been observed, code edits are blocked with a
+				// Off-Task Edit Gate: block write/edit on a file the model has NEVER
+				// read, grepped, or explicitly fetched in this turn. This prevents
+				// the model from making destructive edits to the wrong file when it
+				// panics near the stall/budget limit and guesses a target.
+				if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" {
+					var editPath string
+					var args map[string]any
+					if json.Unmarshal([]byte(tc.Arguments), &args) == nil {
+						editPath, _ = args["path"].(string)
+					}
+					if editPath != "" {
+						if abs, err := filepath.Abs(editPath); err == nil {
+							editPath = abs
+						}
+						// Count non-bash explored entries to see if the model has
+						// performed any file reads this turn. If it has only run bash
+						// commands (no read_file/grep/list_dir), the gate does not
+						// trigger — the model may be writing a new file or doing a
+						// straightforward edit without needing to read first.
+						fileReads := 0
+						for _, entry := range e.explored {
+							if !strings.HasPrefix(entry, "bash: ") {
+								fileReads++
+							}
+						}
+						if fileReads > 0 && !e.wasExplored(editPath) {
+							offTaskMsg := fmt.Sprintf(
+								"⚠️ [OFF-TASK EDIT GATE]: You are trying to edit '%s' but you have NOT read or examined it during this turn (you explored: %s). Read it first before editing, or confirm this is the correct target file.",
+								editPath, e.exploredPathList(),
+							)
+							if onUpdate != nil {
+								onUpdate(e.state, "⚠️ Edit blocked — file not read during this turn")
+							}
+							pending[i] = pendingTool{tc: tc, output: offTaskMsg}
+							continue
+						}
+					}
+				}
+
+				// TSR contract: for bug-fix tasks, block any edit until the failure
+				// is reproduced first. This is a guard against fixing a bug without
+				// first confirming it exists.
 				// reminder to reproduce the failure first (run the failing test /
 				// command and watch it FAIL) before fixing. This is the
 				// REPRODUCE→LOCALIZE→SOLVE→VERIFY contract: a fix verified against
@@ -1913,6 +1956,48 @@ func (e *Engine) recordExplored(tc provider.ToolCall) {
 	if len(e.explored) > 12 {
 		e.explored = e.explored[len(e.explored)-12:]
 	}
+}
+
+// wasExplored returns true if the given absolute file path was read or searched
+// during this turn. Used by the Off-Task Edit Gate.
+func (e *Engine) wasExplored(absPath string) bool {
+	for _, entry := range e.explored {
+		// Normalize: entry may be a bare path or "bash: <cmd>"
+		if strings.HasPrefix(entry, "bash: ") {
+			continue
+		}
+		entryAbs, err := filepath.Abs(entry)
+		if err != nil {
+			entryAbs = entry
+		}
+		if entryAbs == absPath {
+			return true
+		}
+		// Also allow if the explored entry is a parent directory of the target
+		// (e.g. the model listed_dir the locales folder and then edits id.json)
+		if strings.HasPrefix(absPath, entryAbs+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// exploredPathList returns a compact comma-separated list of explored paths
+// for use in Off-Task Edit Gate messages.
+func (e *Engine) exploredPathList() string {
+	var parts []string
+	cwd, _ := os.Getwd()
+	for _, entry := range e.explored {
+		if strings.HasPrefix(entry, "bash: ") {
+			continue
+		}
+		rel := strings.TrimPrefix(entry, cwd+string(os.PathSeparator))
+		parts = append(parts, rel)
+	}
+	if len(parts) == 0 {
+		return "(none)"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // projectContextBlock renders the injected project overview (tree + docs) as
