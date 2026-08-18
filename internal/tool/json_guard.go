@@ -7,11 +7,15 @@ import (
 	"strings"
 )
 
+func stripBOM(s string) string {
+	return strings.TrimPrefix(s, "\xef\xbb\xbf")
+}
+
 // ValidateJSONNoDuplicateKeys checks if a JSON string contains duplicate keys
 // within any object scope. Returns an error if duplicate keys are detected or
-// if the JSON is malformed.
+// if the JSON is malformed. BOM characters are silently stripped before parsing.
 func ValidateJSONNoDuplicateKeys(content string) error {
-	dec := json.NewDecoder(strings.NewReader(content))
+	dec := json.NewDecoder(strings.NewReader(stripBOM(content)))
 	
 	type scope struct {
 		isObject bool

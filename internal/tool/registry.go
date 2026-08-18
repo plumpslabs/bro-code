@@ -696,6 +696,10 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 	old := ""
 	if data, err := os.ReadFile(args.Path); err == nil {
 		old = string(data)
+		// Strip UTF-8 BOM (RFC 8259: JSON MUST NOT have BOM). Write back clean.
+		if strings.HasPrefix(old, "\xef\xbb\xbf") {
+			old = old[3:]
+		}
 	}
 
 	// One-turn rollback window: keep a backup before overwriting.
@@ -775,6 +779,11 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	_ = Snapshot(args.Path)
 
 	content := string(data)
+	// Strip UTF-8 BOM if present so JSON validation and text matching work cleanly.
+	// The file is written back without BOM, which is the correct standard for JSON (RFC 8259).
+	if strings.HasPrefix(content, "\xef\xbb\xbf") {
+		content = content[3:]
+	}
 	newContent := content
 
 	// Positional (line-range) edit: replace lines [start_line, end_line) with
