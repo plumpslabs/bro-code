@@ -1,11 +1,12 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 )
 
 func TestDetectAutocompleteSlashCommands(t *testing.T) {
-	state := DetectAutocomplete("/mem", nil)
+	state := DetectAutocomplete("/mem", nil, AutocompleteState{})
 	if !state.Active {
 		t.Fatal("expected autocomplete to be active for /mem")
 	}
@@ -17,16 +18,42 @@ func TestDetectAutocompleteSlashCommands(t *testing.T) {
 	}
 
 	// Space should deactivate slash autocomplete
-	stateWithSpace := DetectAutocomplete("/memory arg", nil)
+	stateWithSpace := DetectAutocomplete("/memory arg", nil, state)
 	if stateWithSpace.Active {
 		t.Error("expected autocomplete to be inactive when space is present")
+	}
+}
+
+func TestDetectAutocompletePreservesSelection(t *testing.T) {
+	// 1. Initial detection
+	state1 := DetectAutocomplete("/", nil, AutocompleteState{})
+	if !state1.Active || len(state1.Items) < 3 {
+		t.Fatalf("expected at least 3 slash items, got %d", len(state1.Items))
+	}
+	if state1.Selected != 0 {
+		t.Errorf("expected initial selected = 0, got %d", state1.Selected)
+	}
+
+	// 2. User moves down to index 2
+	state1.Selected = 2
+
+	// 3. Re-detect on same text (e.g. cursor blink or re-render)
+	state2 := DetectAutocomplete("/", nil, state1)
+	if state2.Selected != 2 {
+		t.Errorf("expected preserved selected = 2, got %d", state2.Selected)
+	}
+
+	// 4. Query changes (e.g. user types 'u') -> resets to 0
+	state3 := DetectAutocomplete("/u", nil, state2)
+	if state3.Selected != 0 {
+		t.Errorf("expected reset selected = 0 on new query, got %d", state3.Selected)
 	}
 }
 
 func TestDetectAutocompleteFileMentions(t *testing.T) {
 	files := []string{"cmd/brocode/main.go", "internal/ui/app.go", "internal/ui/autocomplete.go"}
 
-	state := DetectAutocomplete("please inspect @app", files)
+	state := DetectAutocomplete("please inspect @app", files, AutocompleteState{})
 	if !state.Active {
 		t.Fatal("expected autocomplete to be active for @app")
 	}
@@ -39,16 +66,30 @@ func TestDetectAutocompleteFileMentions(t *testing.T) {
 }
 
 func TestApplyAutocomplete(t *testing.T) {
-	slashState := DetectAutocomplete("/un", nil)
+	slashState := DetectAutocomplete("/un", nil, AutocompleteState{})
 	appliedSlash := ApplyAutocomplete("/un", slashState)
 	if appliedSlash != "/undo " {
 		t.Errorf("expected /undo , got %q", appliedSlash)
 	}
 
 	files := []string{"internal/ui/app.go"}
-	fileState := DetectAutocomplete("look at @ap", files)
+	fileState := DetectAutocomplete("look at @ap", files, AutocompleteState{})
 	appliedFile := ApplyAutocomplete("look at @ap", fileState)
 	if appliedFile != "look at @internal/ui/app.go " {
 		t.Errorf("expected 'look at @internal/ui/app.go ', got %q", appliedFile)
+	}
+}
+
+func TestRenderAutocompleteSlidingWindow(t *testing.T) {
+	state := DetectAutocomplete("/", nil, AutocompleteState{})
+	state.Selected = 8 // Select an item deep in the list
+
+	out := RenderAutocomplete(state, 80)
+	if out == "" {
+		t.Fatal("expected non-empty rendered autocomplete box")
+	}
+	// Verify active item is rendered with indicator
+	if !strings.Contains(out, "▸") {
+		t.Errorf("expected highlight indicator '▸' in output:\n%s", out)
 	}
 }

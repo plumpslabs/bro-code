@@ -55,7 +55,8 @@ var BuiltinSlashCommands = []AutocompleteItem{
 
 // DetectAutocomplete inspects the current prompt input text and cursor position
 // to determine if slash command or file mention completion should activate.
-func DetectAutocomplete(input string, allFiles []string) AutocompleteState {
+// It preserves previous selection index if the query has not changed.
+func DetectAutocomplete(input string, allFiles []string, prev AutocompleteState) AutocompleteState {
 	text := input
 	if text == "" {
 		return AutocompleteState{}
@@ -71,11 +72,21 @@ func DetectAutocomplete(input string, allFiles []string) AutocompleteState {
 			}
 		}
 		if len(matches) > 0 {
+			sel := 0
+			if prev.Active && prev.Kind == AutoKindSlash && prev.Query == text {
+				sel = prev.Selected
+				if sel >= len(matches) {
+					sel = len(matches) - 1
+				}
+				if sel < 0 {
+					sel = 0
+				}
+			}
 			return AutocompleteState{
 				Active:   true,
 				Kind:     AutoKindSlash,
 				Items:    matches,
-				Selected: 0,
+				Selected: sel,
 				Query:    text,
 			}
 		}
@@ -102,17 +113,27 @@ func DetectAutocomplete(input string, allFiles []string) AutocompleteState {
 						Label: "@" + base,
 						Desc:  f,
 					})
-					if len(matches) >= 8 {
+					if len(matches) >= 30 {
 						break
 					}
 				}
 			}
 			if len(matches) > 0 {
+				sel := 0
+				if prev.Active && prev.Kind == AutoKindFile && prev.Query == query {
+					sel = prev.Selected
+					if sel >= len(matches) {
+						sel = len(matches) - 1
+					}
+					if sel < 0 {
+						sel = 0
+					}
+				}
 				return AutocompleteState{
 					Active:   true,
 					Kind:     AutoKindFile,
 					Items:    matches,
-					Selected: 0,
+					Selected: sel,
 					Query:    query,
 				}
 			}
@@ -144,15 +165,15 @@ func ApplyAutocomplete(input string, state AutocompleteState) string {
 	return input
 }
 
-// RenderAutocomplete renders a compact floating suggestion box above the input.
+// RenderAutocomplete renders a compact floating suggestion box with sliding window scrolling.
 func RenderAutocomplete(state AutocompleteState, width int) string {
 	if !state.Active || len(state.Items) == 0 {
 		return ""
 	}
 
 	boxWidth := width - 4
-	if boxWidth > 64 {
-		boxWidth = 64
+	if boxWidth > 68 {
+		boxWidth = 68
 	}
 	if boxWidth < 30 {
 		boxWidth = 30
@@ -161,17 +182,37 @@ func RenderAutocomplete(state AutocompleteState, width int) string {
 	var rows []string
 	header := "Suggestions (Tab / Enter to select, Esc to close):"
 	if state.Kind == AutoKindSlash {
-		header = "⚡ Slash Commands:"
+		header = fmt.Sprintf("⚡ Slash Commands (%d/%d):", state.Selected+1, len(state.Items))
 	} else if state.Kind == AutoKindFile {
-		header = "📂 File Mention:"
+		header = fmt.Sprintf("📂 File Mention (%d/%d):", state.Selected+1, len(state.Items))
 	}
 	rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true).Render(header))
 
-	for i, item := range state.Items {
-		if i >= 6 {
-			rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Render(fmt.Sprintf("  ... (+%d more)", len(state.Items)-6)))
-			break
+	const maxVisible = 6
+	startIdx := 0
+	endIdx := len(state.Items)
+
+	if len(state.Items) > maxVisible {
+		startIdx = state.Selected - (maxVisible / 2)
+		if startIdx < 0 {
+			startIdx = 0
 		}
+		endIdx = startIdx + maxVisible
+		if endIdx > len(state.Items) {
+			endIdx = len(state.Items)
+			startIdx = endIdx - maxVisible
+			if startIdx < 0 {
+				startIdx = 0
+			}
+		}
+	}
+
+	if startIdx > 0 {
+		rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).Render(fmt.Sprintf("  ▲ ... (%d above)", startIdx)))
+	}
+
+	for i := startIdx; i < endIdx; i++ {
+		item := state.Items[i]
 		isSel := i == state.Selected
 
 		prefix := "  "
@@ -181,7 +222,7 @@ func RenderAutocomplete(state AutocompleteState, width int) string {
 		if isSel {
 			prefix = "▸ "
 			labelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FFFF")).Bold(true)
-			descStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#AAAAAA"))
+			descStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#EEEEEE")).Bold(true)
 		}
 
 		label := item.Label
@@ -197,9 +238,13 @@ func RenderAutocomplete(state AutocompleteState, width int) string {
 		rows = append(rows, line)
 	}
 
+	if endIdx < len(state.Items) {
+		rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).Render(fmt.Sprintf("  ▼ ... (%d below)", len(state.Items)-endIdx)))
+	}
+
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#555555")).
+		BorderForeground(lipgloss.Color("#00AAAA")).
 		Padding(0, 1).
 		Width(boxWidth)
 

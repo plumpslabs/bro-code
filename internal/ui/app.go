@@ -1858,7 +1858,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.promptInput, cmd = m.promptInput.Update(msg)
 		cmds = append(cmds, cmd)
-		m.autocomplete = DetectAutocomplete(m.promptInput.Value(), m.allProjectFiles())
+		m.autocomplete = DetectAutocomplete(m.promptInput.Value(), m.allProjectFiles(), m.autocomplete)
 	}
 
 	return m, tea.Batch(cmds...)
