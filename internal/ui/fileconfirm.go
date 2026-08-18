@@ -77,7 +77,7 @@ func (m *Model) openFileConfirm(msg fileConfirmMsg) {
 	m.fileConfirmKind = msg.kind
 	m.fileConfirmPath = msg.path
 	m.fileConfirmSel = 0
-	m.status = "Awaiting your confirmation..."
+	m.status = "Awaiting confirmation..."
 }
 
 // moveFileConfirm moves the cursor within the confirm options (wraps).
@@ -101,18 +101,16 @@ func (m *Model) submitFileConfirm() {
 	kind := m.fileConfirmKind
 	path := m.fileConfirmPath
 	m.showFileConfirm = false
-	m.status = "Resuming..."
+	m.status = "Ready"
 
-	// Record the decision in the history so the interaction stays visible
-	// (compact one-liner, not a modal-only choice).
-	verb := "✅ Allowed"
+	verb := "Allowed"
 	if dec.Always {
-		verb = "🔁 Always allowed for this session"
+		verb = "Always allowed for session"
 	} else if !dec.Allow {
-		verb = "🚫 Discarded"
+		verb = "Discarded"
 	}
 	label := strings.ReplaceAll(kind, "_file", "")
-	m.appendMessages(fmt.Sprintf("🗂️ %s %s %s", verb, label, path))
+	m.appendMessages(fmt.Sprintf("• %s %s: %s", verb, label, path))
 
 	if m.fileConfirm != nil {
 		m.fileConfirm.Answer(id, dec)
@@ -126,41 +124,47 @@ func (m *Model) discardFileConfirm() {
 	kind := m.fileConfirmKind
 	path := m.fileConfirmPath
 	m.showFileConfirm = false
-	m.status = "Resuming..."
-	m.appendMessages(fmt.Sprintf("🚫 Discarded %s %s", strings.ReplaceAll(kind, "_file", ""), path))
+	m.status = "Ready"
+	m.appendMessages(fmt.Sprintf("• Discarded %s: %s", strings.ReplaceAll(kind, "_file", ""), path))
 	if m.fileConfirm != nil {
 		m.fileConfirm.Answer(id, tool.FileActionDecision{Allow: false})
 	}
 }
 
-// renderFileConfirmBar renders the compact confirmation bar that replaces the
+// renderFileConfirmBar renders the clean confirmation bar that replaces the
 // chat input while a critical file action awaits approval.
 func (m *Model) renderFileConfirmBar() string {
-	barStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("214")).Padding(0, 1)
+	barStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#fbbf24")).
+		Padding(0, 1)
 	if m.width > 0 {
 		barStyle = barStyle.Width(m.width - 2)
 	}
 
-	kindLabel := strings.ReplaceAll(m.fileConfirmKind, "_file", "")
-	title := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render("⚠️ BroCode wants to " + kindLabel + " a file")
-	pathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+	kindLabel := strings.ToUpper(strings.ReplaceAll(m.fileConfirmKind, "_file", ""))
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color("#fbbf24")).Bold(true).Render(fmt.Sprintf("Confirm Action: %s", kindLabel))
+	pathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38bdf8")).Bold(true)
 
 	var opts strings.Builder
 	labels := []string{"Allow once", "Always allow", "Discard"}
 	for i, l := range labels {
 		marker := "  "
 		if i == m.fileConfirmSel {
-			marker = "❯ "
+			marker = "▸ "
 		}
 		dot := "( )"
 		if i == m.fileConfirmSel {
 			dot = "(●)"
 		}
-		opts.WriteString(fmt.Sprintf("%s%s %s  ", marker, dot, l))
+		num := fmt.Sprintf("[%d] ", i+1)
+		opts.WriteString(fmt.Sprintf("%s%s%s %s   ", marker, num, dot, l))
 	}
+
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b"))
 
 	return barStyle.Render(title + "\n" +
 		pathStyle.Render(m.fileConfirmPath) + "\n" +
 		opts.String() + "\n" +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("[←/→ or 1/2/3 choose · ENTER confirm · ESC discard]"))
+		hintStyle.Render("[1/2/3 or ←/→ Choose · Enter Confirm · Esc Discard]"))
 }

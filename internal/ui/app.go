@@ -1699,16 +1699,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionsConfirmID = ""
 			return m, nil
 
-		case "left", "right", "1", "2", "3":
-			// Input-bar file-action confirm: arrows or 1/2/3 move the cursor.
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			if m.showFileConfirm {
 				switch keyStr {
-				case "left", "1":
+				case "1":
 					m.fileConfirmSel = 0
 				case "2":
 					m.fileConfirmSel = 1
-				case "right", "3":
+				case "3":
 					m.fileConfirmSel = 2
+				}
+				return m, nil
+			}
+			if m.showAsk && m.askCustomQ < 0 {
+				num := int(keyStr[0] - '0')
+				m.askSelectQuickOption(num)
+				return m, nil
+			}
+
+		case "left", "right":
+			if m.showFileConfirm {
+				if keyStr == "left" {
+					m.fileConfirmSel = (m.fileConfirmSel + 2) % 3
+				} else {
+					m.fileConfirmSel = (m.fileConfirmSel + 1) % 3
 				}
 				return m, nil
 			}

@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -89,7 +88,7 @@ func (m *Model) openAsk(msg askUserMsg) {
 	m.askCustom = map[int]string{}
 	m.askCustomQ = -1
 	m.askCustomInput.SetValue("")
-	m.status = "Waiting for your input..."
+	m.status = "Waiting for input..."
 	m.askApplyFlat()
 	m.refreshAskModal()
 }
@@ -153,9 +152,31 @@ func (m *Model) askMoveRow(delta int) {
 	m.refreshAskModal()
 }
 
+// askSelectQuickOption handles pressing 1-9 to select that option on the current question.
+func (m *Model) askSelectQuickOption(num int) {
+	if m.askCursor < 0 || m.askCursor >= len(m.askQuestions) {
+		return
+	}
+	q := m.askQuestions[m.askCursor]
+	targetIdx := num - 1
+	if targetIdx < 0 || targetIdx > len(q.Options) {
+		return
+	}
+
+	// Calculate target flat index
+	flat := 0
+	for i := 0; i < m.askCursor; i++ {
+		flat += askRowCount(m.askQuestions[i])
+	}
+	flat += targetIdx
+
+	m.askFlat = flat
+	m.askApplyFlat()
+	m.askToggle()
+}
+
 // refreshAskModal rebuilds the modal's scrollable content after any state
-// change so it never overflows the terminal (which caused the glitchy
-// flicker when a modal had more options than lines on screen).
+// change so it never overflows the terminal.
 func (m *Model) refreshAskModal() {
 	body := m.buildAskBody()
 	m.askViewport.SetContent(body)
@@ -169,15 +190,11 @@ func (m *Model) refreshAskModal() {
 		w = 10
 	}
 	m.askViewport.SetWidth(w)
-	// The custom answer input must be wide enough to actually show what the
-	// user types (a zero-width textinput renders nothing visible).
 	cw := w - 30
 	if cw < 10 {
 		cw = 10
 	}
 	m.askCustomInput.SetWidth(cw)
-	// When the custom answer input is open it lives at the bottom of the
-	// body, so anchor there; otherwise show the questions from the top.
 	if m.askCustomQ >= 0 {
 		m.askViewport.GotoBottom()
 	} else {
@@ -185,23 +202,17 @@ func (m *Model) refreshAskModal() {
 	}
 }
 
-// askMove moves the option cursor (↑/↓) — implemented as a flat row move so
-// navigation flows continuously through every option and question.
+// askMove moves the option cursor (↑/↓) — flat row move.
 func (m *Model) askMove(delta int) {
 	m.askMoveRow(delta)
 }
 
-// askNextQuestion (Tab / Shift+Tab) moves focus to the next/previous question —
-// also implemented as a flat row move, so Tab steps through options too.
+// askNextQuestion (Tab / Shift+Tab) moves focus to the next/previous row.
 func (m *Model) askNextQuestion(delta int) {
 	m.askMoveRow(delta)
 }
 
-// askToggle selects/toggles the option under the flat cursor (checkbox for
-// multi questions, radio selection for single questions). Selecting the custom
-// row opens the custom answer input. On the Submit row it is a no-op. Only here
-// (and askSaveCustom) does the selection state change — navigation never touches
-// it.
+// askToggle selects/toggles the option under the flat cursor.
 func (m *Model) askToggle() {
 	if m.askOnSubmit() {
 		return
@@ -255,8 +266,6 @@ func (m *Model) askSaveCustom() {
 }
 
 // submitAsk collects all answers and delivers them to the waiting tool call.
-// The answers are also appended to the chat history as a YOU entry so the
-// interaction stays visible in the conversation, not just in a transient modal.
 func (m *Model) submitAsk() {
 	results := make([]tool.AskResult, 0, len(m.askQuestions))
 	for qi, q := range m.askQuestions {
@@ -287,10 +296,9 @@ func (m *Model) submitAsk() {
 
 	id := m.askID
 	m.showAsk = false
-	m.status = "Resuming..."
+	m.status = "Ready"
 
-	// Persist the answers into the conversation history as a YOU entry so the
-	// Q&A is recorded like any other chat turn.
+	// Persist the answers into conversation history as a YOU entry.
 	m.appendAskToHistory(results)
 
 	if m.ask != nil {
@@ -298,68 +306,42 @@ func (m *Model) submitAsk() {
 	}
 }
 
-// appendAskToHistory renders the submitted answers as a single, compact chat
-// entry (one tidy line per question: "Q1 · <question> → <answer>"), not
-// several scattered rows. The question text is cleaned first so verbose
-// prompts — e.g. a gated command wrapped in ```fences``` — collapse to one
-// readable line instead of a multi-line blob.
-func (m *Model) appendAskToHistory(results []tool.AskResult) {
-	if len(results) == 0 {
-		return
-	}
-	var sb strings.Builder
-	sb.WriteString("YOU:\n")
-	for i, r := range results {
-		qText := r.Question
-		if qText == "" && i < len(m.askQuestions) {
-			qText = m.askQuestions[i].Question
-		}
-		qText = cleanAskText(qText)
-		label := ""
-		if len(m.askQuestions) > 1 {
-			label = fmt.Sprintf("Q%d · ", i+1)
-		}
-		ans := strings.Join(strings.Fields(strings.Join(r.Answers, ", ")), " ")
-		if ans == "" {
-			ans = "(no selection)"
-		}
-		sb.WriteString(label + qText + " → " + ans)
-		if i < len(results)-1 {
-			sb.WriteString("\n")
-		}
-	}
-	m.appendMessages(sb.String())
-}
-
-// cleanAskText strips markdown code fences (verbose command dumps) and
-// collapses all whitespace so a question renders as one tidy history line.
-func cleanAskText(s string) string {
-	fence := regexp.MustCompile("```[\\s\\S]*?```")
-	s = fence.ReplaceAllString(s, "")
-	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
-}
-
-// skipAsk cancels the interaction without answers (the model proceeds with
-// the most reasonable default).
+// skipAsk dismisses the question modal without selecting answers.
 func (m *Model) skipAsk() {
 	id := m.askID
 	m.showAsk = false
-	m.status = "Resuming..."
+	m.status = "Ready"
 	if m.ask != nil {
 		m.ask.Answer(id, nil)
 	}
 }
 
-// buildAskBody renders the scrollable content of the question modal.
+// appendAskToHistory records the user's answers into the chat transcript.
+func (m *Model) appendAskToHistory(results []tool.AskResult) {
+	var lines []string
+	for _, r := range results {
+		ans := "(none)"
+		if len(r.Answers) > 0 {
+			ans = strings.Join(r.Answers, ", ")
+		}
+		lines = append(lines, fmt.Sprintf("• %s → %s", r.Question, ans))
+	}
+	if len(lines) > 0 {
+		m.appendMessages("YOU:\n" + strings.Join(lines, "\n"))
+	}
+}
+
+// buildAskBody renders the scrollable content of the question modal cleanly without noisy emojis.
 func (m *Model) buildAskBody() string {
 	var sb strings.Builder
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-	checkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#38bdf8"))
+	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38bdf8")).Bold(true)
+	checkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#34d399")).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b"))
+	shortcutStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#94a3b8"))
 
-	sb.WriteString(titleStyle.Render("🎯 BroCode Needs Your Input") + "\n\n")
+	sb.WriteString(titleStyle.Render("Clarification Required") + " " + dimStyle.Render(fmt.Sprintf("(%d questions)", len(m.askQuestions))) + "\n\n")
 
 	row := 0 // running flat index across all option rows
 	onSubmit := m.askOnSubmit()
@@ -370,7 +352,7 @@ func (m *Model) buildAskBody() string {
 		}
 		header := fmt.Sprintf("Q%d/%d · %s", qi+1, len(m.askQuestions), q.Question)
 		if !onSubmit && qi == m.askCursor {
-			sb.WriteString(cursorStyle.Render("❯ "+header) + dimStyle.Render("  ["+tag+"]") + "\n")
+			sb.WriteString(cursorStyle.Render("▸ "+header) + dimStyle.Render("  ["+tag+"]") + "\n")
 		} else {
 			sb.WriteString("  " + header + dimStyle.Render("  ["+tag+"]") + "\n")
 		}
@@ -380,20 +362,24 @@ func (m *Model) buildAskBody() string {
 			row++
 			cursor := "  "
 			if !onSubmit && flatHere == m.askFlat {
-				cursor = cursorStyle.Render("❯ ")
+				cursor = cursorStyle.Render("▸ ")
+			}
+			sc := ""
+			if qi == m.askCursor && oi < 9 {
+				sc = shortcutStyle.Render(fmt.Sprintf("[%d] ", oi+1))
 			}
 			if q.Multi {
 				mark := dimStyle.Render("[ ]")
 				if m.askChecked[qi][oi] {
 					mark = checkStyle.Render("[✓]")
 				}
-				sb.WriteString(fmt.Sprintf("%s%s %s\n", cursor, mark, opt))
+				sb.WriteString(fmt.Sprintf("%s%s%s %s\n", cursor, sc, mark, opt))
 			} else {
 				mark := dimStyle.Render("( )")
 				if m.askSel[qi] == oi {
 					mark = checkStyle.Render("(●)")
 				}
-				sb.WriteString(fmt.Sprintf("%s%s %s\n", cursor, mark, opt))
+				sb.WriteString(fmt.Sprintf("%s%s%s %s\n", cursor, sc, mark, opt))
 			}
 		}
 
@@ -403,52 +389,51 @@ func (m *Model) buildAskBody() string {
 		row++
 		cursor := "  "
 		if !onSubmit && flatHere == m.askFlat {
-			cursor = cursorStyle.Render("❯ ")
+			cursor = cursorStyle.Render("▸ ")
+		}
+		sc := ""
+		if qi == m.askCursor && customIdx < 9 {
+			sc = shortcutStyle.Render(fmt.Sprintf("[%d] ", customIdx+1))
 		}
 		if q.Multi {
 			mark := dimStyle.Render("[ ]")
 			if m.askChecked[qi][customIdx] {
 				mark = checkStyle.Render("[✓]")
 			}
-			sb.WriteString(fmt.Sprintf("%s%s ✍️ Custom answer...\n", cursor, mark))
+			sb.WriteString(fmt.Sprintf("%s%s%s Custom answer...\n", cursor, sc, mark))
 		} else {
 			mark := dimStyle.Render("( )")
 			if m.askSel[qi] == customIdx {
 				mark = checkStyle.Render("(●)")
 			}
-			sb.WriteString(fmt.Sprintf("%s%s ✍️ Custom answer...\n", cursor, mark))
+			sb.WriteString(fmt.Sprintf("%s%s%s Custom answer...\n", cursor, sc, mark))
 		}
 		sb.WriteString("\n")
 	}
 
 	if m.askCustomQ >= 0 {
-		sb.WriteString(fmt.Sprintf("✍️ Custom answer for Q%d: %s\n", m.askCustomQ+1, m.askCustomInput.View()))
-		sb.WriteString(dimStyle.Render("[Type answer · ENTER save · ESC back]"))
+		sb.WriteString(fmt.Sprintf("Custom answer for Q%d: %s\n", m.askCustomQ+1, m.askCustomInput.View()))
+		sb.WriteString(dimStyle.Render("[Type answer · Enter save · Esc back]"))
 	} else {
 		sb.WriteString("\n")
-		// Submit bar: a clear action button showing how many questions are
-		// answered, so the user knows the interaction ends with an explicit
-		// Send — not an accidental Enter. It is also the last tabbable row, so
-		// it gets the cursor highlight when the flat cursor lands on it.
 		answered := m.askAnsweredCount()
-		btn := " ⏎ Submit answers (" + fmt.Sprintf("%d/%d", answered, len(m.askQuestions)) + ") "
-		btnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("86")).Padding(0, 1)
-		dimBtnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Padding(0, 1)
+		btn := fmt.Sprintf(" [ Submit Answers (%d/%d) ] ", answered, len(m.askQuestions))
+		btnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#090d13")).Background(lipgloss.Color("#38bdf8")).Padding(0, 1)
+		dimBtnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b")).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#334155")).Padding(0, 1)
 		if onSubmit {
-			sb.WriteString(cursorStyle.Render("❯ ") + btnStyle.Render(btn) + "\n")
+			sb.WriteString(cursorStyle.Render("▸ ") + btnStyle.Render(btn) + "\n")
 		} else if answered == len(m.askQuestions) && len(m.askQuestions) > 0 {
-			sb.WriteString(btnStyle.Render(btn) + "\n")
+			sb.WriteString("  " + btnStyle.Render(btn) + "\n")
 		} else {
-			sb.WriteString(dimBtnStyle.Render(btn) + "\n")
+			sb.WriteString("  " + dimBtnStyle.Render(btn) + "\n")
 		}
-		sb.WriteString(dimStyle.Render("[Tab/↑/↓ choose · Shift+Tab/↑ go back · Space select · Enter submit · ESC skip]"))
+		sb.WriteString("\n" + dimStyle.Render("[1-9 Quick pick · Space Toggle · Tab/↑/↓ Navigate · Enter Submit · Esc Skip]"))
 	}
 
 	return sb.String()
 }
 
-// askAnsweredCount returns how many questions have at least one selection
-// (radio choice, checked box, or custom answer) — used by the submit button.
+// askAnsweredCount returns how many questions have at least one selection.
 func (m *Model) askAnsweredCount() int {
 	n := 0
 	for qi, q := range m.askQuestions {
@@ -476,10 +461,12 @@ func (m *Model) askAnsweredCount() int {
 	return n
 }
 
-// renderAskModal renders the interactive question modal inside a scrollable
-// viewport so long question sets never overflow the terminal.
+// renderAskModal renders the interactive question modal cleanly with rounded borders.
 func (m Model) renderAskModal() string {
-	style := lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2)
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#38bdf8")).
+		Padding(1, 2)
 	if m.width > 0 {
 		style = style.Width(m.width - 4)
 	}
