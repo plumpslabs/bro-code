@@ -20,9 +20,17 @@ import (
 	"github.com/plumpslabs/bro-code/internal/subagent"
 	"github.com/plumpslabs/bro-code/internal/tool"
 	"github.com/plumpslabs/bro-code/internal/ui"
+	"github.com/plumpslabs/bro-code/internal/version"
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "-v" || os.Args[1] == "--version") {
+		fmt.Println(version.Info())
+		os.Exit(0)
+	}
+
+	flagVersion := flag.Bool("v", false, "Print version and exit")
+	flagVersionLong := flag.Bool("version", false, "Print version and exit")
 	flagProvider := flag.String("provider", "", "LLM provider ID (opencode, deepseek, poolside, anthropic, openai, openrouter, groq, google, ollama)")
 	flagModel := flag.String("model", "", "Model name (e.g. deepseek-v4-flash-free, laguna-s-2.1, claude-3-7-sonnet)")
 	flagContinueLong := flag.Bool("continue", false, "Continue most recent active session")
@@ -33,6 +41,11 @@ func main() {
 	flagBench := flag.String("bench", "", "Run the benchmark harness on a JSON manifest of cases (file path or single case object) and exit")
 	flagLog := flag.String("log", "", "Write a real-time activity log to this file (use `tail -f` in another terminal to monitor what BroCode is doing)")
 	flag.Parse()
+
+	if *flagVersion || *flagVersionLong {
+		fmt.Println(version.Info())
+		os.Exit(0)
+	}
 
 	// 0. Replay mode is fully offline: render the session's chronological
 	// event log (user prompts, assistant turns, tool calls, tool results,
