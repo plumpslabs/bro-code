@@ -29,8 +29,26 @@ type GlobalIndex struct {
 	rag     *SymbolRAG
 }
 
+var binaryExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".svg": true,
+	".ico": true, ".webp": true, ".avif": true, ".bmp": true, ".tiff": true,
+	".woff": true, ".woff2": true, ".ttf": true, ".eot": true, ".otf": true,
+	".lock": true, ".map": true, ".min.js": true, ".min.css": true,
+	".pyc": true, ".pyd": true, ".pyo": true, ".so": true, ".dylib": true, ".dll": true,
+	".exe": true, ".bin": true, ".o": true, ".a": true, ".lib": true,
+	".zip": true, ".tar": true, ".gz": true, ".bz2": true, ".xz": true, ".7z": true, ".rar": true,
+	".pdf": true, ".class": true, ".jar": true, ".war": true, ".ear": true,
+	".mp4": true, ".mov": true, ".avi": true, ".mkv": true, ".mp3": true, ".wav": true, ".flac": true,
+	".wasm": true, ".db": true, ".sqlite": true, ".sqlite3": true, ".parquet": true,
+}
+
+// IsBinaryExt reports whether a file extension belongs to a binary or generated file.
+func IsBinaryExt(ext string) bool {
+	return binaryExts[strings.ToLower(ext)]
+}
+
 // BuildGlobalIndex walks root (skipping heavy/vendor dirs) and indexes every
-// supported source file's symbols and import references.
+// supported source and text file's symbols and import references.
 func BuildGlobalIndex(root string) *GlobalIndex {
 	g := &GlobalIndex{
 		byName:  map[string][]IndexedSymbol{},
@@ -47,41 +65,25 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 			}
 			return nil
 		}
-		ext := strings.ToLower(filepath.Ext(path))
-		isSourceCode := false
-		switch ext {
-		case ".go", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rs",
-			".c", ".cpp", ".cc", ".h", ".hpp", ".java", ".kt", ".rb", ".php", ".swift", ".cs":
-			isSourceCode = true
-		case ".json", ".jsonc", ".yaml", ".yml", ".toml", ".md", ".markdown", ".txt",
-			".html", ".css", ".scss", ".sql", ".sh", ".bash", ".zsh", ".proto", ".graphql",
-			".xml", ".mod", ".sum", ".env.example", ".lock":
-			// Tracked in project file index for autocomplete & search
-		default:
-			base := strings.ToLower(d.Name())
-			if base == "dockerfile" || base == "makefile" || base == "gemfile" || base == "rakefile" {
-				// common extensionless config files
-			} else {
-				return nil
-			}
+		ext := filepath.Ext(path)
+		if IsBinaryExt(ext) {
+			return nil
 		}
 		// Never index sensitive files (.env, credentials, keys) — their
 		// contents must not leak into code_locate results.
 		if isSensitiveName(d.Name()) {
 			return nil
 		}
-		if len(g.files) >= 30000 {
+		if len(g.files) >= 50000 {
 			return filepath.SkipAll
 		}
-		if isSourceCode {
-			syms, _ := ExtractSymbols(path)
-			for _, s := range syms {
-				g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: path, Line: s.Line})
-				g.rag.IndexSymbol(s.Name, path)
-			}
-			if refs := extractImportNames(path); len(refs) > 0 {
-				g.imports[path] = refs
-			}
+		syms, _ := ExtractSymbols(path)
+		for _, s := range syms {
+			g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: path, Line: s.Line})
+			g.rag.IndexSymbol(s.Name, path)
+		}
+		if refs := extractImportNames(path); len(refs) > 0 {
+			g.imports[path] = refs
 		}
 		g.files = append(g.files, path)
 		return nil

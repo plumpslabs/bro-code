@@ -144,18 +144,9 @@ func IndexDir(dir string) ([]Document, error) {
 			}
 			return nil
 		}
-		ext := strings.ToLower(filepath.Ext(path))
-		switch ext {
-		case ".go", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rs",
-			".c", ".cpp", ".cc", ".h", ".hpp", ".java", ".kt", ".rb", ".php",
-			".swift", ".cs", ".md", ".markdown", ".txt", ".json", ".jsonc",
-			".yaml", ".yml", ".toml", ".sql", ".css", ".scss", ".html",
-			".sh", ".bash", ".zsh", ".proto", ".graphql", ".xml", ".mod", ".sum":
-		default:
-			base := strings.ToLower(d.Name())
-			if base != "dockerfile" && base != "makefile" && base != "gemfile" && base != "rakefile" {
-				return nil
-			}
+		ext := filepath.Ext(path)
+		if IsBinaryExt(ext) {
+			return nil
 		}
 		if info, err := d.Info(); err == nil && info.Size() > 2*1024*1024 {
 			return nil

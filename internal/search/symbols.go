@@ -29,15 +29,13 @@ type SymbolItem struct {
 // for Go files, and lightweight regex matching for other languages.
 func ExtractSymbols(path string) ([]SymbolItem, error) {
 	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".go":
+	if ext == ".go" {
 		return extractGoSymbols(path)
-	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rs", ".c", ".cpp", ".cc", ".h", ".hpp",
-		".java", ".kt", ".rb", ".php", ".swift", ".cs", ".vue", ".svelte", ".astro", ".mdx",
-		".prisma", ".graphql", ".gql", ".proto", ".sql", ".dart", ".scala", ".zig", ".lua", ".ex", ".exs":
-		return extractGenericSymbols(path)
 	}
-	return nil, nil
+	if IsBinaryExt(ext) {
+		return nil, nil
+	}
+	return extractGenericSymbols(path)
 }
 
 // extractGoSymbols uses Go standard library AST parser (zero dependencies).
