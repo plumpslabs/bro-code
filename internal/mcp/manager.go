@@ -163,8 +163,8 @@ func (m *Manager) Errors() map[string]string {
 }
 
 // Start connects to every configured server, runs the MCP handshake and
-// discovers its tools. A failing server is recorded in Errors() but does not
-// abort the others — one broken server must never kill the whole session.
+// discovers its tools concurrently. A failing server is recorded in Errors()
+// but does not abort the others — one broken server must never kill the whole session.
 func (m *Manager) Start(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -173,46 +173,76 @@ func (m *Manager) Start(ctx context.Context) {
 	}
 	m.started = true
 
+	if len(m.configs) == 0 {
+		return
+	}
+
+	type serverResult struct {
+		name   string
+		client Client
+		tools  []*MCPTool
+		err    string
+	}
+
+	resChan := make(chan serverResult, len(m.configs))
+	var wg sync.WaitGroup
+
 	for name, cfg := range m.configs {
-		c, err := m.newClient(cfg)
-		if err != nil {
-			m.errors[name] = "spawn failed: " + err.Error()
-			continue
-		}
-		// Bound the handshake per server: Start runs with a background ctx, so
-		// a hung MCP server (no response on init/list) must not block startup
-		// forever — one broken server is skipped, not fatal.
-		handshakeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		if _, err := c.Initialize(handshakeCtx, mcp.InitializeRequest{
-			Params: mcp.InitializeParams{
-				ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
-				ClientInfo: mcp.Implementation{
-					Name:    "brocode",
-					Version: "0.1",
+		wg.Add(1)
+		go func(srvName string, srvCfg ServerConfig) {
+			defer wg.Done()
+			c, err := m.newClient(srvCfg)
+			if err != nil {
+				resChan <- serverResult{name: srvName, err: "spawn failed: " + err.Error()}
+				return
+			}
+			// Bound the handshake per server: Start runs with a background ctx, so
+			// a hung MCP server (no response on init/list) must not block startup
+			// forever — one broken server is skipped, not fatal.
+			handshakeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			if _, err := c.Initialize(handshakeCtx, mcp.InitializeRequest{
+				Params: mcp.InitializeParams{
+					ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
+					ClientInfo: mcp.Implementation{
+						Name:    "brocode",
+						Version: "0.1",
+					},
 				},
-			},
-		}); err != nil {
-			cancel()
-			_ = c.Close()
-			m.errors[name] = "initialize failed: " + err.Error()
-			continue
-		}
+			}); err != nil {
+				_ = c.Close()
+				resChan <- serverResult{name: srvName, err: "initialize failed: " + err.Error()}
+				return
+			}
 
-		toolsRes, err := c.ListTools(handshakeCtx, mcp.ListToolsRequest{})
-		cancel()
-		if err != nil {
-			_ = c.Close()
-			m.errors[name] = "list tools failed: " + err.Error()
-			continue
-		}
+			toolsRes, err := c.ListTools(handshakeCtx, mcp.ListToolsRequest{})
+			if err != nil {
+				_ = c.Close()
+				resChan <- serverResult{name: srvName, err: "list tools failed: " + err.Error()}
+				return
+			}
 
-		m.clients[name] = c
-		for _, t := range toolsRes.Tools {
-			m.tools = append(m.tools, &MCPTool{
-				server: name,
-				client: c,
-				def:    t,
-			})
+			var srvTools []*MCPTool
+			for _, t := range toolsRes.Tools {
+				srvTools = append(srvTools, &MCPTool{
+					server: srvName,
+					client: c,
+					def:    t,
+				})
+			}
+			resChan <- serverResult{name: srvName, client: c, tools: srvTools}
+		}(name, cfg)
+	}
+
+	wg.Wait()
+	close(resChan)
+
+	for res := range resChan {
+		if res.err != "" {
+			m.errors[res.name] = res.err
+		} else {
+			m.clients[res.name] = res.client
+			m.tools = append(m.tools, res.tools...)
 		}
 	}
 }

@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // IndexedSymbol is one symbol occurrence: where a name is defined in the repo.
@@ -48,13 +50,16 @@ func IsBinaryExt(ext string) bool {
 }
 
 // BuildGlobalIndex walks root (skipping heavy/vendor dirs) and indexes every
-// supported source and text file's symbols and import references.
+// supported source and text file's symbols and import references using a parallel
+// worker pool for sub-second startup across multi-repo workspaces.
 func BuildGlobalIndex(root string) *GlobalIndex {
 	g := &GlobalIndex{
 		byName:  map[string][]IndexedSymbol{},
 		imports: map[string]map[string]bool{},
 		rag:     NewSymbolRAG(),
 	}
+
+	var files []string
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -74,21 +79,72 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 		if isSensitiveName(d.Name()) {
 			return nil
 		}
-		if len(g.files) >= 50000 {
+		if len(files) >= 50000 {
 			return filepath.SkipAll
 		}
-		syms, _ := ExtractSymbols(path)
-		for _, s := range syms {
-			g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: path, Line: s.Line})
-			g.rag.IndexSymbol(s.Name, path)
-		}
-		if refs := extractImportNames(path); len(refs) > 0 {
-			g.imports[path] = refs
-		}
-		g.files = append(g.files, path)
+		files = append(files, path)
 		return nil
 	})
-	sort.Strings(g.files)
+
+	sort.Strings(files)
+	g.files = files
+
+	if len(files) == 0 {
+		return g
+	}
+
+	type fileResult struct {
+		path    string
+		symbols []SymbolItem
+		imports map[string]bool
+	}
+
+	workers := runtime.NumCPU()
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > 16 {
+		workers = 16
+	}
+
+	jobs := make(chan string, len(files))
+	results := make(chan fileResult, len(files))
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				syms, _ := ExtractSymbols(path)
+				refs := extractImportNames(path)
+				results <- fileResult{
+					path:    path,
+					symbols: syms,
+					imports: refs,
+				}
+			}
+		}()
+	}
+
+	for _, f := range files {
+		jobs <- f
+	}
+	close(jobs)
+
+	wg.Wait()
+	close(results)
+
+	for res := range results {
+		for _, s := range res.symbols {
+			g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: res.path, Line: s.Line})
+			g.rag.IndexSymbol(s.Name, res.path)
+		}
+		if len(res.imports) > 0 {
+			g.imports[res.path] = res.imports
+		}
+	}
+
 	return g
 }
 
