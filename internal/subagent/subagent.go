@@ -45,12 +45,15 @@ type Runner struct {
 	// parallel orchestration: fan-out is free and fast, but any side-effecting
 	// parallel agent cannot act without a confirm. Nil = deny mutating tasks.
 	Ask func(question string, options []string) (string, error)
+	// ContextWindow is the token limit for sub-agent contexts. 0 defaults to 128k.
+	ContextWindow int
 }
 
 // SubAgent is a single delegated task.
 type SubAgent struct {
-	ID   string `json:"id,omitempty"` // optional label for the result
-	Task string `json:"task"`         // the isolated task description
+	ID      string `json:"id,omitempty"`      // optional label for the result
+	Task    string `json:"task"`              // the isolated task description
+	Mode    string `json:"mode,omitempty"`    // "BUILDER" (default) or "PLANNER" (read-only)
 	// Mutates marks a task that may write/delete/execute. Mutating parallel
 	// agents are never run without explicit user confirmation (see Runner.Ask);
 	// this keeps fan-out fast and read-only by default but still lets the model
@@ -60,7 +63,7 @@ type SubAgent struct {
 
 // runOne executes one sub-agent in its own isolated loop and returns its final
 // answer. onUpdate (may be nil) receives progress lines from the sub-loop.
-func (r *Runner) runOne(ctx context.Context, id, task string, onUpdate loop.TurnOutputHandler) (string, error) {
+func (r *Runner) runOne(ctx context.Context, id, task, mode string, onUpdate loop.TurnOutputHandler) (string, error) {
 	if strings.TrimSpace(task) == "" {
 		return "", fmt.Errorf("empty task for sub-agent %q", id)
 	}
@@ -69,12 +72,19 @@ func (r *Runner) runOne(ctx context.Context, id, task string, onUpdate loop.Turn
 	// history (only its own task). Persists to the shared store only when one
 	// is wired (production audit trail); nil keeps the sub-conversation
 	// ephemeral (default, and always the case in tests).
-	ctxMgr := bcontext.NewManager("sub_"+id, r.Store, 128000)
+	win := r.ContextWindow
+	if win <= 0 {
+		win = 128000
+	}
+	ctxMgr := bcontext.NewManager("sub_"+id, r.Store, win)
 
 	subTools := r.Tools.SubRegistry()
 
 	eng := loop.NewEngine(r.Adapter, subTools, ctxMgr, r.Model)
-	eng.SetMode("BUILDER")
+	if mode == "" {
+		mode = "BUILDER"
+	}
+	eng.SetMode(mode)
 	if r.BudgetUSD > 0 {
 		eng.SetBudgetUSD(r.BudgetUSD)
 	}
@@ -86,7 +96,7 @@ func (r *Runner) runOne(ctx context.Context, id, task string, onUpdate loop.Turn
 
 // Run executes a single sub-agent and returns its answer.
 func (r *Runner) Run(ctx context.Context, task string) (string, error) {
-	return r.runOne(ctx, "1", task, nil)
+	return r.runOne(ctx, "1", task, "BUILDER", nil)
 }
 
 // RunMany executes the given tasks — concurrently when parallel is true,
@@ -132,7 +142,7 @@ func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, 
 			}
 			return
 		}
-		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, onUpdate)
+		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, agents[i].Mode, onUpdate)
 		if onUpdate != nil {
 			status := "DONE"
 			if errs[i] != nil {
@@ -295,7 +305,7 @@ func (sm *ScoutManager) StartWithProgress(ctx context.Context, task string, onPr
 		if onProgress != nil {
 			upd = func(st loop.LoopState, info string) { onProgress(info) }
 		}
-		result, err := sm.Runner.runOne(tctx, id, task, upd)
+		result, err := sm.Runner.runOne(tctx, id, task, "PLANNER", upd)
 		sm.mu.Lock()
 		job.Done = true
 		job.Result = result

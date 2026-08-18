@@ -220,7 +220,7 @@ func (s *Store) WarmStartRelevant(query string) string {
 			continue
 		}
 		seen[fact] = true
-		sb.WriteString(fmt.Sprintf("- [%s] %s\n", res.Doc.Title, fact))
+		fmt.Fprintf(&sb, "- [%s] %s\n", res.Doc.Title, fact)
 	}
 	return strings.TrimSpace(sb.String())
 }
@@ -321,9 +321,9 @@ func (s *Store) List() string {
 			continue
 		}
 		any = true
-		sb.WriteString("## " + sec + "\n")
+		sb.WriteString("## ");sb.WriteString(sec);sb.WriteString("\n")
 		for _, f := range s.facts[sec] {
-			sb.WriteString("- " + f + "\n")
+			sb.WriteString("- ");sb.WriteString(f);sb.WriteString("\n")
 		}
 	}
 	if !any {
@@ -358,17 +358,22 @@ func (s *Store) CaptureMinerFindings(answer string, files []string) error {
 		parsedAny := false
 		for _, line := range lines {
 			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "## ") {
-				currentSec = strings.TrimPrefix(trimmed, "## ")
+			if after, found := strings.CutPrefix(trimmed, "## "); found {
+				currentSec = after
 				continue
 			}
-			if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-				fact := strings.TrimPrefix(strings.TrimPrefix(trimmed, "- "), "* ")
-				if len(fact) >= 15 {
-					if ok, err := s.Retain(currentSec, fact); err == nil && ok {
-						changed = true
-						parsedAny = true
-					}
+			
+			var fact string
+			if after, found := strings.CutPrefix(trimmed, "- "); found {
+				fact = after
+			} else if after, found := strings.CutPrefix(trimmed, "* "); found {
+				fact = after
+			}
+
+			if len(fact) >= 15 {
+				if ok, err := s.Retain(currentSec, fact); err == nil && ok {
+					changed = true
+					parsedAny = true
 				}
 			}
 		}
@@ -414,6 +419,26 @@ func (s *Store) MergeCompaction(goal string, decisions []string, state string) e
 		}
 	}
 	if changed {
+		return s.Save()
+	}
+	return nil
+}
+
+// CaptureGotcha records a project-specific trap, gotcha, or failure pattern
+// so the agent never repeats the same mistake in future sessions.
+func (s *Store) CaptureGotcha(contextHint, gotcha string) error {
+	if s == nil {
+		return nil
+	}
+	gotcha = strings.TrimSpace(gotcha)
+	if len(gotcha) < 10 {
+		return nil
+	}
+	entry := gotcha
+	if contextHint != "" {
+		entry = fmt.Sprintf("[%s] %s", contextHint, gotcha)
+	}
+	if ok, err := s.Retain("Gotchas", entry); err == nil && ok {
 		return s.Save()
 	}
 	return nil

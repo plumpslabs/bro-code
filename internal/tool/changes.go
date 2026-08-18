@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -8,7 +9,18 @@ import (
 	"github.com/hexops/gotextdiff"
 	"github.com/hexops/gotextdiff/myers"
 	"github.com/hexops/gotextdiff/span"
+	bcontext "github.com/plumpslabs/bro-code/internal/context"
 )
+
+func init() {
+	bcontext.FileChangesFormatter = func(payloadJSON string) string {
+		var ch []FileChange
+		if err := json.Unmarshal([]byte(payloadJSON), &ch); err == nil && len(ch) > 0 {
+			return FileChangesMessage(ch)
+		}
+		return ""
+	}
+}
 
 // FileChange records one file mutation made by a native tool during a turn,
 // with the content before and after so the UI can render a +/- diff summary

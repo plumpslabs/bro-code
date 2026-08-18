@@ -296,3 +296,45 @@ func TestAppendAssistantTurnPersistsModeModel(t *testing.T) {
 		t.Errorf("mode/model lost in serialization round-trip: %+v", decoded)
 	}
 }
+
+// TestRestoreSessionFileChangesInChronologicalOrder verifies that file_changes
+// events are restored inline in chronological order after their respective turn.
+func TestRestoreSessionFileChangesInChronologicalOrder(t *testing.T) {
+	origFormatter := FileChangesFormatter
+	defer func() { FileChangesFormatter = origFormatter }()
+
+	FileChangesFormatter = func(payload string) string {
+		return "FILES:\n" + payload
+	}
+
+	mgr := NewManager("s", nil, 128000)
+	events := []store.Event{
+		{Type: "user_msg", PayloadJSON: `{"role":"user","content":"fix typo"}`},
+		{Type: "assistant_msg", PayloadJSON: `{"role":"assistant","content":"Fixed it."}`},
+		{Type: "file_changes", PayloadJSON: `[{"path":"a.go","action":"modified"}]`},
+		{Type: "user_msg", PayloadJSON: `{"role":"user","content":"run tests"}`},
+		{Type: "assistant_msg", PayloadJSON: `{"role":"assistant","content":"All pass."}`},
+	}
+
+	display := RestoreSession(mgr, events)
+	if len(display) != 5 {
+		t.Fatalf("expected 5 display messages, got %d: %+v", len(display), display)
+	}
+
+	if display[0] != "YOU:\nfix typo" {
+		t.Errorf("expected user msg at [0], got %q", display[0])
+	}
+	if !strings.Contains(display[1], "Fixed it.") {
+		t.Errorf("expected assistant msg at [1], got %q", display[1])
+	}
+	if !strings.HasPrefix(display[2], "FILES:\n") {
+		t.Errorf("expected file_changes msg inline at [2], got %q", display[2])
+	}
+	if display[3] != "YOU:\nrun tests" {
+		t.Errorf("expected second user msg at [3], got %q", display[3])
+	}
+	if !strings.Contains(display[4], "All pass.") {
+		t.Errorf("expected second assistant msg at [4], got %q", display[4])
+	}
+}
+

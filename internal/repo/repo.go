@@ -128,13 +128,18 @@ func (m *Map) String() string {
 	var sb strings.Builder
 	sb.WriteString("REPO MAP (deterministic, auto-built):\n")
 	if len(m.EntryPoints) > 0 {
-		sb.WriteString("Entry points: " + strings.Join(m.EntryPoints, ", ") + "\n")
+		sb.WriteString("Entry points: ")
+		sb.WriteString(strings.Join(m.EntryPoints, ", "))
+		sb.WriteString("\n")
 	}
 	if len(m.HotFiles) > 0 {
-		sb.WriteString("Most-used files (across sessions): " + strings.Join(m.HotFiles, ", ") + "\n")
+		sb.WriteString("Most-used files (across sessions): ")
+		sb.WriteString(strings.Join(m.HotFiles, ", "))
+		sb.WriteString("\n")
 	}
 	if len(m.Tree) > 0 {
-		sb.WriteString("Structure:\n" + strings.Join(m.Tree, "\n"))
+		sb.WriteString("Structure:\n")
+		sb.WriteString(strings.Join(m.Tree, "\n"))
 	}
 	return sb.String()
 }

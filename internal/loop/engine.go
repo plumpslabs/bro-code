@@ -277,6 +277,9 @@ type Engine struct {
 	// the LSP manager). When set, edited files get a native type-error check
 	// after the convention review — no LLM needed.
 	diagFn func(path string) string
+	// symbolsProvider optionally returns defined symbols across the project
+	// for DRY reuse checking.
+	symbolsProvider func() map[string]map[string]bool
 	// reproGateArmed is true when the current task looks like a bug fix (the
 	// user query carried a failure signal). While armed and no repro is
 	// established, write/edit/delete calls are gated behind a TSR REPRODUCE
@@ -532,6 +535,12 @@ func (e *Engine) SetOnChange(fn func(path, diff string)) {
 // convention review, catching type errors without waiting for a full build.
 func (e *Engine) SetDiagnosticsChecker(fn func(path string) string) {
 	e.diagFn = fn
+}
+
+// SetSymbolsProvider wires a global symbol provider for cross-file duplicate
+// detection and DRY enforcement.
+func (e *Engine) SetSymbolsProvider(fn func() map[string]map[string]bool) {
+	e.symbolsProvider = fn
 }
 
 // SetLSPStatus records how many language servers are available this session.
@@ -1749,7 +1758,7 @@ Engine Mode Rules (%s):
 4. Organize with good sections: Architecture, Build & Test, Conventions, Decisions, Gotchas. Keep each fact short, concrete, and actionable.
 5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`
 	default:
-		sysPrompt += `1. PLAN & CONTINUE: reason through your plan BEFORE acting, then keep the tool loop running until the goal is achieved — do not stop to ask unless technical ambiguity cannot be resolved by tools. Use native function calling.
+		sysPrompt += `1. CONTEXT-FIRST & PLAN-BEFORE-ACT: NEVER edit code, decide architecture, or guess blind. Always explore and verify the real context first using search and surgical reads. Reason through your plan before modifying anything.
 	2. READ SURGICALLY (biggest token saver): NEVER read an entire file to find or change one symbol. Use code_locate to get line numbers, then read_file(start_line, end_line) for the exact span, or edit_file(start_line, end_line) to change it WITHOUT reading the whole file first. For a large file's structure, call read_file(shrinkwrap) — it returns signatures/types only (~70% smaller). Pick ONE search tool (below); do NOT spray grep+glob+code_locate together.
 	   SEARCH TOOL DECISION TREE:
 	   • "where is symbol X defined/used?"  → code_locate (repo-wide symbol + reference graph, no server)
@@ -1759,15 +1768,15 @@ Engine Mode Rules (%s):
 	   • "code that does X" (semantic)      → search_code
 	3. EXPLORE BEFORE ANSWERING: form a hypothesis, then verify it with ONE batched round of targeted reads (code_locate/grep/glob/read_file). Never answer from memory — read the real code and verify your claims. If a result is unhelpful, adapt; do NOT re-run the same narrow search.
 	3b. BATCH & STAY LEAN (cost): every round re-sends the ENTIRE conversation, so the number of rounds is the single biggest cost driver. Issue 3-4 independent read/grep/glob calls in ONE message. read_file auto-returns a STRUCTURAL OVERVIEW for files over 150 lines — ask for the specific span with start_line/end_line instead of re-reading the whole file. NEVER fight truncation with bash sed/head/tail/grep loops on the same file.
-4. ASK ONLY WHEN TOOLS CANNOT DECIDE: for preferences, architecture choices, or destructive operations, call ask_user with 1-3 clear multiple-choice questions. If a risky command is denied or blocked, do NOT retry it — adapt with a safe alternative.
-5. REUSE FIRST: before writing new code, use code_locate and search_code to check whether the symbol/function already exists — reimplementing existing code wastes tokens and creates duplicates. Report what you reused.
-6. TYPE SAFETY & PERFORMANCE: treat type errors as blockers — fix them after the auto-verification (build/typecheck) flags them. Avoid N+1 queries, SELECT *, missing WHERE on updates/deletes, string-built SQL (injection), quadratic loops, and unbounded fetches.
-7. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony, no new abstractions. Extract a helper only at 3+ uses; keep a file under ~300 LOC; inline one-off logic. Over-engineering is a review finding.
-8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth and run lsp_scan at most once per task (and call it ONCE at the START of any "find/fix warnings/lint" task — that IS your linter: gopls already covers go vet + type errors + deprecated + unused). NEVER go install external linters (golangci-lint/staticcheck/revive/eslint) mid-task — they are redundant with LSP and network-heavy; if LSP is unavailable, ask the user to run /lsp-install or fall back to the project's own go vet/go build. lsp_rename is the right tool for project-wide symbol renames, lsp_fix auto-applies quick-fixes (imports, organize), and lsp_symbols/lsp_outline find symbols by name without guessing a cursor position. LSP diagnostics also run automatically on your edited files after verification.
-9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.
- 10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.
- 11. ANTI-LOOP EFFICIENCY (critical): do NOT re-read a file you have already seen, and do NOT keep opening "one more section" hoping for context — once you have enough to act, ACT. When a PRE-GATHERED LSP DIAGNOSTICS block is present, the diagnostics AND their code windows are already in context: fix each item DIRECTLY with edit_file(start_line,end_line)/lsp_fix — you must NOT call read_file for any item you already have a window for, and you must NOT call lsp_scan again. Whole-file reads are forbidden while that block is present. For any task, batch all edits, then run verification ONCE (the project's own go build/vet/test, or tsc --noEmit). STOP after that single verification pass — re-running the same checks repeatedly is a loop, not progress.
- 12. PLAN-THEN-ACT (multi-step tasks): for an implementation task the engine first runs a read-only PLAN pass and asks you to confirm before any edit. When you are in PLAN MODE, follow its instructions — research, propose a concise plan, then ask_user to confirm. After approval, execute that agreed plan; do NOT silently re-plan or re-decide architecture mid-execution. If you discover the plan is wrong, surface it and re-confirm rather than wandering.`
+	4. INTENT DISCOVERY & ASK WHEN IN DOUBT: for underspecified requirements, user preferences, architectural tradeoffs, or destructive operations, DO NOT guess or assume — search first; if ambiguity remains, call ask_user with 1-3 clear multiple-choice questions. If a risky command is denied or blocked, do NOT retry it — adapt with a safe alternative.
+	5. REUSE FIRST (DRY): before writing new code, use code_locate and search_code to check whether the symbol/function/interface already exists — reimplementing existing code wastes tokens, introduces bugs, and creates duplicates. Always prefer composing and extending existing modules.
+	6. TYPE SAFETY & PERFORMANCE: treat type errors as blockers — fix them after the auto-verification (build/typecheck) flags them. Avoid N+1 queries, SELECT *, missing WHERE on updates/deletes, string-built SQL (injection), quadratic loops, and unbounded fetches.
+	7. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony, no new abstractions. Extract a helper only at 3+ uses; keep a file under ~300 LOC; inline one-off logic. Over-engineering is a review finding.
+	8. SENIOR REVIEW: after edits, deterministic checks + an LLM review of your changed files run automatically. When something is flagged, FIX IT — do not ignore or argue; a clean review is part of "done". LSP tools: prefer the project's own verification CLI (go build/vet/test, tsc --noEmit, cargo check) as the source of truth and run lsp_scan at most once per task (and call it ONCE at the START of any "find/fix warnings/lint" task — that IS your linter: gopls already covers go vet + type errors + deprecated + unused). NEVER go install external linters (golangci-lint/staticcheck/revive/eslint) mid-task — they are redundant with LSP and network-heavy; if LSP is unavailable, ask the user to run /lsp-install or fall back to the project's own go vet/go build. lsp_rename is the right tool for project-wide symbol renames, lsp_fix auto-applies quick-fixes (imports, organize), and lsp_symbols/lsp_outline find symbols by name without guessing a cursor position. LSP diagnostics also run automatically on your edited files after verification.
+	9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.
+	10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.
+	11. ANTI-LOOP EFFICIENCY (critical): do NOT re-read a file you have already seen, and do NOT keep opening "one more section" hoping for context — once you have enough to act, ACT. When a PRE-GATHERED LSP DIAGNOSTICS block is present, the diagnostics AND their code windows are already in context: fix each item DIRECTLY with edit_file(start_line,end_line)/lsp_fix — you must NOT call read_file for any item you already have a window for, and you must NOT call lsp_scan again. Whole-file reads are forbidden while that block is present. For any task, batch all edits, then run verification ONCE (the project's own go build/vet/test, or tsc --noEmit). STOP after that single verification pass — re-running the same checks repeatedly is a loop, not progress.
+	12. PLAN-THEN-ACT (multi-step tasks): for an implementation task the engine first runs a read-only PLAN pass and asks you to confirm before any edit. When you are in PLAN MODE, follow its instructions — research, propose a concise plan, then ask_user to confirm. After approval, execute that agreed plan; do NOT silently re-plan or re-decide architecture mid-execution. If you discover the plan is wrong, surface it and re-confirm rather than wandering.`
 	}
 	return sysPrompt
 }
@@ -2044,6 +2053,7 @@ func readLinesWindow(path string, lo, hi int) string {
 		}
 		fmt.Fprintf(&sb, "%d: %s\n", n, sc.Text())
 	}
+	_ = sc.Err()
 	if sb.Len() == 0 {
 		return ""
 	}
@@ -2326,13 +2336,13 @@ func compactionTranscript(msgs []provider.Message) string {
 		if m.ToolCallID != "" {
 			role = "tool_result"
 		}
-		var part strings.Builder; part.WriteString(role + ": ")
+		var part strings.Builder; part.WriteString(role);part.WriteString(": ")
 		if m.Content != "" {
 			part.WriteString(m.Content)
 		}
 		if len(m.ToolCalls) > 0 {
 			for _, tc := range m.ToolCalls {
-				part.WriteString(fmt.Sprintf("\n  [tool_call %s(%s)]", tc.Name, tc.Arguments))
+				fmt.Fprintf(&part, "\n  [tool_call %s(%s)]", tc.Name, tc.Arguments)
 			}
 		}
 		if sb.Len()+len(part.String()) > maxTranscriptChars {
@@ -2432,8 +2442,8 @@ func (e *Engine) fitMessages(sysPrompt string) []provider.Message {
 	// Accumulate from the newest message backward; stop before the budget breaks.
 	total := 0
 	start := len(msgs)
-	for i := len(msgs) - 1; i >= 0; i-- {
-		c := bcontext.EstimateTokens(msgs[i].Content) + bcontext.EstimateTokens(msgs[i].Reasoning)
+	for i, msg := range slices.Backward(msgs) {
+		c := bcontext.EstimateTokens(msg.Content) + bcontext.EstimateTokens(msg.Reasoning)
 		if total+c > budget && start < len(msgs) {
 			break
 		}
@@ -2564,7 +2574,7 @@ func (e *Engine) tryFallbacks(ctx context.Context, req provider.CompletionReques
 // askFallbackConfirmation asks the user before routing to a fallback from a
 // different vendor than the primary. With no interactive layer wired it
 // defaults to allow, preserving the auto behavior.
-func (e *Engine) askFallbackConfirmation(model, providerID string) (bool, error) {
+func (e *Engine) askFallbackConfirmation(model, _ string) (bool, error) {
 	if e.askHandler == nil {
 		return true, nil
 	}

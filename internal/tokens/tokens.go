@@ -7,12 +7,9 @@ package tokens
 
 import "strings"
 
-// EstimateTokens approximates LLM token counts more accurately than a flat
-// len/4 guess: prose ≈4 chars/token, code ≈3.5, CJK/Asian text ≈1.2 (each
-// character is often its own token). The estimate is weighted per line so
-// mixed content (code + prose + Asian replies) lands closer to real
-// tokenizer counts, keeping thresholds honest instead of firing too early
-// or overflowing late.
+// EstimateTokens approximates LLM token counts when the exact BPE encoder
+// is not available. Calibrated: code ≈3.2-3.8 chars/tok, English prose ≈4 chars/tok,
+// CJK ≈1.2 chars/tok.
 func EstimateTokens(text string) int {
 	if text == "" {
 		return 0
@@ -29,7 +26,7 @@ func EstimateTokens(text string) int {
 		ascii := 0
 		cjk := 0
 		for _, r := range line {
-			if r > 0x2E7F && r < 0x9FFF { // CJK unified ideographs & compat
+			if r > 0x2E7F && r < 0x9FFF {
 				cjk++
 			} else {
 				ascii++
@@ -37,14 +34,14 @@ func EstimateTokens(text string) int {
 		}
 
 		trimmed := strings.TrimSpace(line)
-		isCode := strings.ContainsAny(trimmed, "{}();=\"'") || strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "func ") || strings.HasPrefix(trimmed, "const ")
+		isCode := strings.ContainsAny(trimmed, "{}();=\"'") || strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "func ") || strings.HasPrefix(trimmed, "const ") || strings.HasPrefix(trimmed, "var ")
 
-		charsPerToken := 4.0 // prose default
+		charsPerToken := 4.0
 		if isCode {
-			charsPerToken = 3.5 // code packs more tokens per char
+			charsPerToken = 3.3
 		}
 
-		lineTokens := float64(ascii)/charsPerToken + float64(cjk)*0.8 // CJK ≈ 1.25 chars/token
+		lineTokens := float64(ascii)/charsPerToken + float64(cjk)*0.85
 		if lineTokens < 1 {
 			lineTokens = 1
 		}

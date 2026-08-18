@@ -9,8 +9,8 @@
 package lsp
 
 import (
-	"slices"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -343,6 +344,19 @@ func (m *Manager) clientFor(ctx context.Context, path string) (*Client, error) {
 				PublishDiagnostics: &protocol.PublishDiagnosticsClientCapabilities{},
 			},
 		},
+	}
+	
+	if spec.Command == "gopls" {
+		opts, _ := json.Marshal(map[string]any{
+			"staticcheck": true,
+			"analyses": map[string]any{
+				"nilness":      true,
+				"shadow":       true,
+				"unusedparams": true,
+				"unusedwrite":  true,
+			},
+		})
+		initParams.InitializationOptions = opts
 	}
 	var initResult protocol.InitializeResult
 	if _, err := conn.Call(ctx, "initialize", initParams, &initResult); err != nil {
@@ -919,6 +933,7 @@ func formatHover(contents protocol.HoverContents) string {
 		return strings.TrimSpace(v.Value)
 	case protocol.String:
 		return strings.TrimSpace(string(v))
+	//nolint:staticcheck // SA1019: deprecated but needed for backwards compatibility
 	case *protocol.MarkedStringWithLanguage:
 		return strings.TrimSpace(v.Value)
 	case protocol.MarkedStringSlice:
@@ -926,7 +941,7 @@ func formatHover(contents protocol.HoverContents) string {
 		for _, ms := range v {
 			if s, ok := ms.(protocol.String); ok {
 				parts = append(parts, strings.TrimSpace(string(s)))
-			} else if mswl, ok := ms.(*protocol.MarkedStringWithLanguage); ok {
+			} else if mswl, ok := ms.(*protocol.MarkedStringWithLanguage); ok { //nolint:staticcheck // SA1019: deprecated
 				parts = append(parts, strings.TrimSpace(mswl.Value))
 			}
 		}
@@ -1024,7 +1039,7 @@ var fixSettle = 600 * time.Millisecond
 func (m *Manager) autoFixFile(ctx context.Context, c *Client, path, text string) (applied int, summary string, err error) {
 	const maxActions = 12
 	lastTitle := ""
-	for i := 0; i < maxActions; i++ {
+	for range maxActions {
 		if ctx.Err() != nil {
 			return applied, summary, ctx.Err()
 		}
@@ -1149,13 +1164,13 @@ func (m *Manager) AutoFixAll(ctx context.Context, root string) (string, error) {
 		}
 		applied, summary, ferr := m.autoFixFile(ctx, t.c, t.path, text)
 		if ferr != nil {
-			sb.WriteString(fmt.Sprintf("⚠ %s: error — %v\n", t.rel, ferr))
+			fmt.Fprintf(&sb, "⚠ %s: error — %v\n", t.rel, ferr)
 			continue
 		}
 		if applied > 0 {
 			filesFixed++
 			totalApplied += applied
-			sb.WriteString(fmt.Sprintf("🔧 %s: %d fix(es) applied\n%s\n", t.rel, applied, summary))
+			fmt.Fprintf(&sb, "🔧 %s: %d fix(es) applied\n%s\n", t.rel, applied, summary)
 		}
 	}
 	if filesFixed == 0 {
@@ -1163,6 +1178,188 @@ func (m *Manager) AutoFixAll(ctx context.Context, root string) (string, error) {
 	}
 	fmt.Fprintf(&sb, "\nAuto-fixed %d issue(s) across %d file(s). Run the project's own checks to verify, then lsp_scan again if anything remains.\n", totalApplied, filesFixed)
 	return sb.String(), nil
+}
+
+// FixAllFile clears every mechanically-fixable diagnostic in ONE file by asking
+// gopls for quick-fixes and applying them one at a time, re-syncing the server
+// and re-reading diagnostics after each. Crucially, every applied fix is
+// build-gated: if applying it makes `go build` of the package fail, the edit is
+// reverted and that diagnostic is skipped. This keeps the project always
+// compiling while absorbing the bulk of the warnings (imports, Fprintf/Sprintf
+// rewrites, CutPrefix, max/min, range loops, slices.Backward, etc.) — no LLM in
+// the loop. Determinism + the build gate mean it can never leave broken code;
+// anything that would break the build is left for a human/LLM. Returns the number
+// of fixes applied and a summary.
+func (m *Manager) FixAllFile(ctx context.Context, path string) (int, string, error) {
+	c, err := m.clientFor(ctx, path)
+	if err != nil {
+		return 0, "", err
+	}
+	u := uri.File(filepath.Clean(path))
+	pkgDir := filepath.Dir(path)
+
+	var sb strings.Builder
+	applied := 0
+	skipped := map[string]bool{}
+	const maxPasses = 400
+	for range maxPasses {
+		if ctx.Err() != nil {
+			break
+		}
+		text, terr := textAt(path)
+		if terr != nil {
+			return applied, sb.String(), terr
+		}
+		if err := c.ensureOpen(ctx, path, text); err != nil { // re-sync server view after each edit
+			return applied, sb.String(), err
+		}
+		// gopls clears a file's diagnostics on didChange and repopulates them
+		// after re-analysis, which for large files takes longer than fixSettle —
+		// so retry the wait until this file's diagnostics actually come back.
+		var diags []protocol.Diagnostic
+		for range 20 {
+			if err := m.waitForDiagnostics(ctx, fixSettle); err != nil {
+				return applied, sb.String(), err
+			}
+			c.mu.Lock()
+			diags = append([]protocol.Diagnostic(nil), c.pushed[u.String()]...)
+			c.mu.Unlock()
+			if len(diags) > 0 {
+				break
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		if len(diags) == 0 {
+			break
+		}
+
+		// Find the first non-skipped diagnostic that has an applicable quick-fix,
+		// and apply just that one fix this pass (so the build gate can pinpoint
+		// which diagnostic broke compilation).
+		var target *protocol.Diagnostic
+		var chosen *protocol.CodeAction
+		for i := range diags {
+			d := diags[i]
+			if skipped[fmt.Sprintf("%v", d.Message)] {
+				continue
+			}
+			acts := quickfixActions(ctx, c, u, d)
+			if len(acts) == 0 {
+				continue
+			}
+			target = &diags[i]
+			chosen = &acts[0]
+			break
+		}
+		if chosen == nil {
+			break
+		}
+
+		before, _ := os.ReadFile(path)
+		res, aerr := applyWorkspaceEdit(chosen.Edit)
+		if aerr != nil {
+			return applied, sb.String(), fmt.Errorf("applying %q: %w", chosen.Title, aerr)
+		}
+		if !packageBuilds(pkgDir) {
+			// This fix breaks compilation — revert it and skip its diagnostic so
+			// we never loop on it again. The warning stays for a human/LLM.
+			_ = os.WriteFile(path, before, 0644)
+			_ = c.ensureOpen(ctx, path, string(before))
+			skipped[fmt.Sprintf("%v", target.Message)] = true
+			fmt.Fprintf(&sb, "  skipped (breaks build): %s\n", chosen.Title)
+			continue
+		}
+		applied++
+		fmt.Fprintf(&sb, "  • %s\n%s\n", chosen.Title, res)
+	}
+	if applied == 0 {
+		return 0, "", nil
+	}
+	return applied, sb.String(), nil
+}
+
+// quickfixActions returns the applicable quick-fix / organize-imports code
+// actions for a single diagnostic (requested by that diagnostic's exact range).
+func quickfixActions(ctx context.Context, c *Client, u uri.URI, d protocol.Diagnostic) []protocol.CodeAction {
+	params := protocol.CodeActionParams{
+		TextDocument: protocol.TextDocumentIdentifier{URI: u},
+		Range:        d.Range,
+		Context: protocol.CodeActionContext{
+			Diagnostics: []protocol.Diagnostic{d},
+			Only: []protocol.CodeActionKind{
+				protocol.CodeActionKindQuickFix,
+				protocol.CodeActionKindSourceOrganizeImports,
+				protocol.CodeActionKindSourceFixAll,
+			},
+		},
+	}
+	var actions []protocol.CodeAction
+	if _, err := c.conn.Call(ctx, "textDocument/codeAction", params, &actions); err != nil {
+		return nil
+	}
+	var out []protocol.CodeAction
+	for _, a := range actions {
+		if a.Edit == nil || a.Kind == nil {
+			continue
+		}
+		switch *a.Kind {
+		case protocol.CodeActionKindQuickFix, protocol.CodeActionKindSourceOrganizeImports, protocol.CodeActionKindSourceFixAll:
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// packageBuilds reports whether `go build .` succeeds in dir — used as the gate
+// that rejects any auto-fix which would break compilation.
+func packageBuilds(dir string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "build", ".")
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	return cmd.Run() == nil
+}
+
+// DeterministicFixAll applies gopls source.fixAll across every supported file in
+// the project in one call — the deterministic bulk clearing pass for mechanical
+// warnings. It returns a per-file summary; the LLM only handles whatever remains
+// (genuinely semantic issues) afterward.
+func (m *Manager) DeterministicFixAll(ctx context.Context, root string) (string, error) {
+	files := collectSupportedFiles(root, scanMaxFiles)
+	if len(files) == 0 {
+		return "No supported source files found (no language server available for this project).", nil
+	}
+	// Warm gopls up front: open every file and let it index the whole module so
+	// each FixAllFile pass finds its diagnostics immediately instead of bailing on
+	// an empty publish during cold indexing.
+	if _, err := m.ScanDiagnostics(ctx, root); err != nil && ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	var sb strings.Builder
+	total := 0
+	for _, f := range files {
+		applied, summary, err := m.FixAllFile(ctx, f)
+		if err != nil {
+			fmt.Fprintf(&sb, "⚠ %s: %v\n", f, err)
+			continue
+		}
+		if applied == 0 {
+			continue
+		}
+		total += applied
+		rel, rerr := filepath.Rel(root, f)
+		if rerr != nil {
+			rel = f
+		}
+		fmt.Fprintf(&sb, "%s: %d fix(es)\n%s\n", rel, applied, summary)
+	}
+	if total == 0 {
+		return "✅ No deterministic fixes applicable.", nil
+	}
+	return fmt.Sprintf("🔧 Deterministic fixes applied: %d\n%s", total, sb.String()), nil
 }
 
 // Rename renames the symbol under the cursor across the whole project using

@@ -788,23 +788,15 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		newContent = strings.Join(updated, "\n")
 		editRange = fmt.Sprintf(" (lines %d-%d)", args.StartLine, end)
 	} else {
-		// Exact-string edit (original behavior): replace the first occurrence of
-		// `target` with `replacement`.
-		if !strings.Contains(content, args.Target) {
-			// Fallback 1: Normalize CRLF line endings (\r\n -> \n)
-			normContent := strings.ReplaceAll(content, "\r\n", "\n")
-			normTarget := strings.ReplaceAll(args.Target, "\r\n", "\n")
-			normReplacement := strings.ReplaceAll(args.Replacement, "\r\n", "\n")
-
-			if strings.Contains(normContent, normTarget) {
-				content = normContent
-				args.Target = normTarget
-				args.Replacement = normReplacement
-			} else {
-				return "", fmt.Errorf("target string not found in %s. Use start_line/end_line for a positional edit, or read_file first to copy the exact text", args.Path)
-			}
+		// Multi-tier resilient edit (exact → CRLF-normalized → line-trimmed → indent-aligned → fuzzy)
+		res, tier, err := ApplyResilientEdit(content, args.Target, args.Replacement)
+		if err != nil {
+			return "", fmt.Errorf("target string not found in %s: %w. Use start_line/end_line for a positional edit, or read_file first to copy the exact text", args.Path, err)
 		}
-		newContent = strings.Replace(content, args.Target, args.Replacement, 1)
+		newContent = res
+		if tier != "exact" {
+			editRange = fmt.Sprintf(" (matched via %s)", tier)
+		}
 	}
 
 	if newContent == content {
@@ -1509,11 +1501,6 @@ func (t *WebSearchTool) Execute(ctx context.Context, argsJSON string) (string, e
 		return "", fmt.Errorf("web_search requires a query")
 	}
 
-	apiKey := os.Getenv("EXA_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("EXA_API_KEY is not set — add it to your environment to enable web search (get a key at exa.ai)")
-	}
-
 	num := args.NumResult
 	if num <= 0 {
 		num = 5
@@ -1521,56 +1508,115 @@ func (t *WebSearchTool) Execute(ctx context.Context, argsJSON string) (string, e
 		num = 10
 	}
 
-	body, err := json.Marshal(map[string]any{
-		"query":      args.Query,
-		"numResults": num,
-	})
-	if err != nil {
-		return "", err
+	apiKey := os.Getenv("EXA_API_KEY")
+	tavilyKey := os.Getenv("TAVILY_API_KEY")
+
+	// 1. If Exa key is provided, use Exa API
+	if apiKey != "" {
+		body, err := json.Marshal(map[string]any{
+			"query":      args.Query,
+			"numResults": num,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.exa.ai/search", bytes.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", apiKey)
+
+		resp, err := httpClientSearch.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				raw, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+				if err == nil {
+					var out struct {
+						Results []struct {
+							Title         string `json:"title"`
+							URL           string `json:"url"`
+							PublishedDate string `json:"publishedDate"`
+						} `json:"results"`
+					}
+					if json.Unmarshal(raw, &out) == nil && len(out.Results) > 0 {
+						var sb strings.Builder
+						for i, r := range out.Results {
+							date := ""
+							if r.PublishedDate != "" {
+								date = " (" + r.PublishedDate[:min(10, len(r.PublishedDate))] + ")"
+							}
+							sb.WriteString(fmt.Sprintf("%d. %s%s\n   %s\n", i+1, r.Title, date, r.URL))
+						}
+						return strings.TrimSpace(sb.String()), nil
+					}
+				}
+			}
+		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.exa.ai/search", bytes.NewReader(body))
-	if err != nil {
-		return "", err
+	// 2. If Tavily key is provided, use Tavily API
+	if tavilyKey != "" {
+		body, err := json.Marshal(map[string]any{
+			"query":       args.Query,
+			"max_results": num,
+			"api_key":     tavilyKey,
+		})
+		if err == nil {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.tavily.com/search", bytes.NewReader(body))
+			if err == nil {
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := httpClientSearch.Do(req)
+				if err == nil {
+					defer resp.Body.Close()
+					if resp.StatusCode == http.StatusOK {
+						raw, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+						if err == nil {
+							var tout struct {
+								Results []struct {
+									Title   string `json:"title"`
+									URL     string `json:"url"`
+									Content string `json:"content"`
+								} `json:"results"`
+							}
+							if json.Unmarshal(raw, &tout) == nil && len(tout.Results) > 0 {
+								var sb strings.Builder
+								for i, r := range tout.Results {
+									sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n", i+1, r.Title, r.URL))
+									if r.Content != "" {
+										snip := r.Content
+										if len(snip) > 160 {
+											snip = snip[:157] + "..."
+										}
+										sb.WriteString("   " + snip + "\n")
+									}
+								}
+								return strings.TrimSpace(sb.String()), nil
+							}
+						}
+					}
+				}
+			}
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
 
-	resp, err := httpClientSearch.Do(req)
+	// 3. Fallback: Zero-Config Free Web Search (DuckDuckGo Lite)
+	freeResults, err := FreeWebSearch(ctx, args.Query, num)
 	if err != nil {
-		return "", fmt.Errorf("search request failed: %w", err)
+		return "", fmt.Errorf("web search failed: %w", err)
 	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Exa API error HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-
-	var out struct {
-		Results []struct {
-			Title         string `json:"title"`
-			URL           string `json:"url"`
-			PublishedDate string `json:"publishedDate"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", fmt.Errorf("failed to parse search results: %w", err)
-	}
-	if len(out.Results) == 0 {
+	if len(freeResults) == 0 {
 		return "No results found.", nil
 	}
 
 	var sb strings.Builder
-	for i, r := range out.Results {
-		date := ""
-		if r.PublishedDate != "" {
-			date = " (" + r.PublishedDate[:min(10, len(r.PublishedDate))] + ")"
+	for i, r := range freeResults {
+		sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n", i+1, r.Title, r.URL))
+		if r.Snippet != "" {
+			sb.WriteString("   " + r.Snippet + "\n")
 		}
-		sb.WriteString(fmt.Sprintf("%d. %s%s\n   %s\n", i+1, r.Title, date, r.URL))
 	}
 	return strings.TrimSpace(sb.String()), nil
 }

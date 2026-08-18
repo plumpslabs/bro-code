@@ -182,24 +182,10 @@ func main() {
 			initialMessages = append(initialMessages, fmt.Sprintf("✅ Resumed session %s (%d events total)", sessionID, len(events)))
 			// RestoreSession replays only the newest events that fit ~80% of the
 			// context window (a session can accumulate thousands of tool-result
-			// events), re-pairs tool results with their calls, and renders
+			// events), re-pairs tool results with their calls, restores file change
+			// summaries inline at their original chronological place, and renders
 			// tool-call-only turns as compact summaries instead of raw JSON.
 			initialMessages = append(initialMessages, bcontext.RestoreSession(ctxMgr, events)...)
-			// Replay each turn's edit/create/delete record (persisted as a
-			// "file_changes" event) so the resumed session still shows exactly
-			// which files were touched — the live FILES:/DIFF: chat entries are
-			// in-memory only and would otherwise vanish on reopen.
-			for _, ev := range events {
-				if ev.Type != "file_changes" {
-					continue
-				}
-				var ch []tool.FileChange
-				if json.Unmarshal([]byte(ev.PayloadJSON), &ch) == nil {
-					if files := tool.FileChangesMessage(ch); files != "" {
-						initialMessages = append(initialMessages, files)
-					}
-				}
-			}
 		} else {
 			initialMessages = append(initialMessages, fmt.Sprintf("⚡ Continued session %s.", sessionID))
 		}

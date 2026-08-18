@@ -23,14 +23,24 @@ import (
 // heavyDirNames are directories the agent must never read into context:
 // dependencies, build output, VCS metadata, language-specific caches.
 var heavyDirNames = map[string]bool{
-	"node_modules": true, "bower_components": true, "vendor": true,
-	"dist": true, "build": true, "out": true, "bin": true, "obj": true,
-	".git": true, ".next": true, ".nuxt": true, "coverage": true,
-	".cache": true, ".turbo": true, "target": true, "__pycache__": true,
-	".venv": true, "venv": true, "Pods": true, ".gradle": true,
-	".pytest_cache": true, ".mypy_cache": true, ".tox": true,
-	".terraform": true, ".serverless": true, ".parcel-cache": true,
-	".yarn": true, ".pnpm-store": true, ".svn": true, ".hg": true,
+	"node_modules": true, "bower_components": true, "jspm_packages": true, "vendor": true,
+	"dist": true, "build": true, "out": true, "bin": true, "obj": true, "pkg": true,
+	"Debug": true, "Release": true, "x64": true, "x86": true, "DerivedData": true,
+	".git": true, ".svn": true, ".hg": true, ".bzr": true, ".CVS": true,
+	".next": true, ".nuxt": true, ".svelte-kit": true, ".astro": true, ".docusaurus": true,
+	".vuepress": true, ".output": true, ".parcel-cache": true, ".turbo": true, ".webpack": true,
+	".vite": true, ".rollup.cache": true, ".cache": true, "coverage": true, "htmlcov": true,
+	"target": true, "__pycache__": true, ".pytest_cache": true, ".mypy_cache": true,
+	".ruff_cache": true, ".tox": true, ".nox": true, ".venv": true, "venv": true, "env": true,
+	".conda": true, ".eggs": true, "pip-wheel-metadata": true,
+	"Pods": true, "Carthage": true, ".dart_tool": true, ".pub-cache": true, ".pub": true,
+	".gradle": true, ".m2": true, ".ivy2": true, ".sbt": true, ".cxx": true,
+	".bundle": true, "_build": true, ".elixir_ls": true,
+	".brocode": true, ".idea": true, ".vscode": true, ".vs": true, ".settings": true,
+	".project": true, ".classpath": true, ".history": true,
+	".terraform": true, ".terragrunt-cache": true, ".serverless": true, ".vagrant": true,
+	".pulumi": true, ".docker": true, "tmp": true, "temp": true, ".tmp": true, ".temp": true,
+	".yarn": true, ".pnpm-store": true,
 }
 
 // sensitiveFileNames are files whose contents must never enter the LLM

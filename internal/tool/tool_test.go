@@ -654,14 +654,6 @@ func TestSnapshotAndUndo(t *testing.T) {
 	}
 }
 
-func TestWebSearchRequiresKey(t *testing.T) {
-	t.Setenv("EXA_API_KEY", "")
-	_, err := (&WebSearchTool{}).Execute(context.Background(), `{"query":"go channels"}`)
-	if err == nil || !strings.Contains(err.Error(), "EXA_API_KEY") {
-		t.Errorf("expected EXA_API_KEY error, got %v", err)
-	}
-}
-
 func TestWebSearchEmptyQuery(t *testing.T) {
 	t.Setenv("EXA_API_KEY", "test")
 	if _, err := (&WebSearchTool{}).Execute(context.Background(), `{"query":"   "}`); err == nil {

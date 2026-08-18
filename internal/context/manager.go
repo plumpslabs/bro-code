@@ -12,6 +12,10 @@ import (
 	"github.com/plumpslabs/bro-code/internal/tokens"
 )
 
+// FileChangesFormatter formats a serialized JSON list of file changes into a
+// display string during RestoreSession. Wired by the tool package on startup.
+var FileChangesFormatter func(payloadJSON string) string
+
 // CompactionSummary follows the structured 6-heading format used for context
 // compaction. The six headings (Goal, Files Touched, Decisions Made, Next
 // Action, Constraints, Last Known State) give a continuing agent everything it
@@ -415,15 +419,12 @@ func (m *Manager) estimateTokens(text string) int {
 			return n
 		}
 	}
-	return tokens.EstimateTokens(text)
+	return tokens.CountTokensDefault(text)
 }
 
-// EstimateTokens approximates LLM token counts cheaply and deterministically
-// (weighted per line: prose ≈4 chars/token, code ≈3.5, CJK ≈1.2). Kept here
-// as a thin wrapper over the leaf tokens package so existing external callers
-// and the compaction thresholds stay unchanged.
+// EstimateTokens calculates BPE token counts for text.
 func EstimateTokens(text string) int {
-	return tokens.EstimateTokens(text)
+	return tokens.CountTokensDefault(text)
 }
 
 // ExtractEventContent extracts clean human-readable content from event JSON payload string.
@@ -515,6 +516,13 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 				text = ExtractEventContent(ev.PayloadJSON)
 			}
 			display = append(display, text)
+		case "file_changes":
+			flushPendingTools()
+			if FileChangesFormatter != nil {
+				if formatted := FileChangesFormatter(ev.PayloadJSON); formatted != "" {
+					display = append(display, formatted)
+				}
+			}
 		}
 		restored++
 	}

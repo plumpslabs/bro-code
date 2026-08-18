@@ -206,7 +206,7 @@ type AutoFixTool struct{ m *Manager }
 
 func (t *AutoFixTool) Name() string { return "lsp_autofix" }
 func (t *AutoFixTool) Description() string {
-	return "Apply ALL auto-fixable language-server quick-fixes (imports, organize-imports, trivial rewrites) across the project — or one file — in a SINGLE call, instead of invoking lsp_fix per file. Use at the END of a 'fix warnings/lint' task after your edits, or to batch-clear fixable diagnostics repo-wide. This is a repo-wide MUTATING action; the project's own checks still verify the result. Pass target \"all\" (default) or a specific file path."
+	return "Apply ALL deterministic language-server fixes (imports, organize-imports, AND modernize refactor rewrites like WriteString(Sprintf)→Fprintf, range loops, CutPrefix, max/min, slices.Backward) across the project — or one file — in a SINGLE call via gopls source.fixAll. Use at the START of a 'fix warnings/lint' task to clear every mechanically-fixable diagnostic deterministically (no LLM needed), then handle only what remains. This is a repo-wide MUTATING action; the project's own checks still verify the result. Pass target \"all\" (default) or a specific file path."
 }
 func (t *AutoFixTool) Parameters() map[string]any {
 	return map[string]any{
@@ -255,7 +255,7 @@ func (t *AutoFixTool) Execute(ctx context.Context, argsJSON string) (string, err
 	if err != nil {
 		return "", err
 	}
-	return t.m.AutoFixAll(ctx, abs)
+	return t.m.DeterministicFixAll(ctx, abs)
 }
 
 // RenameTool — semantic rename across the project.

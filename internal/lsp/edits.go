@@ -143,6 +143,10 @@ func applyTextEdits(content string, edits []protocol.TextEdit) string {
 	return strings.Join(lines, "\n")
 }
 
+
+
+
+
 // utf16ToByte converts a UTF-16 code-unit offset in s to a byte offset,
 // clamping at the end of the string. LSP character offsets are UTF-16 code
 // units, so a surrogate pair counts as two units while occupying 4 bytes;

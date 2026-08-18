@@ -391,7 +391,11 @@ func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 	for _, p := range e.editedFiles {
 		issues = append(issues, checkFileConventions(p)...)
 	}
-	issues = append(issues, findDuplicateSymbols(e.editedFiles, nil)...)
+	var knownSyms map[string]map[string]bool
+	if e.symbolsProvider != nil {
+		knownSyms = e.symbolsProvider()
+	}
+	issues = append(issues, findDuplicateSymbols(e.editedFiles, knownSyms)...)
 
 	// Complexity gate for the expensive LLM layer: small edits (≤30 lines
 	// touched this turn) are high-confidence targets — deterministic checks

@@ -59,6 +59,9 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 		if isSensitiveName(d.Name()) {
 			return nil
 		}
+		if len(g.files) >= 30000 {
+			return filepath.SkipAll
+		}
 		syms, _ := ExtractSymbols(path)
 		for _, s := range syms {
 			g.byName[s.Name] = append(g.byName[s.Name], IndexedSymbol{Name: s.Name, Kind: s.Kind, File: path, Line: s.Line})
@@ -238,6 +241,16 @@ func (g *GlobalIndex) FormatLookup(name string) string {
 // header and /lsp-style status).
 func (g *GlobalIndex) FileCount() int { return len(g.files) }
 
+// Files returns a copy of all indexed file paths.
+func (g *GlobalIndex) Files() []string {
+	if g == nil {
+		return nil
+	}
+	out := make([]string, len(g.files))
+	copy(out, g.files)
+	return out
+}
+
 func uniqueSorted(in []string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -321,4 +334,21 @@ func lastSegment(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// AllSymbols returns a map of file path -> set of defined symbols across the index.
+func (g *GlobalIndex) AllSymbols() map[string]map[string]bool {
+	if g == nil {
+		return nil
+	}
+	out := make(map[string]map[string]bool)
+	for name, syms := range g.byName {
+		for _, s := range syms {
+			if out[s.File] == nil {
+				out[s.File] = make(map[string]bool)
+			}
+			out[s.File][name] = true
+		}
+	}
+	return out
 }

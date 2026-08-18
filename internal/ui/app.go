@@ -281,6 +281,9 @@ type Model struct {
 	// into new lines instead of overflowing the frame.
 	promptInput textarea.Model
 
+	// Autocomplete state for slash commands and file mentions
+	autocomplete AutocompleteState
+
 	// Prompt History (UP/DOWN navigation)
 	promptHistory []string
 	historyIdx    int
@@ -683,6 +686,9 @@ func NewApp(
 	m.tools.Register(&tool.CodeLocateTool{Index: m.globalIndex})
 	m.tools.Register(&tool.CheckpointTool{})
 	m.tools.Register(&tool.RunTestsTool{Plan: loop.TestCommandPlan})
+	if m.scoutMgr != nil && m.scoutMgr.Runner != nil {
+		m.tools.Register(&subagent.SwarmTool{Runner: m.scoutMgr.Runner})
+	}
 
 	// A restored session already carries FILES: change summaries — show them
 	// expanded so the user immediately sees what was edited/created/deleted
@@ -709,6 +715,13 @@ func (m *Model) contextWindow() int {
 		return w
 	}
 	return 128000
+}
+
+func (m *Model) allProjectFiles() []string {
+	if m.globalIndex != nil {
+		return m.globalIndex.Files()
+	}
+	return nil
 }
 
 func (m *Model) SetProgram(p *tea.Program) {
@@ -778,6 +791,9 @@ func (m *Model) rebuildEngine() {
 		// Parallel orchestration confirm-gate: mutating sub-agents route their
 		// approval question through the same user-ask channel.
 		if m.scoutMgr != nil && m.scoutMgr.Runner != nil {
+			m.scoutMgr.Runner.Adapter = m.adapter
+			m.scoutMgr.Runner.Model = m.activeModel
+			m.scoutMgr.Runner.ContextWindow = m.contextWindow()
 			m.scoutMgr.Runner.Ask = func(question string, opts []string) (string, error) {
 				results, err := m.ask.Ask(context.Background(), []tool.AskQuestion{
 					{
@@ -795,6 +811,10 @@ func (m *Model) rebuildEngine() {
 				return results[0].Custom, nil
 			}
 		}
+	} else if m.scoutMgr != nil && m.scoutMgr.Runner != nil {
+		m.scoutMgr.Runner.Adapter = m.adapter
+		m.scoutMgr.Runner.Model = m.activeModel
+		m.scoutMgr.Runner.ContextWindow = m.contextWindow()
 	}
 	if m.projectCtx == nil {
 		// Build the compact project overview once (tree + AGENTS/CLAUDE/README
@@ -865,6 +885,13 @@ func (m *Model) rebuildEngine() {
 			}
 			return out
 		})
+		// Global symbols provider for DRY reuse checking
+		m.engine.SetSymbolsProvider(func() map[string]map[string]bool {
+			if m.globalIndex != nil {
+				return m.globalIndex.AllSymbols()
+			}
+			return nil
+		})
 		// Tell the engine how many LSP servers are reachable so its system
 		// prompt can steer the model to lsp_scan (and away from go install).
 		if m.lspMgr != nil {
@@ -925,7 +952,6 @@ func (m *Model) intelligenceBlock() string {
 	}
 	return strings.TrimSpace(sb.String())
 }
-
 // embedderFor returns an embeddings endpoint for the active provider, or nil
 // when it cannot support one (non-OpenAI-compatible protocol or no reachable
 // base URL). The standard text-embedding-3-small model name is tried; the
@@ -1452,6 +1478,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "tab", "shift+tab":
+			if m.autocomplete.Active && len(m.autocomplete.Items) > 0 && keyStr == "tab" {
+				newVal := ApplyAutocomplete(m.promptInput.Value(), m.autocomplete)
+				m.promptInput.SetValue(newVal)
+				m.promptInput.CursorEnd()
+				m.autocomplete = AutocompleteState{}
+				return m, nil
+			}
 			if m.showAsk {
 				if keyStr == "shift+tab" {
 					m.askMoveRow(-1)
@@ -1497,6 +1530,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "esc":
+			if m.autocomplete.Active {
+				m.autocomplete = AutocompleteState{}
+				return m, nil
+			}
 			// Input-bar file-action confirm: ESC discards (denies) the action.
 			if m.showFileConfirm {
 				m.discardFileConfirm()
@@ -1583,6 +1620,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			if m.showConnect {
 				m.connectNext()
+				return m, nil
+			}
+
+			if m.autocomplete.Active && len(m.autocomplete.Items) > 0 {
+				newVal := ApplyAutocomplete(m.promptInput.Value(), m.autocomplete)
+				m.promptInput.SetValue(newVal)
+				m.promptInput.CursorEnd()
+				m.autocomplete = AutocompleteState{}
 				return m, nil
 			}
 
@@ -1699,6 +1744,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "up":
+			if m.autocomplete.Active && len(m.autocomplete.Items) > 0 {
+				if m.autocomplete.Selected > 0 {
+					m.autocomplete.Selected--
+				} else {
+					m.autocomplete.Selected = len(m.autocomplete.Items) - 1
+				}
+				return m, nil
+			}
 			if m.showAsk && m.askCustomQ < 0 {
 				m.askMove(-1)
 				return m, nil
@@ -1726,6 +1779,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down":
+			if m.autocomplete.Active && len(m.autocomplete.Items) > 0 {
+				if m.autocomplete.Selected < len(m.autocomplete.Items)-1 {
+					m.autocomplete.Selected++
+				} else {
+					m.autocomplete.Selected = 0
+				}
+				return m, nil
+			}
 			if m.showAsk && m.askCustomQ < 0 {
 				m.askMove(1)
 				return m, nil
@@ -1797,6 +1858,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.promptInput, cmd = m.promptInput.Update(msg)
 		cmds = append(cmds, cmd)
+		m.autocomplete = DetectAutocomplete(m.promptInput.Value(), m.allProjectFiles())
 	}
 
 	return m, tea.Batch(cmds...)
@@ -2185,24 +2247,10 @@ func (m *Model) applySelectedSession() {
 			if events, err := st.GetSessionEvents(targetSess.ID); err == nil && len(events) > 0 {
 				// Same restore path as `brocode -c`: replay only the newest
 				// events that fit the context window, keep assistant tool calls
-				// paired with their results, and render tool-call-only turns as
-				// compact summaries instead of raw JSON.
+				// paired with their results, restore file change summaries inline
+				// at their original chronological place, and render tool-call-only
+				// turns as compact summaries instead of raw JSON.
 				m.appendMessages(bcontext.RestoreSession(m.context, events)...)
-				// Replay each turn's edit/create/delete record (persisted as a
-				// "file_changes" event) so the user still sees exactly which files
-				// were touched — the live FILES:/DIFF: chat entries are in-memory
-				// only and would otherwise vanish on reopen.
-				for _, ev := range events {
-					if ev.Type != "file_changes" {
-						continue
-					}
-					var ch []tool.FileChange
-					if json.Unmarshal([]byte(ev.PayloadJSON), &ch) == nil {
-						if files := tool.FileChangesMessage(ch); files != "" {
-							m.appendMessages(files)
-						}
-					}
-				}
 				// Show the restored FILES: change summaries expanded so the user
 				// sees what was edited/created/deleted without pressing ctrl+f.
 				for _, msg := range m.messages {
@@ -2759,6 +2807,10 @@ func (m *Model) parkLogAfterNewContent(log string, vpHeight, contentWidth int) {
 	// (count newlines before the tail block's last occurrence). Clamp so the
 	// viewport never scrolls past the end of the content.
 	idx := strings.LastIndex(log, tail)
+	if idx == -1 {
+		m.logViewport.GotoBottom()
+		return
+	}
 	offset := strings.Count(log[:idx], "\n")
 	if max := strings.Count(log, "\n") + 1 - vpHeight; offset > max {
 		offset = max
@@ -2936,6 +2988,11 @@ func (m *Model) buildLogChrome() (string, int) {
 			m.promptInput.Placeholder = "Miner Mode: Explore the codebase and persist verified knowledge to project memory..."
 		default:
 			m.promptInput.Placeholder = "Type a prompt or command (/help, /sessions, /new)..."
+		}
+		if m.autocomplete.Active {
+			if acBox := RenderAutocomplete(m.autocomplete, m.width); acBox != "" {
+				sb.WriteString(acBox + "\n")
+			}
 		}
 		sb.WriteString(promptStyle.Render(promptStr) + m.promptInput.View() + "\n\n")
 	}

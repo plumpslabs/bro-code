@@ -199,9 +199,18 @@ func isSensitiveName(name string) bool {
 
 func isHeavyDirName(name string) bool {
 	switch name {
-	case "node_modules", "bower_components", "vendor", "dist", "build", "out",
-		".git", ".next", ".nuxt", "coverage", ".cache", ".turbo", "target",
-		"__pycache__", ".venv", "venv", "Pods", ".gradle", "bin", "obj":
+	case "node_modules", "bower_components", "jspm_packages", "vendor",
+		"dist", "build", "out", "bin", "obj", "pkg", "Debug", "Release", "x64", "x86", "DerivedData",
+		".git", ".svn", ".hg", ".bzr", ".CVS",
+		".next", ".nuxt", ".svelte-kit", ".astro", ".docusaurus", ".vuepress", ".output",
+		".parcel-cache", ".turbo", ".webpack", ".vite", ".rollup.cache", ".cache",
+		"coverage", "htmlcov", "target", "__pycache__", ".pytest_cache", ".mypy_cache",
+		".ruff_cache", ".tox", ".nox", ".venv", "venv", "env", ".conda", ".eggs", "pip-wheel-metadata",
+		"Pods", "Carthage", ".dart_tool", ".pub-cache", ".pub",
+		".gradle", ".m2", ".ivy2", ".sbt", ".cxx", ".bundle", "_build", ".elixir_ls",
+		".brocode", ".idea", ".vscode", ".vs", ".settings", ".project", ".classpath", ".history",
+		".terraform", ".terragrunt-cache", ".serverless", ".vagrant", ".pulumi", ".docker",
+		"tmp", "temp", ".tmp", ".temp", ".yarn", ".pnpm-store":
 		return true
 	}
 	return false
