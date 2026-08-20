@@ -430,7 +430,7 @@ func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 	// is re-reviewed. Small edits (≤30 lines) never reach the second angle.
 	if len(issues) == 0 && e.reviewLLMEnabled && e.reviewPasses <= maxReviewPasses {
 		if e.reviewPasses == 1 || highComplexity {
-			var angle reviewAngle = llmReviewCorrectness
+			var angle  = llmReviewCorrectness
 			if e.reviewPasses > 1 {
 				angle = llmReviewSecurity
 			}

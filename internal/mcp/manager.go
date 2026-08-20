@@ -14,10 +14,10 @@
 package mcp
 
 import (
-	"maps"
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"

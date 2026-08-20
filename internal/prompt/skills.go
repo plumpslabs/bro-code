@@ -82,10 +82,7 @@ func topSkills(entries []SkillEntry, userPrompt string, stacks []Stack, capN, mi
 		if relevant == 0 {
 			k = minN
 		} else if relevant < capN {
-			k = relevant
-			if k < minN {
-				k = minN
-			}
+			k = max(relevant, minN)
 		}
 	}
 	if k > len(scored) {
@@ -141,7 +138,7 @@ func skillScore(e SkillEntry, words []string, stacks []Stack) int {
 func tokenize(s string) []string {
 	s = strings.ToLower(s)
 	fields := strings.FieldsFunc(s, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
 	})
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {

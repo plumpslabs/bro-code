@@ -111,7 +111,7 @@ func TestTuningDisablesRulesAndBlocks(t *testing.T) {
 // skills (with a floor so it never vanishes).
 func TestSkillCatalogRelevanceFiltering(t *testing.T) {
 	many := make([]SkillEntry, 0, 30)
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		many = append(many, SkillEntry{Name: "skill-" + string(rune('a'+i%26)) + string(rune('0'+i/26)), Description: "generic capability number " + string(rune('0'+i))})
 	}
 	many[0] = SkillEntry{Name: "go-workflow", Description: "verify and fix Go projects with go build vet test"}
@@ -131,7 +131,7 @@ func TestSkillCatalogRelevanceFiltering(t *testing.T) {
 		t.Error("irrelevant low-ranked skill leaked into filtered catalog")
 	}
 	lines := 0
-	for _, line := range strings.Split(p, "\n") {
+	for line := range strings.SplitSeq(p, "\n") {
 		if strings.HasPrefix(line, "- ") {
 			lines++
 		}
@@ -146,7 +146,7 @@ func TestSkillCatalogRelevanceFiltering(t *testing.T) {
 	in2.Skills = many
 	p2, _ := Assemble(in2)
 	count := 0
-	for _, line := range strings.Split(p2, "\n") {
+	for line := range strings.SplitSeq(p2, "\n") {
 		if strings.HasPrefix(line, "- ") {
 			count++
 		}

@@ -77,10 +77,10 @@ func Reflect(st *store.Store) (int, error) {
 
 func toolFromProvenance(p string) string {
 	// provenance looks like "tool=read_file outcome=error"
-	if i := strings.Index(p, "tool="); i >= 0 {
-		rest := p[i+len("tool="):]
-		if j := strings.Index(rest, " "); j >= 0 {
-			return rest[:j]
+	if _, after, ok := strings.Cut(p, "tool="); ok {
+		rest := after
+		if before, _, ok := strings.Cut(rest, " "); ok {
+			return before
 		}
 		return rest
 	}

@@ -126,7 +126,7 @@ func Assemble(in *Input) (string, map[string]int) {
 // plan → mode rules) so the refactor is behavior-neutral: a rendered prompt
 // for a given Input is byte-identical to the pre-refactor output. Stable
 // ordering also keeps the per-turn cache prefix stable across iterations.
-func blocks(in *Input) []Block {
+func blocks(_ *Input) []Block {
 	return []Block{
 		// L0 — identity + project context + detected stack.
 		{Name: "identity", Always: true, Render: renderIdentity},

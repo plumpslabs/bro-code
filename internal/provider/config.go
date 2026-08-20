@@ -1,9 +1,9 @@
 package provider
 
 import (
-	"maps"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -263,7 +263,7 @@ func stripJSONComments(input string) string {
 			} else if i+1 < len(input) && input[i+1] == '*' {
 				// Block comment: skip to closing */.
 				i += 2
-				for i+1 < len(input) && !(input[i] == '*' && input[i+1] == '/') {
+				for i+1 < len(input) && (input[i] != '*' || input[i+1] != '/') {
 					i++
 				}
 				i++ // skip the closing '/'

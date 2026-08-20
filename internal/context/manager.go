@@ -172,7 +172,7 @@ func extractSignificantWords(text string) map[string]bool {
 	for _, w := range words {
 		// strip punctuation
 		w = strings.TrimFunc(w, func(r rune) bool {
-			return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+			return (r < 'a' || r > 'z') && (r < '0' || r > '9')
 		})
 		if len(w) > 3 && !stop[w] {
 			out[w] = true

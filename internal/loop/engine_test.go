@@ -1314,7 +1314,7 @@ func TestCapToolOutputTruncateAndPointer(t *testing.T) {
 	eng := &Engine{repoRoot: root}
 
 	var long strings.Builder
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		fmt.Fprintf(&long, "line %d: some long test output\n", i)
 	}
 	full := long.String()
