@@ -342,7 +342,7 @@ func printExitScreen(sessionID string) {
 	fmt.Printf("Resume:   brocode -c    (or)  brocode --session %s\n", sessionID)
 	fmt.Println("Feedback & issue reports:")
 	fmt.Printf("  %s\n", "https://github.com/plumpslabs/bro-code/issues")
-	fmt.Printf("  (attach: brocode report %s --json)\n", sessionID)
+	fmt.Printf("  (export: brocode report %s --out report.json)\n", sessionID)
 	fmt.Println()
 }
 

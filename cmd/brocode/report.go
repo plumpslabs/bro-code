@@ -41,7 +41,7 @@ func runReportCommand(args []string) {
 	}
 
 	useJSON := *jsonFmt
-	if *format == "json" {
+	if *format == "json" || (*format == "" && strings.HasSuffix(strings.ToLower(*out), ".json")) {
 		useJSON = true
 	} else if *format == "md" {
 		useJSON = false
