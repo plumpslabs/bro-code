@@ -78,7 +78,7 @@ func TestViewportPreservesPositionOnHeightChange(t *testing.T) {
 	// Activity grows: height shrinks. Same content — the position is
 	// preserved; the viewport's rendering clamps to the newest lines.
 	m.logViewport.SetHeight(m.height - 8 - 6)
-	m.logViewport.SetContent(log)
+	m.parkLogAfterNewContent(log, m.height-8-6, contentWidth)
 	yAfter := m.logViewport.YOffset()
 
 	if yAfter != yBefore {

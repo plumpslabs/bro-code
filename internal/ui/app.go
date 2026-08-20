@@ -3281,7 +3281,7 @@ func (m *Model) buildLog(contentWidth int) string {
 			w = getTerminalWidth() - 2
 		}
 		bar = bar.Width(w)
-		out.WriteString(bar.Render(label+"\n"+m.pendingStream) + "\n\n")
+		out.WriteString(bar.Render(label+"\n\n"+m.pendingStream) + "\n\n")
 	}
 	return out.String()
 }
@@ -4107,10 +4107,10 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 		}
 
 		if thinking != "" {
-			return botBarStyle.Render(label + "\n" +
+			return botBarStyle.Render(label + "\n\n" +
 				thinkingStyle.Render(thinking) + "\n\n" + formattedBody)
 		}
-		return botBarStyle.Render(label + "\n" + formattedBody)
+		return botBarStyle.Render(label + "\n\n" + formattedBody)
 	}
 
 	if strings.HasPrefix(msg, "ERROR: ") || strings.HasPrefix(msg, "❌ ") {
