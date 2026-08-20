@@ -1152,11 +1152,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if badge := phaseBadge(msg.state); badge != "" && !startsWithEmoji(str) {
 			str = badge + " " + str
 		}
-		// Ensure streaming text across iterations separates cleanly with double newlines
-		// instead of gluing sentences from different rounds together.
-		if m.pendingStream != "" && !strings.HasSuffix(m.pendingStream, "\n\n") {
-			m.pendingStream = strings.TrimRight(m.pendingStream, " \t\r\n") + "\n\n"
+		// When transitioning to tool execution (StateActing), commit the streamed
+		// assistant text for this iteration as its own distinct block with vertical line border.
+		if msg.state == loop.StateActing && m.streaming && strings.TrimSpace(m.pendingStream) != "" {
+			stamp := "BROCODE:" + m.mode + ":" + m.activeModel + "\n" + strings.TrimSpace(m.pendingStream)
+			m.appendMessages(stamp)
+			m.pendingStream = ""
+			m.streaming = false
 		}
+		// When tools execute, record a live process block in the chat stream
+		if msg.state == loop.StateActing && (strings.HasPrefix(msg.info, "📖 ") || strings.HasPrefix(msg.info, "🔧 ") || strings.HasPrefix(msg.info, "📝 ") || strings.HasPrefix(msg.info, "⚙️ ") || strings.HasPrefix(msg.info, "📡 ") || strings.HasPrefix(msg.info, "🧪 ")) {
+			procMsg := "PROCESS:\n" + strings.TrimSpace(msg.info)
+			if len(m.messages) == 0 || m.messages[len(m.messages)-1] != procMsg {
+				m.appendMessages(procMsg)
+			}
+		}
+
 		m.status = str
 		if len(m.activity) == 0 || m.activity[len(m.activity)-1] != str {
 			m.activity = append(m.activity, str)
@@ -1193,29 +1204,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendMessages("ERROR: " + msg.err.Error())
 				m.status = "Failed"
 			}
-		} else if strings.TrimSpace(msg.content) == "" {
+		} else if strings.TrimSpace(msg.content) == "" && strings.TrimSpace(partial) == "" && (len(m.messages) == 0 || !strings.HasPrefix(m.messages[len(m.messages)-1], "BROCODE")) {
 			// The turn finished but the model returned nothing (a weak model
 			// stalling into an empty response). Surface it so the UI never
 			// looks stuck on "Thinking..." with no entry — and the queue can
 			// still drain below.
 			m.appendMessages("⚠️ The model returned an empty response — try rephrasing your request or switching models.")
 			m.status = "Ready"
-		} else if msg.content != "" {
-			// Render only the final answer into the chat history. The model's
-			// chain-of-thought (reasoning) is shown live in the activity panel,
-			// not here — surfacing it in the transcript clutters the conversation
-			// and duplicates the thinking, so the history stays clean.
-			display := msg.content
-			// Stamp the mode the turn ran under ("BROCODE:PLANNER\n...") so
-			// every answer shows which engine mode produced it — the mode badge
-			// is rendered by formatMessage. The active model rides along
-			// ("BROCODE:PLANNER:poolside/x\n...") so the label also names the
-			// model that answered. Empty mode falls back to the legacy
-			// unstamped format (e.g. restored sessions).
-			if msg.mode != "" {
-				m.appendMessages("BROCODE:" + msg.mode + ":" + m.activeModel + "\n" + display)
-			} else {
-				m.appendMessages("BROCODE:\n" + display)
+		} else {
+			display := strings.TrimSpace(partial)
+			if display == "" {
+				display = strings.TrimSpace(msg.content)
+			}
+			alreadyInHistory := false
+			if len(m.messages) > 0 {
+				last := m.messages[len(m.messages)-1]
+				if display != "" && strings.Contains(last, display) {
+					alreadyInHistory = true
+				}
+			}
+			if display != "" && !alreadyInHistory {
+				if msg.mode != "" {
+					m.appendMessages("BROCODE:" + msg.mode + ":" + m.activeModel + "\n" + display)
+				} else {
+					m.appendMessages("BROCODE:\n" + display)
+				}
 			}
 			// When the primary provider failed and a fallback served the turn,
 			// say so in the history — otherwise the answer is mistaken for the
