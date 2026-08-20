@@ -3970,7 +3970,7 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 			}
 			add, del := diffStat(diff)
 			statStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-			return diffBarStyle.Render(labelStyle.Render("DIFF") + "  " + path + "  " + statStyle.Render(fmt.Sprintf("(+%d −%d) · ctrl+f", add, del)))
+			return diffBarStyle.Render(labelStyle.Render("DIFF") + "  " + path + "  " + statStyle.Render(fmt.Sprintf("(+%d −%d) · [press Ctrl+F for diff]", add, del)))
 		}
 
 
