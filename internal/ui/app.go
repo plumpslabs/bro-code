@@ -3120,8 +3120,11 @@ func (m *Model) View() tea.View {
 			}
 			if m.streaming {
 				if log != m.renderedLog {
+					wasAtBottom := m.logViewport.AtBottom()
 					m.logViewport.SetContent(log)
-					m.logViewport.GotoBottom()
+					if wasAtBottom {
+						m.logViewport.GotoBottom()
+					}
 					m.renderedLog = log
 				}
 			} else if key := m.logKey(); key != m.renderedKey || vpHeight != m.renderedH {
