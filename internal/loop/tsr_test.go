@@ -434,10 +434,10 @@ func TestLooksLikeBugFixTask(t *testing.T) {
 		want  bool
 	}{
 		{"fix the panic in the handler", true},
-		{"the login endpoint errors on empty input", true},
+		{"the login endpoint has a bug and crashes", true},
 		{"refactor the auth module for clarity", false},
 		{"add a new /health endpoint", false},
-		{"gagal login, tidak jalan", true},
+		{"login is broken and not working", true},
 	}
 	for _, c := range cases {
 		if got := looksLikeBugFixTask(c.query); got != c.want {
@@ -474,12 +474,12 @@ func TestReproGateNotArmedForDiagnostics(t *testing.T) {
 		shouldArm bool
 	}{
 		{"fix all warnings", false},
-		{"fix the errors in the lsp client", false},
-		{"perbaiki deprecated function", false},
+		{"fix the lint issues in the lsp client", false},
+		{"clean up deprecated function", false},
 		{"clean up lint issues", false},
 		{"the handler panics on nil input", true},   // runtime bug
 		{"login is broken and crashes", true},        // runtime bug
-		{"gagal login, tidak jalan", true},          // runtime bug (Indonesian)
+		{"server has memory leak and not working", true}, // runtime bug
 		{"refactor the auth module", false},         // feature, not a bug
 	}
 	for _, c := range cases {

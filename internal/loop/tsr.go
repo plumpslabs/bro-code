@@ -13,15 +13,11 @@ const maxTSRAttempts = 4
 // that needs reproduction. Generic words like "error" or "fail" are avoided to prevent
 // false positives on standard feature requests (e.g. "return error on overflow").
 var bugFixSignals = []string{
-	"bug", "buggy", "fix bug", "perbaiki bug", "ada bug", "bug fix", "fix error", "perbaiki error",
-	"ada error", "dapat error", "terjadi error", "muncul error", "runtime error",
-	"errors on", "error on", "errors when", "error when", "error saat",
-	"failing", "fails", "failed with",
+	"bug", "buggy", "fix bug", "bug fix", "runtime error",
 	"panic", "panics", "stack trace", "traceback", "segfault", "null pointer",
 	"crash", "crashes", "crashing", "freeze", "deadlock",
-	"not working", "doesn't work", "does not work", "isn't working", "is not working",
-	"tidak jalan", "tidak berfungsi", "tidak bekerja", "ngehang", "nggak jalan", "gagal",
-	"broken", "regression", "memory leak",
+	"not working", "doesn't work", "does not work",
+	"broken", "regression", "memory leak", "fails", "failing", "failed with",
 }
 
 // providedReproSignals are patterns that indicate the user already supplied a

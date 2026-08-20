@@ -2587,48 +2587,12 @@ func (e *Engine) exploredSummary() string {
 var diagLineRe = regexp.MustCompile(`^\s*(error|warning|info|hint)(?:\s*\[(deprecated|unnecessary)\])?\s+(\d+):(\d+)\s+(.*)$`)
 
 // looksLikeLSPFixTask reports whether a user query is a diagnostic/LSP-fix task
-// that benefits from pre-gathered diagnostics (so the engine can run lsp_scan
-// itself instead of letting the model burn a tool round discovering them).
 func looksLikeLSPFixTask(query string) bool {
 	q := strings.ToLower(query)
-	if strings.Contains(q, "lsp_scan") || strings.Contains(q, "diagnostic") ||
-		strings.Contains(q, "linter") || strings.Contains(q, "lint ") ||
-		strings.Contains(q, "go vet") || strings.Contains(q, "tsc") ||
-		strings.Contains(q, "deprecat") {
-		return true
-	}
-	// "(fix|clean|resolve|perbaiki|...) ... (warning|error|deprecat|lint)" OR
-	// a check/verify prompt ("cek/check/verify ... warning|error|...") — both mean
-	// the engine should proactively scan and pack diagnostics so the model fixes
-	// or verifies in place instead of re-reading whole files.
-	// Language-agnostic: covers English AND Indonesian prompts (perbaiki, cek,
-	// betulkan, baiki, beresin, benerin, bersihkan, hapus, ganti) so pre-flight
-	// LSP packing fires regardless of the user's language.
-	fixVerbs := []string{"fix", "clean", "resolve", "repair", "perbaiki", "betulkan",
-		"baiki", "beresin", "benerin", "bersihkan", "hapus", "ganti", "update"}
-	checkVerbs := []string{"cek", "check", "verify", "verifikasi", "solved", "fixed",
-		"resolved", "udah", "sudah", "masih", "status", "already"}
-	diagNouns := []string{"warning", "error", "deprecat", "lint", "linter"}
-	hasFix, hasCheck, hasNoun := false, false, false
-	for _, v := range fixVerbs {
-		if strings.Contains(q, v) {
-			hasFix = true
-			break
-		}
-	}
-	for _, v := range checkVerbs {
-		if strings.Contains(q, v) {
-			hasCheck = true
-			break
-		}
-	}
-	for _, n := range diagNouns {
-		if strings.Contains(q, n) {
-			hasNoun = true
-			break
-		}
-	}
-	return hasNoun && (hasFix || hasCheck)
+	return strings.Contains(q, "lint") || strings.Contains(q, "lsp") ||
+		strings.Contains(q, "warning") || strings.Contains(q, "diagnostics") ||
+		strings.Contains(q, "deprecated") || strings.Contains(q, "go vet") ||
+		strings.Contains(q, "tsc")
 }
 
 // preflightLSP runs lsp_scan proactively and packs the result — plus the exact
