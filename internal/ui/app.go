@@ -1152,9 +1152,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if badge := phaseBadge(msg.state); badge != "" && !startsWithEmoji(str) {
 			str = badge + " " + str
 		}
-		// Live agent activity is shown in the status slot ABOVE the input — it
-		// must never be appended to the conversation history (that made process
-		// rows pile up above the answer and hid the user's prompt).
+		// Ensure streaming text across iterations separates cleanly with double newlines
+		// instead of gluing sentences from different rounds together.
+		if m.pendingStream != "" && !strings.HasSuffix(m.pendingStream, "\n\n") {
+			m.pendingStream = strings.TrimRight(m.pendingStream, " \t\r\n") + "\n\n"
+		}
 		m.status = str
 		if len(m.activity) == 0 || m.activity[len(m.activity)-1] != str {
 			m.activity = append(m.activity, str)
