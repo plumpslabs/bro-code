@@ -1630,6 +1630,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// mode (it's reserved for in-modal navigation), so it is a no-op
 			// here — and the key is still consumed so it can't bubble elsewhere.
 			if keyStr == "shift+tab" && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
+				// While a turn is actively running, ignore mode switching so it never
+				// disrupts the in-flight agent execution.
+				if m.turnRunning {
+					return m, nil
+				}
 				next := m.mode
 				switch m.mode {
 				case "BUILDER":
@@ -1639,18 +1644,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				default:
 					next = "BUILDER"
 				}
-				// Mid-turn: stage the switch and require an explicit confirm so
-				// we never silently re-tune an in-flight agent. Idle: the
-				// deliberate Shift+Tab press is itself the confirmation.
-				if m.turnRunning {
-					m.pendingMode = next
-					m.showModeConfirm = true
-					m.appendMessages(fmt.Sprintf("⚠️ Change mode to %s while a turn is running? Press y/Enter to continue, n/Esc to cancel.", next))
-				} else {
-					m.mode = next
-					m.engine.SetMode(m.mode)
-					m.persistMode()
-				}
+				m.mode = next
+				m.engine.SetMode(m.mode)
+				m.persistMode()
 			}
 			return m, nil
 
@@ -4005,10 +4001,10 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 			add, del := diffStat(diff)
 			actionLabel := "DIFF"
 			labelColor := "178" // gold for modified
-			if del == 0 && add > 0 && !strings.Contains(diff, "@@ ") {
+			if del == 0 && add > 0 && (!strings.Contains(diff, "@@ -") || strings.Contains(diff, "@@ -0,0 +")) {
 				actionLabel = "CREATE"
 				labelColor = "42" // green for newly created
-			} else if add == 0 && del > 0 && !strings.Contains(diff, "@@ ") {
+			} else if add == 0 && del > 0 {
 				actionLabel = "DELETE"
 				labelColor = "196" // red for deleted
 			}
