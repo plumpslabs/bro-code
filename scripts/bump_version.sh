@@ -3,10 +3,10 @@ set -euo pipefail
 
 # BroCode Semantic Version Bumper Script
 # Usage:
-#   ./scripts/bump_version.sh patch   # v0.1.0 -> v0.1.1
-#   ./scripts/bump_version.sh minor   # v0.1.0 -> v0.2.0
-#   ./scripts/bump_version.sh major   # v0.1.0 -> v1.0.0
-#   ./scripts/bump_version.sh v0.2.5  # explicit version
+#   ./scripts/bump_version.sh patch   # v0.1.3 -> v0.1.4
+#   ./scripts/bump_version.sh minor   # v0.1.3 -> v0.2.0
+#   ./scripts/bump_version.sh major   # v0.1.3 -> v1.0.0
+#   ./scripts/bump_version.sh v0.1.4  # explicit version
 
 VERSION_FILE="internal/version/version.go"
 
@@ -52,19 +52,46 @@ esac
 
 echo "🚀 Bumping version: $CURRENT_RAW -> $NEW_VER"
 
-# Update version in internal/version/version.go
+# 1. Update internal/version/version.go
 sed -i.bak -E "s/Version = \"[^\"]+\"/Version = \"$NEW_VER\"/" "$VERSION_FILE"
 rm -f "${VERSION_FILE}.bak"
 
-# Verify tests pass
+# 2. Update docs/index.html
+if [ -f "docs/index.html" ]; then
+    sed -i.bak -E "s/<span class=\"brand-tag\">v[0-9]+\.[0-9]+\.[0-9]+<\/span>/<span class=\"brand-tag\">$NEW_VER<\/span>/g" docs/index.html
+    sed -i.bak -E "s/BroCode v[0-9]+\.[0-9]+\.[0-9]+/BroCode $NEW_VER/g" docs/index.html
+    rm -f "docs/index.html.bak"
+fi
+
+# 3. Update README.md badge
+if [ -f "README.md" ]; then
+    sed -i.bak -E "s/release-v[0-9]+\.[0-9]+\.[0-9]+/release-$NEW_VER/g" README.md
+    rm -f "README.md.bak"
+fi
+
+# 4. Update docs markdown files
+for doc in docs/ARCHITECTURE.md docs/CLI_REFERENCE.md; do
+    if [ -f "$doc" ]; then
+        sed -i.bak -E "s/\*\*Version\*\*: v[0-9]+\.[0-9]+\.[0-9]+/**Version**: $NEW_VER/g" "$doc"
+        rm -f "${doc}.bak"
+    fi
+done
+
+# 5. Update fallback tag in scripts/install.sh
+if [ -f "scripts/install.sh" ]; then
+    sed -i.bak -E "s/LATEST_TAG=\"v[0-9]+\.[0-9]+\.[0-9]+\"/LATEST_TAG=\"$NEW_VER\"/g" scripts/install.sh
+    rm -f "scripts/install.sh.bak"
+fi
+
+# 6. Verify full test suite
 echo "🧪 Running full test suite..."
 go test ./...
 
-echo "📦 Committing version bump..."
-git add "$VERSION_FILE"
+echo "📦 Staging and committing version bump..."
+git add "$VERSION_FILE" docs/index.html README.md docs/ARCHITECTURE.md docs/CLI_REFERENCE.md scripts/install.sh scripts/bump_version.sh
 git commit -m "chore(release): bump version to $NEW_VER"
 
-echo "🏷️ Tagging git release $NEW_VER..."
+echo "🏷️ Creating git release tag $NEW_VER..."
 git tag -a "$NEW_VER" -m "Release $NEW_VER"
 
 echo "✨ Successfully bumped version to $NEW_VER!"
