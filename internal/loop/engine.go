@@ -1639,6 +1639,11 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						if abs, err := filepath.Abs(editPath); err == nil {
 							editPath = abs
 						}
+						// If the file does not exist yet on disk (creating a new file with write_file),
+						// it cannot be read first — allow new file creation immediately.
+						_, statErr := os.Stat(editPath)
+						isNewFile := os.IsNotExist(statErr)
+
 						// Count non-bash explored entries to see if the model has
 						// performed any file reads this turn. If it has only run bash
 						// commands (no read_file/grep/list_dir), the gate does not
@@ -1650,7 +1655,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 								fileReads++
 							}
 						}
-						if fileReads > 0 && !e.wasExplored(editPath) {
+						if !isNewFile && fileReads > 0 && !e.wasExplored(editPath) {
 							offTaskMsg := fmt.Sprintf(
 								"⚠️ [OFF-TASK EDIT GATE]: You are trying to edit '%s' but you have NOT read or examined it during this turn (you explored: %s). Read it first before editing, or confirm this is the correct target file.",
 								editPath, e.exploredPathList(),
