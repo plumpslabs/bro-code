@@ -3305,25 +3305,15 @@ func formatToolCallInfo(name, argsJSON string) string {
 	if json.Unmarshal([]byte(argsJSON), &m) == nil {
 		if name == "edit_file" {
 			path, _ := m["path"].(string)
-			shortPath := shortenPath(path)
-			if s, ok := m["start_line"].(float64); ok && s > 0 {
-				if e, ok := m["end_line"].(float64); ok && e > 0 {
-					return fmt.Sprintf("📝 edit_file %s:L%d-L%d", shortPath, int(s), int(e))
-				}
-				return fmt.Sprintf("📝 edit_file %s:L%d", shortPath, int(s))
-			}
-			if target, ok := m["target"].(string); ok && target != "" {
-				firstLine := strings.TrimSpace(strings.Split(target, "\n")[0])
-				if len(firstLine) > 30 {
-					firstLine = firstLine[:27] + "..."
-				}
-				return fmt.Sprintf("📝 edit_file %s (%s)", shortPath, firstLine)
-			}
-			return fmt.Sprintf("📝 edit_file %s", shortPath)
+			return fmt.Sprintf("📝 edit_file %s", shortenPath(path))
 		}
 		if name == "write_file" {
 			path, _ := m["path"].(string)
 			return fmt.Sprintf("✍️ write_file %s", shortenPath(path))
+		}
+		if name == "delete_file" {
+			path, _ := m["path"].(string)
+			return fmt.Sprintf("🗑️ delete_file %s", shortenPath(path))
 		}
 		if name == "read_file" {
 			path, _ := m["path"].(string)
@@ -3333,16 +3323,17 @@ func formatToolCallInfo(name, argsJSON string) string {
 			return fmt.Sprintf("📖 read_file %s", shortenPath(path))
 		}
 		if path, ok := m["path"].(string); ok && path != "" {
-			return fmt.Sprintf("%s (%s)", name, shortenPath(path))
+			return fmt.Sprintf("🔧 %s %s", name, shortenPath(path))
 		}
 		if pattern, ok := m["pattern"].(string); ok && pattern != "" {
-			return fmt.Sprintf("%s (pattern: '%s')", name, pattern)
+			return fmt.Sprintf("🔧 %s %s", name, pattern)
 		}
 		if cmd, ok := m["command"].(string); ok && cmd != "" {
-			return fmt.Sprintf("%s (%s)", name, cmd)
-		}
-		if target, ok := m["target"].(string); ok && target != "" {
-			return fmt.Sprintf("%s (%s)", name, target)
+			firstLine := strings.TrimSpace(strings.Split(cmd, "\n")[0])
+			if len(firstLine) > 50 {
+				firstLine = firstLine[:47] + "…"
+			}
+			return fmt.Sprintf("⚙️ %s %s", name, firstLine)
 		}
 	}
 	return name
