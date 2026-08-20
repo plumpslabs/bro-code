@@ -1161,8 +1161,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingStream = ""
 			m.streaming = false
 		}
-		// When tools execute, record a live process block in the chat stream
-		if msg.state == loop.StateActing && (strings.HasPrefix(msg.info, "📖 ") || strings.HasPrefix(msg.info, "🔧 ") || strings.HasPrefix(msg.info, "📝 ") || strings.HasPrefix(msg.info, "⚙️ ") || strings.HasPrefix(msg.info, "📡 ") || strings.HasPrefix(msg.info, "🧪 ")) {
+		// When tools execute, record a live process block in the chat stream for read/search tools.
+		// File mutations (edit_file/write_file/delete_file) are handled by upsertDiffMessage (DIFF/CREATE/DELETE bars).
+		if msg.state == loop.StateActing && (strings.HasPrefix(msg.info, "📖 ") || strings.HasPrefix(msg.info, "🔧 ") || strings.HasPrefix(msg.info, "⚙️ ") || strings.HasPrefix(msg.info, "📡 ") || strings.HasPrefix(msg.info, "🧪 ")) {
 			procMsg := "PROCESS:\n" + strings.TrimSpace(msg.info)
 			if len(m.messages) == 0 || m.messages[len(m.messages)-1] != procMsg {
 				m.appendMessages(procMsg)
