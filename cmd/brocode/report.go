@@ -32,7 +32,7 @@ func runReportCommand(args []string) {
 	anomaliesOnly := fs.Bool("anomalies", false, "Only sessions that have anomalies (with --all)")
 	summarize := fs.Bool("summarize", false, "Cross-session benchmark summary")
 	format := fs.String("format", "", "Override output format: md|json")
-	_ = fs.Parse(args)
+	_ = fs.Parse(reorderReportArgs(args))
 
 	st, err := store.NewStore("")
 	if err != nil {
@@ -144,4 +144,31 @@ func writeOut(out, content string) {
 		os.Exit(1)
 	}
 	fmt.Fprintln(os.Stderr, "wrote", out)
+}
+
+// reorderReportArgs separates flags and their values from positional arguments,
+// allowing flags to appear after positional arguments (e.g. `report <id> --json`).
+func reorderReportArgs(args []string) []string {
+	var flagArgs, positional []string
+	flagsWithValue := map[string]bool{
+		"-since": true, "--since": true,
+		"-out": true, "--out": true,
+		"-format": true, "--format": true,
+	}
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flagArgs = append(flagArgs, arg)
+			if flagsWithValue[arg] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+		} else {
+			positional = append(positional, arg)
+		}
+		i++
+	}
+	return append(flagArgs, positional...)
 }
