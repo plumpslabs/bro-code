@@ -28,6 +28,21 @@ var MutatingTools = map[string]bool{
 // scan, so it stays local and privacy-safe.
 var errorMarkers = []string{"\"error\"", "error:", "failed", "exception", "panic", "not found", "denied"}
 
+// PhaseStats aggregates metrics for a single engineering process phase.
+type PhaseStats struct {
+	Calls    int      `json:"calls"`
+	Failures int      `json:"failures"`
+	Tools    []string `json:"tools,omitempty"`
+}
+
+// PhaseBreakdown groups agent activity into canonical software engineering stages.
+type PhaseBreakdown struct {
+	Discovery    PhaseStats `json:"discovery"`    // search, read, list, locate
+	Execution    PhaseStats `json:"execution"`    // edit, write, delete, bash, git
+	Verification PhaseStats `json:"verification"` // test, diagnose, lsp, review
+	Context      PhaseStats `json:"context"`      // memory, ask_user
+}
+
 // SessionReport is a fully aggregated, privacy-safe summary of one agent
 // session. It intentionally contains NO message text, file contents, or secrets
 // — only counts, token metrics, and heuristic anomaly flags. That makes it safe
@@ -55,6 +70,8 @@ type SessionReport struct {
 	CostUSD      float64 `json:"estimated_cost_usd"`
 
 	ProductivePct int `json:"productive_ratio_pct"`
+
+	Phases PhaseBreakdown `json:"phases,omitempty"`
 
 	Anomalies []string `json:"anomalies,omitempty"`
 }
@@ -89,6 +106,7 @@ func Build(st *store.Store, sessionID string) (*SessionReport, error) {
 
 	var totalProd, totalTurnTokens int
 	var firstTime, lastTime time.Time
+	var pendingTools []string
 
 	for _, ev := range events {
 		if firstTime.IsZero() || ev.CreatedAt.Before(firstTime) {
@@ -107,8 +125,27 @@ func Build(st *store.Store, sessionID string) (*SessionReport, error) {
 			modelInput[lastModel] += ev.Tokens
 			if ev.Type == "tool_result" {
 				r.ToolResults++
-				if looksLikeError(ev.PayloadJSON) {
+				isErr := looksLikeError(ev.PayloadJSON)
+				if isErr {
 					r.ToolFailures++
+				}
+				toolName := ""
+				if len(pendingTools) > 0 {
+					toolName = pendingTools[0]
+					pendingTools = pendingTools[1:]
+				}
+				if isErr && toolName != "" {
+					phase := classifyToolPhase(toolName)
+					switch phase {
+					case "discovery":
+						r.Phases.Discovery.Failures++
+					case "execution":
+						r.Phases.Execution.Failures++
+					case "verification":
+						r.Phases.Verification.Failures++
+					case "context":
+						r.Phases.Context.Failures++
+					}
 				}
 			}
 			if ev.Type == "file_changes" {
@@ -130,6 +167,22 @@ func Build(st *store.Store, sessionID string) (*SessionReport, error) {
 				for _, tc := range msg.ToolCalls {
 					r.ToolCalls++
 					toolSet[tc.Name] = true
+					phase := classifyToolPhase(tc.Name)
+					switch phase {
+					case "discovery":
+						r.Phases.Discovery.Calls++
+						r.Phases.Discovery.Tools = addUnique(r.Phases.Discovery.Tools, tc.Name)
+					case "execution":
+						r.Phases.Execution.Calls++
+						r.Phases.Execution.Tools = addUnique(r.Phases.Execution.Tools, tc.Name)
+					case "verification":
+						r.Phases.Verification.Calls++
+						r.Phases.Verification.Tools = addUnique(r.Phases.Verification.Tools, tc.Name)
+					case "context":
+						r.Phases.Context.Calls++
+						r.Phases.Context.Tools = addUnique(r.Phases.Context.Tools, tc.Name)
+					}
+					pendingTools = append(pendingTools, tc.Name)
 					if MutatingTools[tc.Name] {
 						productive = true
 					}
@@ -170,6 +223,31 @@ func Build(st *store.Store, sessionID string) (*SessionReport, error) {
 
 	r.detectAnomalies()
 	return r, nil
+}
+
+// classifyToolPhase assigns a tool to its canonical process phase.
+func classifyToolPhase(name string) string {
+	switch name {
+	case "read_file", "list_dir", "grep", "glob", "search_code", "code_locate", "fetch_url", "web_search":
+		return "discovery"
+	case "edit_file", "write_file", "create_file", "delete_file", "bash", "git", "undo":
+		return "execution"
+	case "run_tests", "diagnose", "lsp", "lsp_diagnostics", "lsp_symbols", "lsp_hover", "lsp_references", "lsp_definition", "review_changes", "lsp_auto_fix":
+		return "verification"
+	case "memory", "context_recall", "ask_user":
+		return "context"
+	default:
+		return "discovery"
+	}
+}
+
+func addUnique(list []string, item string) []string {
+	for _, s := range list {
+		if s == item {
+			return list
+		}
+	}
+	return append(list, item)
 }
 
 // looksLikeError applies the cheap heuristic error scan to a tool_result
@@ -227,6 +305,26 @@ func (r *SessionReport) RenderMarkdown() string {
 	fmt.Fprintf(&b, "- Tool results: %d (%d possible failures)\n", r.ToolResults, r.ToolFailures)
 	fmt.Fprintf(&b, "- Compactions: %d\n", r.Compactions)
 	fmt.Fprintf(&b, "- File changes: %d\n", r.FileChanges)
+
+	if r.ToolCalls > 0 {
+		fmt.Fprintf(&b, "\n## Process Breakdown\n")
+		if r.Phases.Discovery.Calls > 0 {
+			fmt.Fprintf(&b, "- Discovery (Search & Read): %d calls (%d failures) — %s\n",
+				r.Phases.Discovery.Calls, r.Phases.Discovery.Failures, strings.Join(r.Phases.Discovery.Tools, ", "))
+		}
+		if r.Phases.Execution.Calls > 0 {
+			fmt.Fprintf(&b, "- Execution (Edits & Shell): %d calls (%d failures) — %s\n",
+				r.Phases.Execution.Calls, r.Phases.Execution.Failures, strings.Join(r.Phases.Execution.Tools, ", "))
+		}
+		if r.Phases.Verification.Calls > 0 {
+			fmt.Fprintf(&b, "- Verification (Tests & LSP): %d calls (%d failures) — %s\n",
+				r.Phases.Verification.Calls, r.Phases.Verification.Failures, strings.Join(r.Phases.Verification.Tools, ", "))
+		}
+		if r.Phases.Context.Calls > 0 {
+			fmt.Fprintf(&b, "- Context (Memory & Prompts): %d calls (%d failures) — %s\n",
+				r.Phases.Context.Calls, r.Phases.Context.Failures, strings.Join(r.Phases.Context.Tools, ", "))
+		}
+	}
 
 	fmt.Fprintf(&b, "\n## Token Economy\n")
 	fmt.Fprintf(&b, "- Total tokens: %s\n", fmtTokens(r.TotalTokens))
