@@ -27,7 +27,6 @@ import (
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "-v" || os.Args[1] == "--version") {
 		fmt.Println(version.Banner())
-		fmt.Println(version.Info())
 		os.Exit(0)
 	}
 
@@ -58,7 +57,6 @@ func main() {
 
 	if *flagVersion || *flagVersionLong {
 		fmt.Println(version.Banner())
-		fmt.Println(version.Info())
 		os.Exit(0)
 	}
 
@@ -338,13 +336,12 @@ func printExitScreen(sessionID string) {
 	}
 	fmt.Println()
 	fmt.Println(version.Banner())
-	fmt.Println(version.Info())
 	fmt.Println("────────────────────────────────────────")
 	fmt.Printf("Session: %s\n", sessionID)
-	fmt.Printf("Lanjut sesi:  brocode -c    (atau)  brocode --session %s\n", sessionID)
-	fmt.Println("Bagikan laporan sesi / feedback:")
+	fmt.Printf("Resume:   brocode -c    (or)  brocode --session %s\n", sessionID)
+	fmt.Println("Feedback & issue reports:")
 	fmt.Printf("  %s\n", "https://github.com/plumpslabs/bro-code/issues")
-	fmt.Printf("  (lampirkan: brocode report %s --json)\n", sessionID)
+	fmt.Printf("  (attach: brocode report %s --json)\n", sessionID)
 	fmt.Println()
 }
 
