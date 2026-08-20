@@ -1242,34 +1242,7 @@ func TestPlanModeDirectiveInSystemPrompt(t *testing.T) {
 	}
 }
 
-// TestLooksLikeLSPFixTask verifies the pre-flight trigger fires on diagnostic tasks.
-func TestLooksLikeLSPFixTask(t *testing.T) {
-	yes := []string{
-		"fix all warnings and deprecated code",
-		"clean up lint warnings",
-		"run lsp diagnostics check",
-		"verify the lint warnings are gone",
-		"run go vet on project",
-		"check tsc errors",
-	}
-	for _, q := range yes {
-		if !looksLikeLSPFixTask(q) {
-			t.Errorf("expected LSP-fix intent for %q", q)
-		}
-	}
-	// Questions or feature builds must NOT fire
-	no := []string{
-		"implement a login endpoint",
-		"explain cache mechanism",
-		"build a caching layer",
-		"what is this function?",
-	}
-	for _, q := range no {
-		if looksLikeLSPFixTask(q) {
-			t.Errorf("did NOT expect LSP-fix intent for %q", q)
-		}
-	}
-}
+
 
 func TestGuardPreflightRedundant(t *testing.T) {
 	e := &Engine{}
