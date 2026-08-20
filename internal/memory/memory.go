@@ -728,6 +728,7 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 	}
 	var lastGoal string
 	edited := map[string]bool{}
+	changed := false
 
 	for _, ev := range events {
 		var msg provider.Message
@@ -740,6 +741,22 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 				lastGoal = c
 			}
 		case "assistant_msg":
+			// If the assistant output a plan/roadmap (e.g. from PLANNER mode), capture key plan steps
+			contentLower := strings.ToLower(msg.Content)
+			if strings.Contains(contentLower, "plan") || strings.Contains(contentLower, "roadmap") || strings.Contains(contentLower, "langkah") || strings.Contains(contentLower, "tahap") {
+				for _, line := range strings.Split(msg.Content, "\n") {
+					trimmed := strings.TrimSpace(line)
+					if (strings.HasPrefix(trimmed, "1. ") || strings.HasPrefix(trimmed, "2. ") || strings.HasPrefix(trimmed, "3. ") ||
+						strings.HasPrefix(trimmed, "4. ") || strings.HasPrefix(trimmed, "5. ") || strings.HasPrefix(trimmed, "- [ ]")) && len(trimmed) > 10 {
+						if len(trimmed) > 150 {
+							trimmed = trimmed[:150] + "…"
+						}
+						if ok, err := s.retainWithTimestamp("Active Plan", trimmed); err == nil && ok {
+							changed = true
+						}
+					}
+				}
+			}
 			for _, tc := range msg.ToolCalls {
 				if tc.Name == "write_file" || tc.Name == "edit_file" {
 					var args struct {
@@ -753,7 +770,6 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 		}
 	}
 
-	changed := false
 	if lastGoal != "" {
 		// Truncate very long prompts to keep the memory file lean.
 		if len(lastGoal) > 200 {
