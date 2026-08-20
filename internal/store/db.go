@@ -82,6 +82,31 @@ func (s *Store) initSchema() error {
 		hidden_at TIMESTAMP,
 		FOREIGN KEY(session_id) REFERENCES sessions(id)
 	);
+
+	CREATE TABLE IF NOT EXISTS knowledge (
+		key        TEXT PRIMARY KEY,
+		val        TEXT NOT NULL,
+		weight     REAL DEFAULT 1.0,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		last_seen  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_knowledge_weight ON knowledge(weight DESC);
+
+	CREATE TABLE IF NOT EXISTS notes (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		kind        TEXT NOT NULL,
+		subject     TEXT NOT NULL,
+		content     TEXT NOT NULL,
+		tags        TEXT NOT NULL DEFAULT '[]',
+		provenance  TEXT NOT NULL DEFAULT '',
+		weight      REAL DEFAULT 1.0,
+		confidence  REAL DEFAULT 1.0,
+		created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		last_seen   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(kind, subject)
+	);
+	CREATE INDEX IF NOT EXISTS idx_notes_kind ON notes(kind);
+	CREATE INDEX IF NOT EXISTS idx_notes_weight ON notes(weight DESC, last_seen DESC);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err

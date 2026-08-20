@@ -175,6 +175,12 @@ func matchRelativeIndent(content, target, replacement string) (string, bool) {
 // matchFuzzyWindow slides over content with the target length, computing line-by-line
 // similarity. If a single window achieves >= 0.85 similarity while all others are < 0.65,
 // it is safely replaced.
+//
+// Pre-filter: before computing expensive Levenshtein for every window, do a cheap
+// length-ratio check (±50% len difference → skip) and a quick hash-based
+// character-set overlap test. This avoids the O(n×m) comparison on obviously
+// non-matching windows, which is the common case (target is usually 2-10 lines,
+// content is 100-1000 lines — only 1-3 windows will pass the pre-filter).
 func matchFuzzyWindow(content, target, replacement string) (string, bool) {
 	cLines := strings.Split(content, "\n")
 	tLines := strings.Split(strings.TrimRight(target, "\n"), "\n")
@@ -183,11 +189,42 @@ func matchFuzzyWindow(content, target, replacement string) (string, bool) {
 		return "", false
 	}
 
+	// Pre-filter: compute target's char set fingerprint (runes that appear).
+	tCharSet := charSet(target)
+	tLenSum := 0
+	for _, l := range tLines {
+		tLenSum += len(strings.TrimSpace(l))
+	}
+	if tLenSum == 0 {
+		return "", false
+	}
+
 	bestScore := 0.0
 	bestIdx := -1
 	secondBestScore := 0.0
 
 	for i := 0; i <= len(cLines)-tLen; i++ {
+		// Pre-filter: skip windows whose average line length is wildly
+		// different (>2x or <0.5x) from the target. These can never reach
+		// 85% similarity and would waste an expensive Levenshtein computation.
+		cLenSum := 0
+		for j := 0; j < tLen; j++ {
+			cLenSum += len(strings.TrimSpace(cLines[i+j]))
+		}
+		if cLenSum == 0 {
+			continue
+		}
+		ratio := float64(cLenSum) / float64(tLenSum)
+		if ratio < 0.3 || ratio > 3.0 {
+			continue
+		}
+		// Loose char-set overlap: if the target's character set shares < 50%
+		// of its runes with the window, they can't possibly be similar enough.
+		cSet := charSet(strings.Join(cLines[i:i+tLen], " "))
+		if overlap := charOverlap(tCharSet, cSet); overlap < 0.5 {
+			continue
+		}
+
 		score := 0.0
 		for j := 0; j < tLen; j++ {
 			score += lineSimilarity(strings.TrimSpace(cLines[i+j]), strings.TrimSpace(tLines[j]))
@@ -266,4 +303,32 @@ func levenshtein(s1, s2 string) int {
 		}
 	}
 	return dp[n1][n2]
+}
+
+// charSet returns the set of runes present in s (for overlap pre-filter).
+func charSet(s string) map[rune]bool {
+	out := make(map[rune]bool)
+	for _, r := range s {
+		out[r] = true
+	}
+	return out
+}
+
+// charOverlap returns the Jaccard similarity between two character sets:
+// |a ∩ b| / |a ∪ b|. Used as a cheap pre-filter to skip fuzzy windows that
+// clearly don't contain the same characters as the target.
+func charOverlap(a, b map[rune]bool) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	intersect := 0
+	union := len(a)
+	for r := range b {
+		if a[r] {
+			intersect++
+		} else {
+			union++
+		}
+	}
+	return float64(intersect) / float64(union)
 }

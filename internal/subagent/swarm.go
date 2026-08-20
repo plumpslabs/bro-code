@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/plumpslabs/bro-code/internal/loop"
+	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
 // Role defines the specialist role of a swarm participant.
@@ -237,7 +238,17 @@ func (t *SwarmTool) Execute(ctx context.Context, argsJSON string) (string, error
 		AutoVerify: args.AutoVerify,
 	}
 
-	result, err := t.Runner.ExecuteSwarm(ctx, task, nil)
+	// Same progress-forwarding pattern as subagent.Tool.Execute:
+	// extract optional callback from context so the engine loop / TUI can
+	// stream swarm phase transitions (ARCHITECT → BUILDER → AUDITOR).
+	var progressCb loop.TurnOutputHandler
+	if cb := tool.ProgressFromContext(ctx); cb != nil {
+		progressCb = func(state loop.LoopState, info string) {
+			cb(state.String(), info)
+		}
+	}
+
+	result, err := t.Runner.ExecuteSwarm(ctx, task, progressCb)
 	if err != nil {
 		return "", err
 	}

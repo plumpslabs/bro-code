@@ -518,9 +518,19 @@ func (t *Tool) Execute(ctx context.Context, argsJSON string) (string, error) {
 	tctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
+	// Progress forwarding: extract optional callback from context so the engine
+	// loop / TUI can stream subagent progress instead of blocking blind. Falls
+	// back to nil-safe execution when no callback is wired.
+	var progressCb loop.TurnOutputHandler
+	if cb := tool.ProgressFromContext(ctx); cb != nil {
+		progressCb = func(state loop.LoopState, info string) {
+			cb(state.String(), info)
+		}
+	}
+
 	switch {
 	case len(args.Tasks) > 0:
-		reports, err := t.Runner.RunMany(tctx, args.Tasks, args.Parallel, nil)
+		reports, err := t.Runner.RunMany(tctx, args.Tasks, args.Parallel, progressCb)
 		if err != nil {
 			return "", err
 		}

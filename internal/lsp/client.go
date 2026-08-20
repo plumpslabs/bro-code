@@ -67,6 +67,28 @@ type Client struct {
 	pushed   map[string][]protocol.Diagnostic // URI → last published diagnostics
 }
 
+// fileCacheEntry holds cached diagnostics for a file with its mtime
+// so ScanDiagnostics can skip re-opening files that haven't changed.
+type fileCacheEntry struct {
+	modTime   time.Time
+	diags     []protocol.Diagnostic
+	lastScan  time.Time
+	hits      int // LFU access counter
+}
+
+// diagCache is an LFU + mtime-based cache shared across ScanDiagnostics calls.
+// Files whose on-disk mtime hasn't changed since last scan are served from
+// cache (no didOpen/didChange overhead). Evicts least-frequently-used when
+// full so the cache stays bounded even on huge repos.
+var diagCache = struct {
+	sync.Mutex
+	entries map[string]fileCacheEntry
+	maxSize int
+}{
+	entries: make(map[string]fileCacheEntry),
+	maxSize: 200,
+}
+
 // Manager owns zero or more language server connections (one per language).
 // Servers are spawned lazily on first use and reaped when idle, so a long
 // session does not accumulate live language-server processes (the
@@ -832,7 +854,30 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 
 	opened := make(map[string]string, len(files)) // uri → path
 	clients := make(map[string]*Client, len(files))
+	// cachedFiles holds diagnostics for files whose mtime hasn't changed
+	// since the last scan (served from cache without re-opening).
+	cachedFiles := make(map[string][]protocol.Diagnostic)
+	var needsOpen []string
+
 	for _, f := range files {
+		// Check cache: if mtime unchanged, serve from cache.
+		fi, err := os.Stat(f)
+		if err == nil {
+			diagCache.Lock()
+			if entry, ok := diagCache.entries[f]; ok && entry.modTime.Equal(fi.ModTime()) {
+				cachedFiles[f] = append([]protocol.Diagnostic(nil), entry.diags...)
+				entry.hits++
+				diagCache.entries[f] = entry
+				diagCache.Unlock()
+				continue
+			}
+			diagCache.Unlock()
+		}
+		needsOpen = append(needsOpen, f)
+	}
+
+	// Only open files that changed or aren't cached.
+	for _, f := range needsOpen {
 		c, err := m.clientFor(ctx, f)
 		if err != nil {
 			continue
@@ -849,9 +894,11 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 		clients[u] = c
 	}
 
-	// One settle window for all servers to publish diagnostics.
-	if err := m.waitForDiagnostics(ctx, scanSettle); err != nil {
-		return "", ctx.Err()
+	// Only wait for diagnostics if we actually opened files.
+	if len(opened) > 0 {
+		if err := m.waitForDiagnostics(ctx, scanSettle); err != nil {
+			return "", ctx.Err()
+		}
 	}
 
 	// Gather per-file diagnostics (only files that actually have any).
@@ -863,7 +910,7 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 	for u := range opened {
 		order = append(order, u)
 	}
-	fds := make([]fileDiag, 0, len(order))
+	fds := make([]fileDiag, 0, len(order)+len(cachedFiles))
 	for _, u := range order {
 		c := clients[u]
 		c.mu.Lock()
@@ -875,6 +922,41 @@ func (m *Manager) ScanDiagnostics(ctx context.Context, root string) (string, err
 		rel, err := filepath.Rel(root, opened[u])
 		if err != nil {
 			rel = opened[u]
+		}
+		fds = append(fds, fileDiag{rel, diags})
+		// Cache the freshly scanned diagnostics with current mtime.
+		if fi, err := os.Stat(opened[u]); err == nil {
+			diagCache.Lock()
+			diagCache.entries[opened[u]] = fileCacheEntry{
+				modTime:  fi.ModTime(),
+				diags:    diags,
+				lastScan: time.Now(),
+				hits:     1,
+			}
+			// Evict LFU if over capacity.
+			if len(diagCache.entries) > diagCache.maxSize {
+				mf, minHits := "", -1
+				for k, v := range diagCache.entries {
+					if minHits < 0 || v.hits < minHits {
+						minHits = v.hits
+						mf = k
+					}
+				}
+				if mf != "" {
+					delete(diagCache.entries, mf)
+				}
+			}
+			diagCache.Unlock()
+		}
+	}
+	// Also include cached files in the report.
+	for f, diags := range cachedFiles {
+		if len(diags) == 0 {
+			continue
+		}
+		rel, err := filepath.Rel(root, f)
+		if err != nil {
+			rel = f
 		}
 		fds = append(fds, fileDiag{rel, diags})
 	}

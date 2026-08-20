@@ -20,7 +20,58 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
+
+// fileCache avoids re-walking the filesystem on repeated ListProjectFiles calls
+// within the same session (BuildMap + SetScopeFiles in app.go both call it).
+// Invalidated when the workspace root's mtime advances — a cheap stat that
+// catches new/removed top-level files. Nested changes are handled separately by
+// the dirty-file snapshot (file-snapshot.json) used by the LSP scanner.
+var (
+	fileCacheMu    sync.RWMutex
+	fileCacheDir   string
+	fileCacheMTime time.Time
+	fileCacheList  []string
+)
+
+// checkWorkspaceChanged returns true when the workspace dir's mtime has
+// advanced since the last cache hit (or no cache exists yet).
+func checkWorkspaceChanged(dir string) bool {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return true // can't stat — force re-walk (safer than stale)
+	}
+	mtime := fi.ModTime()
+	fileCacheMu.RLock()
+	cached := fileCacheDir == dir && !mtime.After(fileCacheMTime)
+	fileCacheMu.RUnlock()
+	return !cached
+}
+
+// cachedListProjectFiles returns the project file list, walking the filesystem
+// only when the workspace has changed since the last cache hit.
+func cachedListProjectFiles(dir string) []string {
+	if !checkWorkspaceChanged(dir) {
+		fileCacheMu.RLock()
+		result := fileCacheList
+		fileCacheMu.RUnlock()
+		if result != nil {
+			return result
+		}
+	}
+
+	files := listProjectFiles(dir)
+
+	fileCacheMu.Lock()
+	fileCacheDir = dir
+	fileCacheMTime = time.Now()
+	fileCacheList = files
+	fileCacheMu.Unlock()
+
+	return files
+}
 
 // Map is the deterministic project map: a depth-2 tree plus detected entry
 // points and the most-used files (from cross-session usage).
@@ -99,7 +150,7 @@ func BuildMap(workspaceDir string, usage *Usage) *Map {
 	if workspaceDir == "" {
 		return nil
 	}
-	files := listProjectFiles(workspaceDir)
+	files := cachedListProjectFiles(workspaceDir)
 	if len(files) == 0 {
 		return nil
 	}
@@ -478,4 +529,87 @@ func (u *Usage) Save() {
 		_ = os.WriteFile(u.path, data, 0o644)
 	}
 	u.dirty = false
+}
+
+// snapshotPath returns the mtime snapshot file location for dirty-file tracking.
+func snapshotPath(workspaceDir string) string {
+	return filepath.Join(workspaceDir, ".brocode", "file-snapshot.json")
+}
+
+// DirtyFiles returns the set of source files that have changed (by mtime)
+// since the last snapshot was taken, or all files if no snapshot exists yet.
+// This enables incremental LSP scans: only re-open files whose mtime or size
+// differs from the cached snapshot, skipping unchanged files entirely.
+// Call UpdateSnapshot after scanning to refresh the baseline.
+func DirtyFiles(workspaceDir string, files []string) []string {
+	snap := loadSnapshot(snapshotPath(workspaceDir))
+	if len(snap) == 0 {
+		// No snapshot yet — all files are "dirty" (first run).
+		UpdateSnapshot(workspaceDir, files)
+		return files
+	}
+
+	var dirty []string
+	for _, f := range files {
+		fi, err := os.Stat(f)
+		if err != nil {
+			continue
+		}
+		current := fileSig{fi.ModTime().Unix(), fi.Size()}
+		if prev, ok := snap[f]; !ok || prev != current {
+			dirty = append(dirty, f)
+		}
+	}
+	return dirty
+}
+
+// fileSig is a compact mtime+size signature used for change detection.
+type fileSig struct {
+	ModTime int64
+	Size    int64
+}
+
+// UpdateSnapshot writes the current mtime signatures for the given files,
+// refreshing the dirty-file baseline. Called after a successful scan.
+func UpdateSnapshot(workspaceDir string, files []string) {
+	snap := make(map[string]fileSig, len(files))
+	for _, f := range files {
+		fi, err := os.Stat(f)
+		if err == nil {
+			snap[f] = fileSig{fi.ModTime().Unix(), fi.Size()}
+		}
+	}
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(snapshotPath(workspaceDir)), 0o755)
+	_ = os.WriteFile(snapshotPath(workspaceDir), data, 0o644)
+}
+
+// ListProjectFiles returns the full list of project source files (relative,
+// sorted, with heavy dirs / sensitive files / binary extensions excluded).
+// Public wrapper around listProjectFiles for use by the smart-scope layer.
+func ListProjectFiles(workspaceDir string) []string {
+	return cachedListProjectFiles(workspaceDir)
+}
+
+// loadSnapshot reads the file signature snapshot from disk.
+func loadSnapshot(path string) map[string]fileSig {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var raw map[string]struct {
+		ModTime int64 `json:"m"`
+		Size    int64 `json:"s"`
+	}
+	if json.Unmarshal(data, &raw) != nil {
+		return nil
+	}
+	out := make(map[string]fileSig, len(raw))
+	for k, v := range raw {
+		out[k] = fileSig{v.ModTime, v.Size}
+	}
+	return out
 }

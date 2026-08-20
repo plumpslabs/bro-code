@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/plumpslabs/bro-code/internal/provider"
@@ -43,19 +44,32 @@ const maxWarmStartBytes = 25 * 1024
 // maxRetainLines caps the memory file size; oldest entries are pruned first.
 const maxRetainLines = 600
 
+// memoryEntryTTL is how long a memory fact stays fresh before it is eligible
+// for pruning by PruneStale. Facts referenced by warm-start searches within
+// this window are kept; orphaned facts older than it are dropped.
+const memoryEntryTTL = 30 * 24 * time.Hour // 30 days
+
 // Store reads and writes the project memory file.
 type Store struct {
 	// path is the absolute path of the memory file (.brocode/memory.md).
 	path string
 	// facts holds the current parsed facts, keyed by section.
 	facts map[string][]string
+	// loaded guards load(): facts are parsed from disk once and then kept in
+	// sync with the file via append-only writes, so Retain does not pay a full
+	// re-read + re-parse on every call (the hot path when the agent records
+	// many facts in one turn).
+	loaded bool
+	// mu serializes fact mutations (Retain/PruneStale) against concurrent writes.
+	mu sync.Mutex
 	// embedder, when set, enables hybrid retrieval: WarmStartRelevant re-ranks
 	// the BM25 candidates by embedding cosine similarity (search_code's pattern).
 	// Nil keeps BM25-only operation.
 	embedder *search.Embedder
 	// warmMaxBytes overrides the default warm-start byte cap when the engine
-	// decides the remaining window cannot afford the full 25KB block (adaptive
-	// context budgeting). 0 keeps the default maxWarmStartBytes.
+	// decides the active turn is already close to the window limit, a 25KB
+	// memory block could itself trigger compaction).
+	// Pass n <= 0 to restore the default cap.
 	warmMaxBytes int
 }
 
@@ -99,7 +113,9 @@ func (s *Store) Path() string {
 	return s.path
 }
 
-// load reads the memory file and parses it into sectioned facts.
+// load reads the memory file and parses it into sectioned facts. It tolerates
+// duplicate section headers (each `## ` header appends rather than resets its
+// section) so append-only writes that repeat a header stay parse-correct.
 func (s *Store) load() {
 	s.facts = map[string][]string{}
 	data, err := os.ReadFile(s.path)
@@ -111,7 +127,9 @@ func (s *Store) load() {
 		trimmed := strings.TrimSpace(line)
 		if after, ok := strings.CutPrefix(trimmed, "## "); ok {
 			section = after
-			s.facts[section] = []string{}
+			if _, ok := s.facts[section]; !ok {
+				s.facts[section] = []string{}
+			}
 			continue
 		}
 		if section != "" && strings.HasPrefix(trimmed, "- ") {
@@ -161,6 +179,71 @@ func (s *Store) Save() error {
 		return err
 	}
 	return os.WriteFile(s.path, []byte(sb.String()), 0o644)
+}
+
+// PruneStale drops memory facts older than memoryEntryTTL to keep the memory
+// file focused on the current project state. It is safe to call at session
+// start — the cost is one file read + one BM25-free pass. Returns the number
+// of facts pruned. Facts with embedded timestamps (ISO-8601 prefix) are
+// evaluated by date; facts without timestamps are retained (conservative:
+// never lose a fact we can't date).
+func (s *Store) PruneStale() int {
+	if s == nil || s.path == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// loaded may already be true if Retain ran this session; reuse the cached
+	// facts so pruning stays consistent with appended writes.
+	if !s.loaded {
+		s.load()
+		s.loaded = true
+	}
+	pruned := 0
+	cutoff := time.Now().Add(-memoryEntryTTL)
+	for sec, items := range s.facts {
+		if sec == "" || sec == "Architecture" || sec == "Build & Test" {
+			// Never auto-prune structural/architecture facts — they define
+			// the project even if not recently referenced.
+			continue
+		}
+		var kept []string
+		for _, f := range items {
+			ts := extractFactTimestamp(f)
+			if ts != nil && ts.Before(cutoff) {
+				pruned++
+				continue
+			}
+			kept = append(kept, f)
+		}
+		s.facts[sec] = kept
+	}
+	if pruned > 0 {
+		_ = s.Save()
+	}
+	return pruned
+}
+
+// extractFactTimestamp looks for an ISO-8601 date prefix (YYYY-MM-DD) or a
+// trailing "[YYYY-MM-DD]" marker in a fact string. Returns the parsed time
+// or nil if no timestamp is found.
+func extractFactTimestamp(fact string) *time.Time {
+	// Try leading "YYYY-MM-DD" prefix.
+	if len(fact) >= 10 {
+		if t, err := time.Parse("2006-01-02", fact[:10]); err == nil {
+			return &t
+		}
+	}
+	// Try trailing "[YYYY-MM-DD]" suffix.
+	if idx := strings.LastIndex(fact, "["); idx >= 0 {
+		suffix := fact[idx+1:]
+		if len(suffix) >= 11 && suffix[10] == ']' {
+			if t, err := time.Parse("2006-01-02", suffix[:10]); err == nil {
+				return &t
+			}
+		}
+	}
+	return nil
 }
 
 // WarmStart returns a capped excerpt of memory for system-prompt injection.
@@ -324,7 +407,15 @@ func (s *Store) Retain(section, fact string) (bool, error) {
 		return false, nil
 	}
 
-	s.load()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Lazy load: parse from disk once, then keep s.facts in sync with the file
+	// via append-only writes. Avoids a full re-read + re-parse on every Retain
+	// (the hot path when the agent records many facts in one turn).
+	if !s.loaded {
+		s.load()
+		s.loaded = true
+	}
 	norm := normalize(fact)
 	for _, existing := range s.facts[section] {
 		if normalize(existing) == norm {
@@ -339,11 +430,69 @@ func (s *Store) Retain(section, fact string) (bool, error) {
 	// Prune: cap total lines by trimming the longest section's oldest entries.
 	if totalLines(s.facts) > maxRetainLines {
 		trimFacts(s.facts, maxRetainLines)
+		if err := s.Save(); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
-	if err := s.Save(); err != nil {
+	// Common path: append-only write (no full file rewrite).
+	if err := s.appendFact(section, fact); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// appendFact writes a single fact to the memory file without rewriting the
+// whole file. It always emits the section header alongside the bullet so the
+// line parses under the correct section regardless of where it lands in the
+// file (load() tolerates duplicate section headers). A freshly created file
+// gets the standard header comment first.
+func (s *Store) appendFact(section, fact string) error {
+	needHeader := false
+	if _, err := os.Stat(s.path); os.IsNotExist(err) {
+		needHeader = true
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if needHeader {
+		if _, err := f.WriteString(
+			"# Memory — project knowledge learned across sessions\n" +
+				"# Auto-maintained by BroCode. Edit freely; entries persist for warm starts.\n\n"); err != nil {
+			return err
+		}
+	}
+	_, err = f.WriteString("## " + section + "\n- " + fact + "\n")
+	return err
+}
+
+// retainWithTimestamp adds a fact tagged with the current date for TTL tracking.
+// Used by sections that benefit from auto-pruning (Notes, Gotchas, Session Notes).
+func (s *Store) retainWithTimestamp(section, fact string) (bool, error) {
+	if s == nil || s.path == "" {
+		return false, nil
+	}
+	section = strings.TrimSpace(section)
+	if section == "" {
+		section = "Notes"
+	}
+	fact = strings.TrimSpace(fact)
+	if fact == "" {
+		return false, nil
+	}
+	// Don't double-tag if already has a timestamp.
+	var tagged string
+	if extractFactTimestamp(fact) == nil {
+		tagged = time.Now().Format("2006-01-02") + " " + fact
+	} else {
+		tagged = fact
+	}
+	return s.Retain(section, tagged)
 }
 
 // List returns all memory facts formatted for the model (used by /memory).
@@ -494,7 +643,7 @@ func (s *Store) CaptureOutOfScopeFindings(answer string) int {
 	}
 	changed := 0
 	for _, f := range facts {
-		if ok, err := s.Retain("Notes", "Out-of-scope: "+f); err == nil && ok {
+		if ok, err := s.retainWithTimestamp("Notes", "Out-of-scope: "+f); err == nil && ok {
 			changed++
 		}
 	}
@@ -512,7 +661,7 @@ func (s *Store) MergeCompaction(goal string, decisions []string, state string) e
 	}
 	changed := false
 	if goal != "" && goal != "Continue active conversation" {
-		if ok, err := s.Retain("Notes", "Session goal: "+goal); err == nil && ok {
+		if ok, err := s.retainWithTimestamp("Notes", "Session goal: "+goal); err == nil && ok {
 			changed = true
 		}
 	}
@@ -520,12 +669,12 @@ func (s *Store) MergeCompaction(goal string, decisions []string, state string) e
 		if d == "" || strings.Contains(d, "preserve memory window") {
 			continue
 		}
-		if ok, err := s.Retain("Decisions", d); err == nil && ok {
+		if ok, err := s.retainWithTimestamp("Decisions", d); err == nil && ok {
 			changed = true
 		}
 	}
 	if state != "" && state != "Context compacted successfully" {
-		if ok, err := s.Retain("Notes", "Last known state: "+state); err == nil && ok {
+		if ok, err := s.retainWithTimestamp("Notes", "Last known state: "+state); err == nil && ok {
 			changed = true
 		}
 	}
@@ -599,7 +748,7 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 		if len(lastGoal) > 200 {
 			lastGoal = lastGoal[:200] + "…"
 		}
-		if ok, err := s.Retain("Session Notes", "Goal: "+lastGoal); err == nil && ok {
+		if ok, err := s.retainWithTimestamp("Session Notes", "Goal: "+lastGoal); err == nil && ok {
 			changed = true
 		}
 	}
@@ -612,7 +761,7 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 		if len(paths) > 8 {
 			paths = paths[:8]
 		}
-		if ok, err := s.Retain("Session Notes", "Touched files: "+strings.Join(paths, ", ")); err == nil && ok {
+		if ok, err := s.retainWithTimestamp("Session Notes", "Touched files: "+strings.Join(paths, ", ")); err == nil && ok {
 			changed = true
 		}
 	}

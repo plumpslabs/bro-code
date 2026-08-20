@@ -20,7 +20,9 @@ import (
 	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/prompt"
 	"github.com/plumpslabs/bro-code/internal/provider"
+	"github.com/plumpslabs/bro-code/internal/repo"
 	"github.com/plumpslabs/bro-code/internal/skill"
+	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
@@ -254,9 +256,15 @@ type Engine struct {
 	// blind-grepping for file locations.
 	projectCtx string
 	// repoMap is the deterministic project map (entry points, structure, hot
-	// files by usage) injected alongside the project context so the agent
-	// knows where to start without spending tokens re-discovering it.
+	// files by usage). It renders as the repo context block in the system prompt.
 	repoMap string
+	// repoFiles is the full project file list (paths only) used for smart
+	// scope pre-selection: ranking files by relevance to the user prompt so
+	// BroCode can focus exploration. Set via SetScopeFiles.
+	repoFiles []string
+	// scopeHint caches the smart-scope markdown for injection into the system
+	// prompt this turn. Computed at turn start from the user prompt + repoFiles.
+	scopeHint string
 	// skillsEntries is the installed skill catalog (name + description only).
 	// The prompt builder renders it as the AVAILABLE SKILLS block, relevance-
 	// filtering it once the catalog grows past the tuning threshold, and the
@@ -293,6 +301,11 @@ type Engine struct {
 	// excerpt is injected into the system prompt and compaction summaries are
 	// auto-merged into memory so future sessions start warm.
 	mem *memory.Store
+	// knowledge is the Smart Context Graph backend. When set, the engine queries
+	// it at turn-start for relevance-ranked file hints and injects them as a
+	// "SMART CONTEXT" block — helping the agent avoid re-scanning previously
+	// analyzed files whose content hash hasn't changed.
+	knowledge *store.Store
 	// usageFn, when set, receives the files the model touched this turn (read,
 	// searched, edited) so the UI can persist cross-session usage counts — the
 	// "the more BroCode is used, the smarter it gets" layer.
@@ -391,11 +404,27 @@ type Engine struct {
 	hardCapIterations int
 	// askHandler optionally prompts the user when turn limit is reached.
 	askHandler func(question string, options []string) (string, error)
+	// exploreQuery caches the MINER's file-path context for warm-start relevance filtering.
+	exploreQuery string
+	// earlyExitOnError stops executing remaining tools in a round if a
+	// mutating tool (write_file, edit_file, bash) fails — the model often
+	// proceeds to depend on a result it just got, so a failed edit/write/bash
+	// usually means downstream calls will error too. Cutting them saves ~2-5
+	// rounds of error spam per failure.
+	earlyExitOnError bool
 }
 
 // SetHooks wires a lifecycle hooks manager. Nil disables hooks.
 func (e *Engine) SetHooks(h *hooks.Manager) {
 	e.hooks = h
+}
+
+// SetEarlyExitOnError enables stopping remaining tool execution in a round
+// when a mutating tool fails. This prevents the model from cascading into
+// error-after-error when a prerequisite edit/build command fails. Enabled by
+// default.
+func (e *Engine) SetEarlyExitOnError(v bool) {
+	e.earlyExitOnError = v
 }
 
 // SetScoutManager wires the background scout manager. Nil disables scout
@@ -590,6 +619,18 @@ func isParallelReadOnly(name string) bool {
 	return false
 }
 
+// isMutatingTool reports whether a tool has filesystem/process side effects
+// that warrant early-exit-on-error (a failure here usually invalidates
+// downstream calls in the same round).
+func isMutatingTool(name string) bool {
+	switch name {
+	case "write_file", "edit_file", "delete_file", "bash", "git", "undo",
+		"create_directory", "rename_file", "lsp_autofix":
+		return true
+	}
+	return false
+}
+
 // SetProjectContext injects a compact structural overview of the project into
 // every turn's system prompt (see search.BuildProjectContext). Empty disables.
 func (e *Engine) SetProjectContext(pc string) {
@@ -649,11 +690,39 @@ func (e *Engine) SetRepoMap(rm string) {
 	e.repoMap = rm
 }
 
+// SetScopeFiles injects the full project file list for smart scope
+// pre-selection: given a user prompt, ScoreFiles() ranks files by relevance
+// so BroCode can focus exploration on the most likely targets instead of
+// scanning the entire workspace. Empty disables.
+func (e *Engine) SetScopeFiles(files []string) {
+	e.repoFiles = files
+}
+
 // SetMemoryStore wires the cross-session project memory. When set, a
 // warm-start excerpt of past sessions' learnings is injected into the system
 // prompt, and compaction summaries are auto-merged back into memory.
 func (e *Engine) SetMemoryStore(st *memory.Store) {
 	e.mem = st
+	// Auto-prune stale memory facts (>30 days old) to keep the memory file
+	// focused on the current project state. Cheap (single file read), runs once
+	// per session. Non-blocking: errors are silently ignored.
+	if st != nil {
+		go st.PruneStale()
+	}
+}
+
+// SetKnowledgeStore wires the Smart Context Graph backend. When set, the engine
+// queries it at turn-start for relevance-ranked file hints and injects them
+// as a "SMART CONTEXT" block in the system prompt — helping the agent avoid
+// re-scanning files it has already analyzed in prior sessions.
+func (e *Engine) SetKnowledgeStore(st *store.Store) {
+	e.knowledge = st
+	// Best-effort prune of stale knowledge entries on session start. Cheap
+	// (single indexed DELETE with WHERE) and safe to run synchronously —
+	// avoids a goroutine race window during turn-one system prompt build.
+	if st != nil {
+		_, _ = st.PruneKnowledge()
+	}
 }
 
 // SetUsageRecorder wires a callback that receives the files the model touched
@@ -812,6 +881,7 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		repoRoot:          tools.RepoRoot(),
 		planGateEnabled:  true,
 		tuning:            prompt.DefaultTuning(),
+		earlyExitOnError: true, // default: stop on mutating tool failure
 	}
 }
 
@@ -1048,6 +1118,36 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.cleanupArtifacts()
 
 	if userQuery != "" {
+		// Stale-context detection: if the new prompt is semantically unrelated
+		// to the ongoing conversation (keyword overlap < 30%), do a partial
+		// context reset (keep session metadata, drop the message thread) to
+		// avoid the model charging ahead in the wrong direction.
+		if e.context != nil && e.context.Len() > 5 {
+			stale, _ := e.context.IsStaleContext(userQuery)
+			if stale {
+				e.context.ResetStaleContext(userQuery)
+				if onUpdate != nil {
+					onUpdate(e.state, "🔄 Stale context detected — partial reset (new topic)")
+				}
+			}
+		}
+
+		// Smart scope pre-selection: if the prompt contains recognizable
+		// keywords, pre-compute relevance-ranked files and inject a
+		// "SMART SCOPE" hint into the system prompt so the model focuses
+		// exploration on the relevant subset instead of scanning everything.
+		var scopeHint string
+		if len(e.repoFiles) > 0 {
+			results := repo.ScoreFiles(e.repoFiles, userQuery, 8)
+			if len(results) > 0 {
+				scopeHint = repo.SummarizeScope(results, userQuery)
+				if onUpdate != nil {
+					onUpdate(e.state, fmt.Sprintf("🎯 Smart scope: %d relevant files identified", len(results)))
+				}
+			}
+		}
+		e.scopeHint = scopeHint // set before buildSystemPrompt
+
 		if err := e.context.AppendUserMessage(userQuery); err != nil {
 			return "", err
 		}
@@ -1076,6 +1176,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 
 	// Deliver any scout findings that finished since the last turn ended.
 	e.drainScouts(onUpdate)
+
+	// Inject progress callback into the tool-execution context so blocking tools
+	// like subagent/scout can stream interim updates to the TUI instead of
+	// freezing for 10-30s. Uses the engine's current state.
+	toolCtx := tool.WithProgress(ctx, func(state string, info string) {
+		if onUpdate != nil {
+			onUpdate(e.state, info)
+		}
+	})
+	// Track files touched this turn so the Smart Context Graph can build
+	// co-read/edit edges (the "graph" part of the self-aware context layer).
+	toolCtx = tool.WithTurnFiles(toolCtx)
 
 	iteration := 0
 
@@ -1215,11 +1327,11 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// overflow the model window.
 		e.context.SetSystemPromptTokens(bcontext.EstimateTokens(sysPrompt))
 
-		// Deliver any scout findings that finished since the last iteration —
-		// a scout started mid-turn reaches the model at the NEXT reasoning step
-		// instead of only at the next turn's start. (Turn start also drains, so
-		// findings parked while the loop was idle still arrive.)
-		e.drainScouts(onUpdate)
+	// Deliver any scout findings that finished since the last iteration —
+	// a scout started mid-turn reaches the model at the NEXT reasoning step
+	// instead of only at the next turn's start. (Turn start also drains, so
+	// findings parked while the loop was idle still arrive.)
+	e.drainScouts(onUpdate)
 
 		adaptiveCap := CalculateAdaptiveToolBudget(e.context.LastUserPrompt(), e.Mode())
 		// Hard stop after the FINAL WARNING: the model was already told "one more
@@ -1668,7 +1780,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 								return
 							}
 						}
-						out, err := e.tools.Execute(ctx, pending[idx].tc.Name, pending[idx].tc.Arguments)
+						out, err := e.tools.Execute(toolCtx, pending[idx].tc.Name, pending[idx].tc.Arguments)
 						if err != nil {
 							out = fmt.Sprintf("Tool error: %v", err)
 						}
@@ -1689,8 +1801,17 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				}
 
 				// Sequential pass for non-parallel tools (mutating / interactive).
+				// Early-exit-on-error: if a mutating tool fails, skip the rest of
+				// the round — downstream calls will almost certainly depend on the
+				// failed result (edited file, bash result). Saves ~2-5 wasted
+				// error rounds per failure.
+				mutatingError := false
 				for i := range pending {
 					if !pending[i].exec || isParallelReadOnly(pending[i].tc.Name) {
+						continue
+					}
+					if mutatingError {
+						pending[i].output = "⏭️ Skipped: earlier mutating tool failed (early exit)"
 						continue
 					}
 					// Deterministic guardrail: while pre-flight diagnostics are in
@@ -1705,9 +1826,13 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 							continue
 						}
 					}
-					out, err := e.tools.Execute(ctx, pending[i].tc.Name, pending[i].tc.Arguments)
+					out, err := e.tools.Execute(toolCtx, pending[i].tc.Name, pending[i].tc.Arguments)
 					if err != nil {
 						out = fmt.Sprintf("Tool error: %v", err)
+						// Trigger early exit only for mutating tools (write/edit/bash)
+						if e.earlyExitOnError && isMutatingTool(pending[i].tc.Name) {
+							mutatingError = true
+						}
 					}
 					// Truncate-and-pointer: long outputs spill to
 					// .brocode/artifacts/ and only a head+tail digest enters
@@ -1898,6 +2023,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// model's own synthesized summary into project memory, so a MINER run
 		// leaves durable knowledge even when the model never called the memory
 		// retain tool (its only other path). Deterministic, no extra LLM call.
+		//
+		// Context-aware learning: the memory query is derived from the explored
+		// files' paths so WarmStartRelevant surfaces only memory facts that
+		// relate to THIS investigation (not unrelated old notes).
 		if e.Mode() == "MINER" && e.mem != nil {
 			var explored []string
 			for _, ex := range e.explored {
@@ -1905,6 +2034,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					explored = append(explored, ex)
 				}
 			}
+			// Cache explored file names as the MINER's context query for
+			// warm-start relevance filtering (only recall memory related to
+			// files actually examined this turn, not generic "learn" notes).
+			e.exploreQuery = strings.Join(explored, " ")
 			_ = e.mem.CaptureMinerFindings(resp.Content, explored)
 		}
 
@@ -1941,6 +2074,16 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			break
 		}
 		e.explored = nil
+
+		// Self-aware reflection at turn end: consolidate this session's
+		// captured experience notes into durable facts/gotchas for future
+		// sessions. Best-effort and detached so it never adds turn latency.
+		if e.knowledge != nil {
+			go func(s *store.Store) {
+				defer func() { recover() }()
+				_, _ = bcontext.Reflect(s)
+			}(e.knowledge)
+		}
 
 		if onUpdate != nil {
 			onUpdate(e.state, "Completed")
@@ -2062,6 +2205,7 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 		Stacks:        e.stacks,
 		Skills:        e.skillsEntries,
 		UserPrompt:    e.context.LastUserPrompt(),
+		ScopeHint:     e.scopeHint,
 		LSPAvailable:  e.lspAvailable,
 		Preflight:     e.preflightBlock,
 		PreflightAuto: e.preflightAutoFix,
@@ -2084,12 +2228,84 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 			e.mem.SetWarmStartBudget(0)
 		}
 		in.MemoryWarm = e.mem.WarmStartRelevant(in.UserPrompt)
+		// In MINER mode, augment the memory query with explored file names so
+		// warm-start recalls facts related to the specific files being learned,
+		// not just the generic "learn the codebase" prompt.
+		if currentMode == "MINER" && e.exploreQuery != "" {
+			in.MemoryWarm = e.mem.WarmStartRelevant(in.UserPrompt + " " + e.exploreQuery)
+		}
 		if in.MemoryWarm != "" && onUpdate != nil && iteration == 1 {
 			onUpdate(e.state, "🧠 Warm Start: Recalled project memory & hot files")
 		}
 	}
+
+	// Smart Context Graph: inject knowledge hints at turn-start so the model
+	// can avoid re-scanning previously analyzed files whose content hash is
+	// unchanged. Only on iteration 1 (system prompt is cached per-turn).
+	if e.knowledge != nil && iteration == 1 {
+		hints, err := e.knowledge.QueryKnowledge(in.UserPrompt)
+		if err == nil && len(hints) > 0 {
+			in.KnowledgeHints = store.FormatKnowledgeHints(hints)
+			if onUpdate != nil {
+				onUpdate(e.state, "🧠 Smart Context: Recalled previously analyzed files")
+			}
+		}
+		// Self-aware context: distilled facts/decisions/gotchas/hot files from
+		// past sessions, recalled by relevance to the current prompt. When the
+		// prompt is vague (few keyword matches), seed the top-weighted notes
+		// anyway so the agent starts each session with an architecture-aware
+		// mental model — without re-reading the whole codebase. Bounded and
+		// advisory: it never suppresses exploration.
+		notes, _ := e.knowledge.QueryNotesForPrompt(in.UserPrompt, 8)
+		if len(notes) < 3 {
+			if extra, _ := e.knowledge.TopNotes(
+				[]store.NoteKind{store.NoteFact, store.NoteDecision, store.NoteGotcha, store.NoteHotfile}, 8); len(extra) > 0 {
+				notes = mergeUniqueNotes(notes, extra)
+			}
+		}
+		if len(notes) > 0 {
+			in.NotesHints = formatNotesHints(notes)
+			if onUpdate != nil {
+				onUpdate(e.state, "🧠 Self-Aware Context: Recalled past insights")
+			}
+		}
+	}
 	p, _ := prompt.Assemble(in)
 	return p
+}
+
+// formatNotesHints renders distilled self-aware notes (facts/decisions/gotchas/
+// hot files) as a compact, relevance-ordered block for the system prompt.
+func formatNotesHints(notes []store.Note) string {
+	var b strings.Builder
+	for _, n := range notes {
+		fmt.Fprintf(&b, "• [%s] %s — %s", strings.ToUpper(string(n.Kind)), n.Subject, n.Content)
+		if n.Provenance != "" {
+			fmt.Fprintf(&b, " (%s)", n.Provenance)
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// mergeUniqueNotes appends notes from `extra` that are not already present
+// (by subject), keeping the relevance-ordered `base` first. Bounded by the
+// base slice's original length guard so the primer never explodes.
+func mergeUniqueNotes(base, extra []store.Note) []store.Note {
+	seen := make(map[string]bool, len(base))
+	for _, n := range base {
+		seen[n.Subject] = true
+	}
+	for _, n := range extra {
+		if !seen[n.Subject] {
+			seen[n.Subject] = true
+			base = append(base, n)
+		}
+		if len(base) >= 8 {
+			break
+		}
+	}
+	return base
 }
 
 // toolsForMode returns the tool surface exposed to the model for the current
@@ -2588,7 +2804,16 @@ func advanceBashFamily(fam, last string, streak int) (string, int) {
 
 // complete runs a completion through the primary adapter, streaming when the
 // adapter supports it and a stream handler is wired.
-func (e *Engine) complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+func (e *Engine) complete(ctx context.Context, req provider.CompletionRequest) (resp *provider.CompletionResponse, err error) {
+	// Panic recovery: a provider adapter panic (nil deref, unexpected JSON)
+	// must NEVER crash the engine loop — recover and surface as a plain error
+	// so fallback routing (circuit breaker / fallback model) can engage.
+	defer func() {
+		if rc := recover(); rc != nil {
+			fmt.Fprintf(os.Stderr, "[WARN] engine.complete panicked: %v — returning error, turn continues\n", rc)
+			err = fmt.Errorf("provider panicked: %v", rc)
+		}
+	}()
 	return e.completeWith(ctx, e.adapter, req)
 }
 

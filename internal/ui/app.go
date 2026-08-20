@@ -908,6 +908,9 @@ func (m *Model) rebuildEngine() {
 		m.repoMap = repo.BuildMap(cwd, m.usage)
 	}
 	m.engine.SetRepoMap(m.repoMap.String())
+	// Smart scope pre-selection: pass the full file list so the engine can
+	// rank files by relevance to the user's prompt and focus exploration.
+	m.engine.SetScopeFiles(repo.ListProjectFiles(cwd))
 	// Detected stack (go/node/ts/...) with evidence files biases the skill
 	// catalog toward the repo and renders a one-line STACK hint ("STACK: go
 	// (go.mod, main.go)") in the system prompt.
@@ -958,6 +961,14 @@ func (m *Model) rebuildEngine() {
 	}
 	m.engine.SetMemoryStore(m.memStore)
 	m.tools.SetMemoryStore(m.memStore)
+	// Smart Context Graph: wire the same SQLite store used by the context
+	// manager into both the engine (warm-start hints) and tool registry
+	// (async knowledge updates on read, sync invalidation on edit). Reuses the
+	// existing session DB — no new files or separate DB handle needed.
+	if st := m.context.Store(); st != nil {
+		m.engine.SetKnowledgeStore(st)
+		m.tools.SetKnowledgeStore(st)
+	}
 	// Semantic search: wire an OpenAI-compatible embeddings endpoint when the
 	// active provider has one, so search_code re-ranks BM25 hits by vector
 	// similarity. Falls back to BM25-only on nil / bad keys / errors.

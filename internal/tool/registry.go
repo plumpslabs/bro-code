@@ -26,6 +26,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/search"
+	"github.com/plumpslabs/bro-code/internal/store"
 )
 
 // Shared HTTP clients: reusing one Transport per purpose avoids allocating a
@@ -34,6 +35,52 @@ var (
 	httpClientFetch  = &http.Client{Timeout: 15 * time.Second}
 	httpClientSearch = &http.Client{Timeout: 20 * time.Second}
 )
+
+// progressKey is the context key for an optional TurnOutputHandler that
+// long-running tools (subagent, swarm) can use to stream progress back to the
+// engine loop / TUI. nil means no progress forwarding (default).
+type progressKey struct{}
+
+// WithProgress attaches a progress callback to the context so blocking tools
+// like subagent/scout can forward interim updates without changing the Tool
+// interface signature.
+func WithProgress(ctx context.Context, cb func(state string, info string)) context.Context {
+	if cb == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, progressKey{}, cb)
+}
+
+// ProgressFromContext extracts a progress callback, or nil if none set.
+func ProgressFromContext(ctx context.Context) func(state string, info string) {
+	cb, _ := ctx.Value(progressKey{}).(func(state string, info string))
+	return cb
+}
+
+// turnFilesKey carries a shared, mutable slice of file paths touched during
+// the current turn. Used to build co-read/edit edges (the "graph" in Smart
+// Context Graph): files acted on together in one turn become neighbors.
+type turnFilesKey struct{}
+
+// WithTurnFiles attaches an initially-empty turn-file collector to ctx. The
+// engine wraps each tool call with this so file tools can record co-occurrence.
+func WithTurnFiles(ctx context.Context) context.Context {
+	files := &[]string{}
+	return context.WithValue(ctx, turnFilesKey{}, files)
+}
+
+// turnFilesFromContext returns the turn's shared file slice, or nil.
+func turnFilesFromContext(ctx context.Context) *[]string {
+	f, _ := ctx.Value(turnFilesKey{}).(*[]string)
+	return f
+}
+
+// recordTurnFile appends a path to the current turn's co-occurrence slice.
+func recordTurnFile(ctx context.Context, path string) {
+	if f := turnFilesFromContext(ctx); f != nil && path != "" {
+		*f = append(*f, path)
+	}
+}
 
 // Tool represents an executable native tool.
 type Tool interface {
@@ -82,6 +129,12 @@ type Registry struct {
 	// paths for the rest of the session (keys "create_file:<path>").
 	fileActionFunc func(context.Context, FileActionRequest) (FileActionDecision, error)
 	fileAllow      map[string]bool
+
+	// knowledgeStore is the Smart Context Graph backend. When set, read_file
+	// updates it asynchronously and edit_file/write_file/delete_file invalidate
+	// entries synchronously — so the engine gets smart warm-start hints without
+	// re-scanning unchanged files.
+	knowledgeStore *store.Store
 }
 
 // SetExecutionPolicy hard-enforces a read-only mode at the executor level.
@@ -112,6 +165,7 @@ func NewRegistry() *Registry {
 	r.Register(&ReviewChangesTool{})
 	r.Register(&SearchCodeTool{})
 	r.Register(&MemoryTool{})
+	r.Register(&ContextRecallTool{})
 	r.Register(&RunTestsTool{})
 	return r
 }
@@ -158,6 +212,17 @@ func (r *Registry) SetFileActionHandler(fn func(context.Context, FileActionReque
 func (r *Registry) SetMemoryStore(st *memory.Store) {
 	if mt, ok := r.tools["memory"].(*MemoryTool); ok {
 		mt.Store = st
+	}
+}
+
+// SetKnowledgeStore wires the Smart Context Graph backend into the read/edit
+// Tools so they can update and invalidate knowledge entries. The same store
+// backs the self-aware notes layer (context_recall), so it is wired here too.
+// Nil disables both.
+func (r *Registry) SetKnowledgeStore(st *store.Store) {
+	r.knowledgeStore = st
+	if crt, ok := r.tools["context_recall"].(*ContextRecallTool); ok {
+		crt.Store = st
 	}
 }
 
@@ -441,7 +506,7 @@ func (r *Registry) Definitions() []provider.ToolDefinition {
 	return defs
 }
 
-func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (string, error) {
+func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (result string, err error) {
 	// Executor-level read-only enforcement: catches direct Execute calls that
 	// never pass through GateAction (sub-agents and other non-loop callers).
 	// lsp_fix/lsp_rename mutate files, so they are read-only-blocked too.
@@ -455,7 +520,194 @@ func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (string, 
 	if !ok {
 		return "", fmt.Errorf("tool '%s' not registered", name)
 	}
-	return t.Execute(ctx, argsJSON)
+
+	// Panic recovery: a panicking tool (e.g. nil deref during edge-case parsing)
+	// must NOT bring down the entire engine loop — recover, log, return a clean
+	// error so the model sees a usable diagnostic and can proceed.
+	defer func() {
+		if rc := recover(); rc != nil {
+			err = fmt.Errorf("tool '%s' panicked: %v", name, rc)
+		}
+	}()
+
+	// Smart Context Graph: knowledge hooks are centralized here in Execute
+	// so every entry point (main loop, subagents, direct calls) gets them.
+	// - Mutating tools (edit/write/delete/lsp_fix/lsp_rename/lsp_autofix):
+	//   invalidate BEFORE execution so we never serve a stale file hash.
+	// - read_file: update AFTER execution succeeds (async, reads content).
+	// - EVERY tool: record a provenance note for future self-retrieval.
+	if r.knowledgeStore != nil && name != "" {
+		switch name {
+		case "edit_file", "write_file", "delete_file", "lsp_fix", "lsp_rename", "lsp_autofix":
+			if path := extractPathFromArgs(argsJSON); path != "" {
+				resolved := resolvePath(path)
+				_ = r.knowledgeStore.InvalidateKnowledge("file:" + resolved)
+			}
+		}
+	}
+
+	result, err = t.Execute(ctx, argsJSON)
+
+	// Catch-all self-documenting note: record provenance for EVERY tool action
+	// so future sessions can recall what was done where (Phase A of the
+	// Self-Aware Context plan). Async — zero added turn latency.
+	if r.knowledgeStore != nil && name != "" {
+		go r.recordActionNote(ctx, name, argsJSON, result, err)
+	}
+
+	// Async knowledge update after read_file succeeds (full-file reads only).
+	if r.knowledgeStore != nil && name == "read_file" && err == nil && result != "" {
+		path := extractPathFromArgs(argsJSON)
+		if path != "" {
+			resolved := resolvePath(path)
+			// Check this was a full-file read (no range/shrinkwrap).
+			if !hasRangeOrShrinkwrap(argsJSON) && !isGuardBlocked(result) {
+				go func(p, content string) {
+					defer func() { recover() }() // safety: never leak on knowledge update panic
+					lang := detectFileLanguage(p)
+					// Link to other files touched this turn (co-occurrence
+					// edges) so the graph reflects real working relationships.
+					neighbors := neighborsFromTurn(ctx, p)
+					_ = r.knowledgeStore.UpdateKnowledge(knowledgeKey(p), lang, content, neighbors)
+				}(resolved, result)
+			}
+		}
+	}
+
+	return result, err
+}
+
+// neighborsFromTurn builds KnowledgeLink edges from the other files touched in
+// the same turn (co-read/edit = likely related). Capped at knowledgeMaxNeighbors.
+func neighborsFromTurn(ctx context.Context, currentPath string) []store.KnowledgeLink {
+	files := turnFilesFromContext(ctx)
+	if files == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var links []store.KnowledgeLink
+	for _, p := range *files {
+		if p == currentPath || seen[p] {
+			continue
+		}
+		seen[p] = true
+		links = append(links, store.KnowledgeLink{Path: p, Weight: 1.0})
+		if len(links) >= store.KnowledgeMaxNeighbors {
+			break
+		}
+	}
+	return links
+}
+
+// recordActionNote writes a durable, provenance-tagged note for a tool action.
+// Subject is a file path when available, else a pattern/query/command. Kept
+// lightweight (content is just an outcome string) so high-frequency tool calls
+// stay cheap.
+func (r *Registry) recordActionNote(ctx context.Context, name, argsJSON, result string, toolErr error) {
+	defer func() { recover() }() // safety: never leak on note panic
+	if r.knowledgeStore == nil || name == "" {
+		return
+	}
+	subject := extractPathFromArgs(argsJSON)
+	if subject == "" {
+		subject = extractQueryFromArgs(argsJSON)
+	}
+	if subject == "" {
+		return
+	}
+	resolved := resolvePath(subject)
+	recordTurnFile(ctx, resolved)
+
+	outcome := "ok"
+	if toolErr != nil {
+		outcome = "error"
+	} else if strings.Contains(strings.ToLower(result), "error:") {
+		outcome = "error"
+	}
+	kind := store.NoteExperience
+	if isFileTool(name) {
+		kind = store.NoteHotfile
+	}
+	provenance := fmt.Sprintf("tool=%s outcome=%s", name, outcome)
+	tags := []string{name}
+	if p := strings.TrimPrefix(resolved, "file:"); p != "" {
+		tags = append(tags, p)
+	}
+	_ = r.knowledgeStore.RecordNote(kind, resolved, outcome, provenance, tags)
+}
+
+// hasRangeOrShrinkwrap checks if the read_file args specify start_line/end_line
+// or shrinkwrap: true — in those cases the content isn't a full-file read.
+func hasRangeOrShrinkwrap(argsJSON string) bool {
+	var args struct {
+		StartLine  int    `json:"start_line"`
+		EndLine    int    `json:"end_line"`
+		Shrinkwrap bool   `json:"shrinkwrap"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) == nil {
+		return args.StartLine > 0 || args.EndLine > 0 || args.Shrinkwrap
+	}
+	return false
+}
+
+// isGuardBlocked checks if the result contains a GuardFile error message
+// (secrets/heavy dirs blocked). We still update knowledge for those so the
+// hash is tracked — the agent just won't get content, but the file is
+// "known". Actually, for safety on large files we skip.
+func isGuardBlocked(result string) bool {
+	return strings.Contains(result, "error") && strings.Contains(result, "guard")
+}
+
+// knowledgeKey normalizes a file path into a knowledge table key.
+func knowledgeKey(path string) string {
+	return "file:" + path
+}
+
+// extractPathFromArgs pulls the "path" field from a JSON args string so the
+// knowledge layer can invalidate the right entry. Best-effort: returns "" on
+// parse failure.
+func extractPathFromArgs(argsJSON string) string {
+	var args struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) == nil {
+		return args.Path
+	}
+	return ""
+}
+
+// extractQueryFromArgs pulls a search-style subject (pattern/query/command)
+// from a JSON args string, for tools that don't take a file path.
+func extractQueryFromArgs(argsJSON string) string {
+	var args struct {
+		Pattern string `json:"pattern"`
+		Query   string `json:"query"`
+		Command string `json:"command"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) == nil {
+		switch {
+		case args.Pattern != "":
+			return args.Pattern
+		case args.Query != "":
+			return args.Query
+		case args.Command != "":
+			if len(args.Command) > 120 {
+				return args.Command[:120]
+			}
+			return args.Command
+		}
+	}
+	return ""
+}
+
+// isFileTool reports whether a tool acts on a file path (vs a search/command).
+func isFileTool(name string) bool {
+	switch name {
+	case "read_file", "write_file", "edit_file", "delete_file",
+		"lsp_fix", "lsp_rename", "lsp_autofix", "lsp_scan", "undo":
+		return true
+	}
+	return false
 }
 
 // Lookup returns a registered tool by name, or nil if not found.
@@ -618,6 +870,27 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	return out, nil
 }
 
+// detectFileLanguage returns a short stack label ("go", "ts", "python", ...)
+// based on the file extension, for knowledge entry tagging.
+func detectFileLanguage(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".go": return "go"
+	case ".ts", ".tsx", ".js", ".jsx": return "ts"
+	case ".py": return "python"
+	case ".rs": return "rust"
+	case ".rb": return "ruby"
+	case ".java": return "java"
+	case ".c", ".h": return "c"
+	case ".cpp", ".cc", ".cxx", ".hpp": return "cpp"
+	case ".php": return "php"
+	case ".sql": return "sql"
+	case ".html", ".htm", ".vue", ".svelte", ".astro": return "web"
+	case ".sh": return "bash"
+	default: return "text"
+	}
+}
+
 // readLineSpan streams lines [start, end) (0-based start, 1-based exclusive end)
 // from disk without loading the entire file. Returns the joined span and the
 // total line count. Used by read_file range reads so a 2000-line file costs only
@@ -701,7 +974,6 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 			old = old[3:]
 		}
 	}
-
 	// One-turn rollback window: keep a backup before overwriting.
 	_ = Snapshot(args.Path)
 

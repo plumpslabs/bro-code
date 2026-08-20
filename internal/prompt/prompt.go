@@ -55,8 +55,21 @@ type Input struct {
 	// UserPrompt is the current turn's query, used to relevance-filter the
 	// skills catalog when it exceeds the tuning threshold.
 	UserPrompt string
+	// ScopeHint is the smart-scope markdown (relevance-ranked files extracted
+	// from the user prompt) shown only on iteration 1 so the model focuses
+	// exploration. Empty disables.
+	ScopeHint string
 	// MemoryWarm is the BM25-selected cross-session memory excerpt ("" skips).
 	MemoryWarm string
+	// KnowledgeHints is the Smart Context Graph summary — a compact list of
+	// previously analyzed files related to the current prompt, with their
+	// content hashes so the model can skip stale re-reads. "" when knowledge
+	// store is disabled or no match.
+	KnowledgeHints string
+	// NotesHints is the distilled self-aware context — facts/decisions/gotchas/
+	// hot files recalled from past sessions (from the notes store). Shown only
+	// when relevant so the model starts with verified prior knowledge.
+	NotesHints string
 	// LSPAvailable is the number of reachable language servers (0 = none).
 	LSPAvailable int
 	// Preflight holds engine-gathered diagnostics + code windows, shown only
@@ -122,9 +135,12 @@ func blocks(in *Input) []Block {
 		{Name: "repomap", Render: renderRepoMap},
 		// L2 — skills catalog (relevance-filtered at scale).
 		{Name: "skills", Render: renderSkillsBlock},
-		// L1 — dynamic session state (LSP, pre-flight, plan gate).
+		// L1 — dynamic session state (LSP, pre-flight, plan gate, smart scope).
 		{Name: "lsp", Render: renderLSP},
 		{Name: "memory", Render: renderMemory},
+		{Name: "notes", Render: renderNotesHints},
+		{Name: "knowledge", Render: renderKnowledgeHints},
+		{Name: "scope", Render: renderScopeHint},
 		{Name: "preflight", Render: renderPreflight},
 		{Name: "preflight_autofix", Render: renderPreflightAuto},
 		{Name: "plan_mode", Render: renderPlanMode},
@@ -172,6 +188,20 @@ func renderMemory(in *Input) string {
 	return "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + in.MemoryWarm
 }
 
+func renderKnowledgeHints(in *Input) string {
+	if in.KnowledgeHints == "" {
+		return ""
+	}
+	return "\n\n🧠 SMART CONTEXT (from prior sessions — skip re-reading unchanged files):\n" + in.KnowledgeHints
+}
+
+func renderNotesHints(in *Input) string {
+	if in.NotesHints == "" {
+		return ""
+	}
+	return "\n\n🧠 SELF-AWARE CONTEXT (distilled from past sessions — treat as a starting mental model / verified prior knowledge; confirm details against the code when they matter, and explore freely when uncertain):\n" + in.NotesHints
+}
+
 func renderLSP(in *Input) string {
 	if in.LSPAvailable > 0 {
 		return fmt.Sprintf("\n\nLSP AVAILABLE (%d language server(s)): use `lsp_scan` for project-wide type/lint/deprecated diagnostics and `lsp_diagnostics` per file — that IS your linter, no external install needed.", in.LSPAvailable)
@@ -200,4 +230,11 @@ func renderPlanMode(in *Input) string {
 	return `
 
 📋 PLAN MODE (this turn is a read-only PLANNING pass): For this implementation task, RESEARCH the codebase with read-only tools (read_file, code_locate, grep, glob, lsp_* inspect tools), then output a concise numbered implementation plan. BEFORE any file is edited you MUST call ask_user to confirm it, with options: "Approve & build", "Revise plan", "Cancel". Do NOT call any mutating tool (write_file, edit_file, delete_file, lsp_fix, lsp_autofix, lsp_rename) — they are blocked until the plan is approved. Once the user picks "Approve & build", you may implement in the next step.`
+}
+
+func renderScopeHint(in *Input) string {
+	if in.ScopeHint == "" || in.Iteration != 1 {
+		return ""
+	}
+	return "\n\n" + in.ScopeHint
 }

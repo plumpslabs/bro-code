@@ -1,6 +1,8 @@
 package context
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -77,16 +79,21 @@ type Manager struct {
 	// alone is under the cap. Set by the engine each turn via
 	// SetSystemPromptTokens.
 	systemPromptTokens int
-	compactCount int
-	model        string // active model name; enables exact BPE token counting
+	compactCount       int
+	model              string // active model name; enables exact BPE token counting
 	// Cumulative token breakdown by message kind (session-scoped, for the
 	// metrics HUD). Unlike totalTokens these are NEVER reduced by compaction:
 	// they count what was APPENDED this session, so user+assistant+tool can
 	// exceed the live window after a compact. Tool output is counted AFTER the
 	// truncate-and-pointer digest, i.e. the tokens actually re-sent each round.
-	userTokens int
-	asstTokens int
-	toolTokens int
+	userTokens    int
+	asstTokens    int
+	toolTokens    int
+	// lastPromptHash stores a short hash of the last user prompt so the engine
+	// can detect when a new user message is completely unrelated to the ongoing
+	// conversation (stale context). When detected, partial context reset is
+	// triggered instead of full-clear, preserving session metadata.
+	lastPromptHash string
 }
 
 // NewManager creates a context manager connected to SQLite store.
@@ -99,6 +106,98 @@ func NewManager(sessionID string, st *store.Store, maxTokens int) *Manager {
 		store:     st,
 		maxWindow: maxTokens,
 	}
+}
+
+// promptHash returns a 16-char hex prefix of the SHA-256 of the prompt.
+// Used for stale-context detection.
+func promptHash(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:4])
+}
+
+// IsStaleContext returns true (and the old hash) if the new prompt is
+// semantically unrelated to the current conversation. "Stale" = the user
+// asked something completely different from the ongoing task. Detects this
+// by comparing keyword overlap: if <30% of significant words in the new
+// prompt appeared in the current conversation, the context is considered stale.
+// The engine uses this to trigger a partial context reset (keep the pinned
+// goal, drop the working trail) instead of charging ahead into a wrong
+// direction.
+func (m *Manager) IsStaleContext(newPrompt string) (bool, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.lastPromptHash == "" {
+		return false, ""
+	}
+
+	oldHash := m.lastPromptHash
+	// Extract significant words from the new prompt (lenient tokenizer).
+	newWords := extractSignificantWords(newPrompt)
+	if len(newWords) == 0 {
+		return false, ""
+	}
+
+	// Gather words from current messages.
+	currWords := make(map[string]struct{}, len(newWords)*2)
+	for _, msg := range m.messages {
+		for w := range extractSignificantWords(msg.Content) {
+			currWords[w] = struct{}{}
+		}
+	}
+
+	overlap := 0
+	for w := range newWords {
+		if _, ok := currWords[w]; ok {
+			overlap++
+		}
+	}
+
+	ratio := float64(overlap) / float64(len(newWords))
+	// <0.30 overlap → semantically different task → stale context.
+	return ratio < 0.30, oldHash
+}
+
+// extractSignificantWords pulls lowercased tokens of length >3 from text,
+// filtering common stop-words. Cheap approximate semantic overlap.
+func extractSignificantWords(text string) map[string]bool {
+	stop := map[string]bool{
+		"this": true, "that": true, "with": true, "have": true, "from": true,
+		"will": true, "want": true, "need": true, "what": true, "when": true,
+		"where": true, "were": true, "they": true, "them": true,
+		"does": true, "been": true, "their": true,
+	}
+	words := strings.Fields(strings.ToLower(text))
+	out := make(map[string]bool)
+	for _, w := range words {
+		// strip punctuation
+		w = strings.TrimFunc(w, func(r rune) bool {
+			return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+		})
+		if len(w) > 3 && !stop[w] {
+			out[w] = true
+		}
+	}
+	return out
+}
+
+// ResetStaleContext performs a PARTIAL context reset: drops the message
+// history but preserves session ID, model, and token counters. After this,
+// only the new prompt remains, so the next LLM call sees a clean slate
+// without losing session continuity.
+func (m *Manager) ResetStaleContext(newPrompt string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.messages = []provider.Message{
+		{Role: "user", Content: newPrompt},
+	}
+	m.totalTokens = m.estimateTokens(newPrompt)
+	m.userTokens = m.totalTokens
+	m.asstTokens = 0
+	m.toolTokens = 0
+	m.compactCount = 0
+	m.lastPromptHash = promptHash(newPrompt)
 }
 
 // SetModel records the active model name so token estimation can use the
@@ -122,6 +221,13 @@ func (m *Manager) TotalTokens() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.totalTokens
+}
+
+// Len returns the number of messages currently in context.
+func (m *Manager) Len() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.messages)
 }
 
 // MaxWindow returns context window capacity limit.
@@ -177,6 +283,9 @@ func (m *Manager) AppendUserMessage(content string) error {
 	tokens := m.estimateTokens(content)
 	m.totalTokens += tokens
 	m.userTokens += tokens
+
+	// Record prompt hash for stale-context detection.
+	m.lastPromptHash = promptHash(content)
 
 	if m.store != nil {
 		payload, _ := json.Marshal(msg)
@@ -483,7 +592,16 @@ func (m *Manager) Compact(summary CompactionSummary) error {
 	if m.store != nil {
 		payload, _ := json.Marshal(summary)
 		_, err := m.store.AppendEvent(m.sessionID, "compaction_summary", string(payload), newTokens)
-		return err
+		if err != nil {
+			return err
+		}
+		// Self-aware reflection: consolidate this session's captured experience
+		// notes into durable facts/gotchas for future sessions. Best-effort and
+		// detached so compaction latency stays bounded.
+		go func(s *store.Store) {
+			defer func() { recover() }()
+			_, _ = Reflect(s)
+		}(m.store)
 	}
 
 	return nil

@@ -22,6 +22,11 @@ import (
 var (
 	snapMu      sync.Mutex
 	snapBackups []snapEntry // backup paths still live, most recent last
+	// snapDone tracks which files have ALREADY been snapshotted this turn, so
+	// repeated edits to the same file (a common pattern) don't re-read +
+	// re-write the same backup. Each snapshot gets a unique serial, but the
+	// original-content capture only needs to happen once per file per turn.
+	snapDone map[string]bool
 )
 
 // snapEntry pairs a unique backup path with the original file it captured.
@@ -77,13 +82,28 @@ func snapshotName(orig string) string {
 // failsafe for files git does not cover (untracked, ignored) and for the
 // one-turn rollback window. Backups are written under .brocode/snapshots and
 // are bounded in both memory and on disk.
+//
+// Deduplication: if the same file is snapshotted multiple times in one turn
+// (e.g. 3 consecutive edits), only the FIRST snapshot reads + writes.
+// Subsequent calls for the same path are no-ops — the already-captured backup
+// is reused for undo. This cuts 2/3 I/O on batched-edit turns.
 func Snapshot(filePath string) error {
+	snapMu.Lock()
+	if snapDone == nil {
+		snapDone = map[string]bool{}
+	}
+	if snapDone[filePath] {
+		snapMu.Unlock()
+		return nil // already snapshotted this turn
+	}
+	snapDone[filePath] = true
+
 	content, err := os.ReadFile(filePath)
 	if err != nil {
+		snapMu.Unlock()
 		return nil // New file, nothing to snapshot
 	}
 
-	snapMu.Lock()
 	snapSerial++
 	backupPath := fmt.Sprintf("%s.%d", snapshotName(filePath), snapSerial)
 	snapBackups = append(snapBackups, snapEntry{backup: backupPath, orig: filePath})
@@ -119,6 +139,7 @@ func CleanupStaleSnapshots() int {
 		}
 	}
 	snapBackups = nil
+	snapDone = map[string]bool{} // reset dedup for next turn
 	snapMu.Unlock()
 	// Remove the whole tree so leftover files from a process that crashed
 	// before it could drain its in-memory list are also purged.
@@ -132,6 +153,7 @@ func CleanupStaleSnapshots() int {
 func PurgeAllSnapshots() {
 	snapMu.Lock()
 	snapBackups = nil
+	snapDone = map[string]bool{} // reset dedup
 	snapMu.Unlock()
 	_ = os.RemoveAll(snapshotDir())
 }
