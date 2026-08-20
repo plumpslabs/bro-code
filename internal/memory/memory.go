@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/plumpslabs/bro-code/internal/plan"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/store"
@@ -741,13 +742,17 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 				lastGoal = c
 			}
 		case "assistant_msg":
-			// If the assistant output a plan/roadmap (e.g. from PLANNER mode), capture key plan steps
+			// If the assistant output a plan/roadmap (e.g. from PLANNER mode), capture to current_plan.md & memory.md
 			contentLower := strings.ToLower(msg.Content)
 			if strings.Contains(contentLower, "plan") || strings.Contains(contentLower, "roadmap") || strings.Contains(contentLower, "langkah") || strings.Contains(contentLower, "tahap") || strings.Contains(contentLower, "rencana") {
-				for _, line := range strings.Split(msg.Content, "\n") {
-					trimmed := strings.TrimSpace(line)
-					if isPlanStepLine(trimmed) {
-						clean := strings.TrimLeft(trimmed, "#* \t")
+				parsed := plan.ParseMarkdownPlan(msg.Content)
+				if parsed != nil && len(parsed.Steps) > 0 {
+					if s.path != "" {
+						wsDir := filepath.Dir(filepath.Dir(s.path))
+						_ = plan.SaveCurrentPlan(wsDir, parsed)
+					}
+					for _, step := range parsed.Steps {
+						clean := step.Description
 						if len(clean) > 150 {
 							clean = clean[:150] + "…"
 						}
