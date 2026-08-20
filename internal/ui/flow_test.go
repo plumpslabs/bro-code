@@ -1168,3 +1168,81 @@ func TestNewAppSeedsPromptHistory(t *testing.T) {
 		t.Fatalf("ArrowUp should recall last prompt, got %q", m.promptInput.Value())
 	}
 }
+
+// TestMultiRoundStreamingWithLiveDiffEmission verifies the complete multi-round
+// live turn flow: streaming thoughts -> tool execution -> live DIFF badge in chat
+// -> next thought round -> Ctrl+F unified diff expansion.
+func TestMultiRoundStreamingWithLiveDiffEmission(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 40
+	m.mode = "BUILDER"
+	m.activeModel = "poolside/laguna-s-2.1"
+
+	// 1. User prompt
+	m.appendMessages("YOU:\nAdd Power method to Calculator")
+	m.turnRunning = true
+	m.status = "Thinking..."
+
+	// 2. Round 1: Model streams first response
+	m.streaming = true
+	m.pendingStream = "Saya akan menambahkan method Power pada Calculator."
+
+	// Transition to tool execution: stream is committed to history
+	_, _ = m.Update(stepProgressMsg{state: 1, info: "📝 edit_file calculator.go"}) // StateActing = 1
+	if m.pendingStream != "" {
+		t.Fatalf("pendingStream should be cleared after StateActing transition")
+	}
+
+	// 3. Engine emits live DIFF through onUpdate channel
+	diff := "@@ -1,3 +1,8 @@\n package playground\n \n+// Power returns base^exponent\n+func (c *Calculator) Power(base, exp float64) float64 {\n+    return math.Pow(base, exp)\n+}\n"
+	_, _ = m.Update(stepProgressMsg{state: 1, info: "DIFF:\nplayground/calculator.go\n" + diff})
+
+	// Verify DIFF message is present in history
+	hasDiff := false
+	for _, msg := range m.messages {
+		if strings.HasPrefix(msg, "DIFF:\nplayground/calculator.go") {
+			hasDiff = true
+			break
+		}
+	}
+	if !hasDiff {
+		t.Fatalf("expected DIFF:playground/calculator.go in m.messages, got: %v", m.messages)
+	}
+
+	// 4. Render log in compact mode (default)
+	logCompact := m.buildLog(110)
+	if !strings.Contains(logCompact, "DIFF") || !strings.Contains(logCompact, "calculator.go") {
+		t.Fatalf("rendered log should contain DIFF badge: %s", logCompact)
+	}
+
+	// 5. User presses Ctrl+F to expand diff
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
+	if !m.filesExpanded {
+		t.Fatalf("filesExpanded should be true after Ctrl+F")
+	}
+	logExpanded := m.buildLog(110)
+	if !strings.Contains(logExpanded, "+func (c *Calculator) Power") {
+		t.Fatalf("expanded log should show full diff line: %s", logExpanded)
+	}
+
+	// 6. Round 2: Model creates a new test file
+	m.streaming = true
+	m.pendingStream = "Sekarang saya akan membuat file unit test baru."
+	_, _ = m.Update(stepProgressMsg{state: 1, info: "✍️ write_file calculator_test.go"})
+	newFileDiff := "+package playground\n+\n+import \"testing\"\n+\n+func TestPower(t *testing.T) {}\n"
+	_, _ = m.Update(stepProgressMsg{state: 1, info: "DIFF:\nplayground/calculator_test.go\n" + newFileDiff})
+
+	// 7. Verify CREATE badge rendered for newly created file
+	m.filesExpanded = false
+	logWithCreate := m.buildLog(110)
+	if !strings.Contains(logWithCreate, "CREATE") || !strings.Contains(logWithCreate, "calculator_test.go") {
+		t.Fatalf("log should render CREATE badge for new file: %s", logWithCreate)
+	}
+
+	// 8. Turn finishes cleanly
+	_, _ = m.Update(turnResultMsg{content: "Implementasi selesai dan unit test berhasil dibuat.", mode: "BUILDER"})
+	if m.status != "Ready" {
+		t.Fatalf("expected status Ready after turn result, got %s", m.status)
+	}
+}
