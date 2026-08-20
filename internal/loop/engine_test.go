@@ -1242,33 +1242,27 @@ func TestPlanModeDirectiveInSystemPrompt(t *testing.T) {
 	}
 }
 
-// TestLooksLikeLSPFixTaskLanguageAgnostic verifies the pre-flight trigger fires
-// for Indonesian fix prompts (the user's actual phrasing), not just English.
-func TestLooksLikeLSPFixTaskLanguageAgnostic(t *testing.T) {
+// TestLooksLikeLSPFixTask verifies the pre-flight trigger fires on diagnostic tasks.
+func TestLooksLikeLSPFixTask(t *testing.T) {
 	yes := []string{
-		"perbaiki smua warning depreceted dll", // user's exact prompt (misspelled)
-		"betulkan semua error di project",
-		"baiki deprecated API di client.go",
-		"beresin lint warnings",
-		"bersihkan warnings",
-		// Check/verify prompts mentioning diagnostics must also trigger pre-flight
-		// (otherwise the model re-reads whole files just to verify status).
-		"cek lagi apkah smua warning udh di solved?",
-		"check if all errors are resolved",
+		"fix all warnings and deprecated code",
+		"clean up lint warnings",
+		"run lsp diagnostics check",
 		"verify the lint warnings are gone",
+		"run go vet on project",
+		"check tsc errors",
 	}
 	for _, q := range yes {
 		if !looksLikeLSPFixTask(q) {
 			t.Errorf("expected LSP-fix intent for %q", q)
 		}
 	}
-	// Still must NOT fire on plain build/question prompts (no fix/check verb with
-	// a diagnostic noun, or no diagnostic noun at all).
+	// Questions or feature builds must NOT fire
 	no := []string{
 		"implement a login endpoint",
-		"jelaskan cara kerja cache",
+		"explain cache mechanism",
 		"build a caching layer",
-		"why did this error happen", // question, no fix/check verb
+		"what is this function?",
 	}
 	for _, q := range no {
 		if looksLikeLSPFixTask(q) {

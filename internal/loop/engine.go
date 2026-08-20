@@ -2588,20 +2588,13 @@ var diagLineRe = regexp.MustCompile(`^\s*(error|warning|info|hint)(?:\s*\[(depre
 
 func looksLikeLSPFixTask(query string) bool {
 	q := strings.ToLower(strings.TrimSpace(query))
-	hasDiagNoun := strings.Contains(q, "lint") || strings.Contains(q, "lsp") ||
+	if strings.HasSuffix(q, "?") {
+		return false
+	}
+	return strings.Contains(q, "lint") || strings.Contains(q, "lsp") ||
 		strings.Contains(q, "warning") || strings.Contains(q, "diagnostic") ||
-		strings.Contains(q, "deprecat") || strings.Contains(q, "error") ||
-		strings.Contains(q, "vet") || strings.Contains(q, "tsc")
-	if !hasDiagNoun {
-		return false
-	}
-	// Exclude pure informational/read questions
-	if strings.HasPrefix(q, "why ") || strings.HasPrefix(q, "explain ") ||
-		strings.HasPrefix(q, "jelaskan ") || strings.HasPrefix(q, "what is ") ||
-		strings.HasPrefix(q, "apa itu ") {
-		return false
-	}
-	return true
+		strings.Contains(q, "deprecat") || strings.Contains(q, "vet") ||
+		strings.Contains(q, "tsc")
 }
 
 // preflightLSP runs lsp_scan proactively and packs the result — plus the exact
