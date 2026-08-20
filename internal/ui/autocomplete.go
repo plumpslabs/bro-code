@@ -49,6 +49,7 @@ var BuiltinSlashCommands = []AutocompleteItem{
 	{Value: "/planner", Label: "/planner", Desc: "PLANNER mode: read-only architecture analysis"},
 	{Value: "/miner", Label: "/miner", Desc: "MINER mode: deep codebase exploration & memory persistence"},
 	{Value: "/mode", Label: "/mode", Desc: "Switch engine mode (/mode builder|planner|miner)"},
+	{Value: "/plan", Label: "/plan", Desc: "View or archive current active execution plan (/plan, /plan archive)"},
 	{Value: "/workspace", Label: "/workspace", Desc: "Manage multi-repo workspace & repos"},
 	{Value: "/clear", Label: "/clear", Desc: "Clear chat history screen"},
 	{Value: "/new", Label: "/new", Desc: "Start a new conversation session"},

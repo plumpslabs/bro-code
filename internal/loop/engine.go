@@ -18,6 +18,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/hooks"
 	"github.com/plumpslabs/bro-code/internal/learn"
 	"github.com/plumpslabs/bro-code/internal/memory"
+	"github.com/plumpslabs/bro-code/internal/plan"
 	"github.com/plumpslabs/bro-code/internal/prompt"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/repo"
@@ -2282,6 +2283,11 @@ func formatTSRAttempts(n int) string {
 // byte-identical leading tokens (provider prompt caching). The warm-start
 // memory excerpt is derived from the user's initial query.
 func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate TurnOutputHandler) string {
+	var activePlanStr string
+	if curPlan, err := plan.LoadCurrentPlan(e.repoRoot); err == nil && curPlan != nil && len(curPlan.Steps) > 0 {
+		activePlanStr = plan.RenderMarkdownPlan(curPlan)
+	}
+
 	in := &prompt.Input{
 		Mode:          currentMode,
 		Iteration:     iteration,
@@ -2295,6 +2301,7 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 		Preflight:     e.preflightBlock,
 		PreflightAuto: e.preflightAutoFix,
 		PlanMode:      e.planMode,
+		ActivePlan:    activePlanStr,
 		Tuning:        e.tuning,
 	}
 	if e.mem != nil {

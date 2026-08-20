@@ -80,6 +80,8 @@ type Input struct {
 	PreflightAuto string
 	// PlanMode renders the read-only PLAN-pass directive when set.
 	PlanMode bool
+	// ActivePlan carries the active task plan from .brocode/current_plan.md.
+	ActivePlan string
 	// Tuning carries the runtime surface (block toggles, rule toggles, skill
 	// catalog budgets). Nil falls back to DefaultTuning.
 	Tuning *Tuning
@@ -143,6 +145,7 @@ func blocks(_ *Input) []Block {
 		{Name: "scope", Render: renderScopeHint},
 		{Name: "preflight", Render: renderPreflight},
 		{Name: "preflight_autofix", Render: renderPreflightAuto},
+		{Name: "active_plan", Render: renderActivePlan},
 		{Name: "plan_mode", Render: renderPlanMode},
 		// L0 — universal contract: mode header + tunable mode rules.
 		{Name: "mode", Always: true, Render: renderMode},
@@ -237,4 +240,11 @@ func renderScopeHint(in *Input) string {
 		return ""
 	}
 	return "\n\n" + in.ScopeHint
+}
+
+func renderActivePlan(in *Input) string {
+	if strings.TrimSpace(in.ActivePlan) == "" {
+		return ""
+	}
+	return "\n\n🎯 ACTIVE TASK PLAN (.brocode/current_plan.md):\nYou are executing this plan. Confine your work strictly to these tasks and impacted files:\n" + strings.TrimSpace(in.ActivePlan)
 }

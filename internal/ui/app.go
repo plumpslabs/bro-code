@@ -30,6 +30,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/lsp"
 	"github.com/plumpslabs/bro-code/internal/mcp"
 	"github.com/plumpslabs/bro-code/internal/memory"
+	"github.com/plumpslabs/bro-code/internal/plan"
 	"github.com/plumpslabs/bro-code/internal/prompt"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/repo"
@@ -2134,6 +2135,24 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.appendMessages("Usage: /mode <builder|planner|miner> (or toggle with Shift+Tab)")
+
+	case "/plan":
+		cwd, _ := os.Getwd()
+		if len(parts) > 1 && (parts[1] == "archive" || parts[1] == "clear" || parts[1] == "reset") {
+			archPath, err := plan.ArchiveCurrentPlan(cwd)
+			if err != nil {
+				m.appendMessages(fmt.Sprintf("⚠️ Failed to archive plan: %v (no active plan in .brocode/current_plan.md)", err))
+			} else {
+				m.appendNote(fmt.Sprintf("📦 Plan archived to %s", archPath))
+			}
+			return m, nil
+		}
+		curPlan, err := plan.LoadCurrentPlan(cwd)
+		if err != nil || curPlan == nil || len(curPlan.Steps) == 0 {
+			m.appendMessages("ℹ️ No active plan found in `.brocode/current_plan.md`.\nSwitch to PLANNER mode (Shift+Tab or `/planner`) to draft an execution plan.")
+		} else {
+			m.appendMessages(plan.RenderMarkdownPlan(curPlan) + "\n💡 Run `/plan archive` when finished to archive and clear this plan.")
+		}
 
 	case "/memory":
 		if m.memStore != nil {
