@@ -3,37 +3,58 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BroCode — Autonomous AI Coding Agent for Software Engineering</title>
-  <meta name="description" content="A high-performance, token-efficient, and deterministic autonomous AI coding agent designed for real-world software codebases. Pure Go, Zero-CGO, multi-OS.">
-  <meta name="keywords" content="AI coding agent, autonomous agent, developer tools, CLI, Go, TUI, code assistant, LLM, software engineering">
-  
-  <!-- Typography -->
+  <title>BroCode — Autonomous AI Coding Agent</title>
+  <meta name="description" content="A focused CLI coding agent for fast code edits, git-safe rollbacks, and self-improving project memory.">
+
+  <!-- Typography: Inter & JetBrains Mono -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
   <style>
     :root {
-      --bg-main: #090d13;
-      --bg-surface: #0e141d;
-      --bg-surface-elevated: #151d28;
-      --bg-surface-active: #1c2635;
-      --border-subtle: #232d3d;
-      --border-focus: #3b82f6;
-      --text-primary: #f1f5f9;
+      --bg: #090d14;
+      --bg-surface: #0f1520;
+      --bg-surface-elevated: #151d2c;
+      --bg-code: #070a10;
+
+      --border-subtle: #1c2636;
+      --border-strong: #2a384e;
+
+      --text-primary: #f8fafc;
       --text-secondary: #94a3b8;
       --text-muted: #64748b;
-      --accent-cyan: #38bdf8;
-      --accent-emerald: #34d399;
-      --accent-amber: #fbbf24;
-      --accent-blue: #60a5fa;
-      --code-bg: #0b1118;
+
+      --accent: #38bdf8;
+      --accent-dim: rgba(56, 189, 248, 0.12);
+      --accent-border: rgba(56, 189, 248, 0.25);
+
+      --emerald: #34d399;
+      --emerald-dim: rgba(52, 211, 153, 0.12);
+      --purple: #c084fc;
+      --purple-dim: rgba(192, 132, 252, 0.12);
+      --amber: #fbbf24;
+      --amber-dim: rgba(251, 191, 36, 0.12);
+      --rose: #f87171;
+
+      /* TUI Color Palette (matching internal/ui/app.go lipgloss constants) */
+      --tui-user: #2dd4bf;        /* lipgloss 86 */
+      --tui-bot: #f43f5e;         /* lipgloss 205 */
+      --tui-builder: #22c55e;     /* lipgloss 42 */
+      --tui-planner: #38bdf8;     /* lipgloss 39 */
+      --tui-miner: #f59e0b;       /* lipgloss 214 */
+      --tui-diff: #334155;        /* lipgloss 240 */
+      --tui-label: #fbbf24;       /* lipgloss 178 */
+      --tui-dim: #64748b;         /* lipgloss 244 */
+
       --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      --radius-sm: 6px;
-      --radius-md: 10px;
-      --radius-lg: 14px;
-      --max-width: 1200px;
+      --font-mono: 'JetBrains Mono', monospace;
+
+      --max-width: 1040px;
+      --radius: 8px;
     }
 
     *, *::before, *::after {
@@ -44,92 +65,105 @@
 
     html {
       scroll-behavior: smooth;
-      font-size: 16px;
-      background-color: var(--bg-main);
+      background-color: var(--bg);
       color: var(--text-primary);
+      font-size: 15px;
     }
 
     body {
       font-family: var(--font-sans);
       line-height: 1.6;
-      background-color: var(--bg-main);
+      background-color: var(--bg);
       color: var(--text-primary);
-      overflow-x: hidden;
       -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
     }
 
     a {
-      color: var(--accent-cyan);
+      color: var(--accent);
       text-decoration: none;
       transition: color 0.15s ease;
     }
 
     a:hover {
       color: #7dd3fc;
-      text-decoration: underline;
     }
 
-    /* Layout */
-    .header-nav {
+    .container {
+      max-width: var(--max-width);
+      margin: 0 auto;
+      padding: 0 1.5rem;
+    }
+
+    /* Navbar */
+    .nav {
       position: sticky;
       top: 0;
-      z-index: 50;
-      background: rgba(9, 13, 19, 0.85);
+      z-index: 100;
+      background: rgba(9, 13, 20, 0.85);
       backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
       border-bottom: 1px solid var(--border-subtle);
     }
 
-    .header-container {
-      max-width: var(--max-width);
-      margin: 0 auto;
-      padding: 0.85rem 1.5rem;
+    .nav-inner {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      height: 56px;
     }
 
-    .brand-logo {
+    .brand {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
+      gap: 0.6rem;
+      text-decoration: none;
+    }
+
+    .brand-icon {
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, #0ea5e9, #6366f1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+    }
+
+    .brand-name {
+      font-size: 1rem;
       font-weight: 700;
-      font-size: 1.15rem;
       letter-spacing: -0.02em;
       color: var(--text-primary);
-      text-decoration: none;
     }
 
-    .brand-logo:hover {
-      text-decoration: none;
-    }
-
-    .badge-ver {
+    .brand-tag {
       font-family: var(--font-mono);
-      font-size: 0.72rem;
+      font-size: 0.7rem;
       font-weight: 600;
-      padding: 0.15rem 0.5rem;
-      border-radius: 9999px;
-      background: rgba(56, 189, 248, 0.12);
-      color: var(--accent-cyan);
-      border: 1px solid rgba(56, 189, 248, 0.25);
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      border: 1px solid var(--accent-border);
     }
 
-    .nav-links {
+    .nav-menu {
       display: flex;
       align-items: center;
       gap: 1.5rem;
       list-style: none;
     }
 
-    .nav-links a {
+    .nav-menu a {
       color: var(--text-secondary);
-      font-size: 0.9rem;
+      font-size: 0.88rem;
       font-weight: 500;
     }
 
-    .nav-links a:hover {
+    .nav-menu a:hover {
       color: var(--text-primary);
-      text-decoration: none;
     }
 
     .nav-actions {
@@ -138,91 +172,177 @@
       gap: 0.75rem;
     }
 
-    .btn-github {
+    .btn {
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
-      padding: 0.45rem 0.9rem;
-      border-radius: var(--radius-sm);
-      background: var(--bg-surface-elevated);
-      color: var(--text-primary);
-      border: 1px solid var(--border-subtle);
-      font-size: 0.85rem;
+      justify-content: center;
+      gap: 0.45rem;
+      padding: 0.42rem 0.8rem;
+      border-radius: 6px;
+      font-size: 0.84rem;
       font-weight: 500;
       transition: all 0.15s ease;
+      cursor: pointer;
+      border: 1px solid transparent;
+      line-height: 1;
     }
 
-    .btn-github:hover {
-      background: var(--bg-surface-active);
-      border-color: var(--text-muted);
-      text-decoration: none;
+    .btn-secondary {
+      background: var(--bg-surface);
+      border-color: var(--border-subtle);
+      color: var(--text-primary);
     }
 
-    .main-container {
-      max-width: var(--max-width);
-      margin: 0 auto;
-      padding: 3rem 1.5rem 6rem;
+    .btn-secondary:hover {
+      background: var(--bg-surface-elevated);
+      border-color: var(--border-strong);
+    }
+
+    .btn-primary {
+      background: #0ea5e9;
+      color: #ffffff;
+    }
+
+    .btn-primary:hover {
+      background: #38bdf8;
     }
 
     /* Hero Section */
     .hero {
+      padding: 4rem 0 3rem;
       text-align: center;
-      padding: 3.5rem 0 4rem;
-      max-width: 860px;
-      margin: 0 auto;
     }
 
-    .hero-ascii-badge {
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.2rem 0.7rem;
+      border-radius: 999px;
+      background: var(--accent-dim);
+      border: 1px solid var(--accent-border);
+      color: var(--accent);
+      font-size: 0.76rem;
+      font-weight: 600;
       font-family: var(--font-mono);
-      font-size: 0.8rem;
-      color: var(--text-muted);
       margin-bottom: 1.25rem;
-      display: inline-block;
-      padding: 0.3rem 0.8rem;
-      border-radius: var(--radius-sm);
-      background: var(--bg-surface);
-      border: 1px solid var(--border-subtle);
     }
 
     .hero h1 {
-      font-size: 2.75rem;
+      font-size: 2.5rem;
       font-weight: 700;
       letter-spacing: -0.03em;
-      line-height: 1.15;
-      margin-bottom: 1.25rem;
+      line-height: 1.2;
+      max-width: 720px;
+      margin: 0 auto 1rem;
       color: var(--text-primary);
     }
 
-    .hero p.lead {
-      font-size: 1.15rem;
+    .hero-lead {
+      font-size: 1.05rem;
       color: var(--text-secondary);
+      max-width: 600px;
+      margin: 0 auto 2rem;
       line-height: 1.6;
-      margin-bottom: 2rem;
     }
 
-    /* Install Box */
-    .install-box {
+    /* ASCII Banner Terminal Card */
+    .ascii-card {
+      max-width: 540px;
+      margin: 0 auto 2rem;
       background: var(--bg-surface);
       border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      padding: 0.35rem 0.5rem 0.35rem 1rem;
-      display: inline-flex;
-      align-items: center;
-      gap: 1rem;
-      max-width: 100%;
-      margin: 0 auto 1.5rem;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+      border-radius: var(--radius);
+      padding: 1.25rem;
+      text-align: center;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
     }
 
-    .install-code {
+    .ascii-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+      padding-bottom: 0.65rem;
+      border-bottom: 1px solid var(--border-subtle);
       font-family: var(--font-mono);
-      font-size: 0.92rem;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .ascii-status {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .ascii-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--emerald);
+    }
+
+    .ascii-content-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 0.25rem;
+    }
+
+    pre.ascii-banner {
+      font-family: var(--font-mono);
+      font-size: 1.05rem;
+      line-height: 1.15;
+      font-weight: 600;
+      color: var(--accent);
+      letter-spacing: 0;
+      font-feature-settings: "liga" 0;
+      font-variant-ligatures: none;
+      white-space: pre;
+      margin: 0 0 0.75rem 0;
+      display: block;
+      text-align: left;
+      user-select: all;
+    }
+
+    .ascii-motto {
+      font-family: var(--font-mono);
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      letter-spacing: 0.04em;
+    }
+
+    .ascii-sub {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.2rem;
+    }
+
+    /* Install Bar */
+    .install-bar {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      padding: 0.35rem 0.45rem 0.35rem 1rem;
+      max-width: 100%;
+    }
+
+    .install-cmd {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
       color: var(--text-primary);
       user-select: all;
     }
 
-    .install-code span.prompt {
-      color: var(--accent-cyan);
+    .install-cmd .prompt {
+      color: var(--accent);
       user-select: none;
       margin-right: 0.4rem;
     }
@@ -231,291 +351,576 @@
       background: var(--bg-surface-elevated);
       border: 1px solid var(--border-subtle);
       color: var(--text-secondary);
-      padding: 0.4rem 0.8rem;
-      border-radius: var(--radius-sm);
-      font-size: 0.8rem;
+      padding: 0.35rem 0.65rem;
+      border-radius: 4px;
+      font-size: 0.78rem;
       font-family: var(--font-mono);
       cursor: pointer;
       display: inline-flex;
       align-items: center;
-      gap: 0.4rem;
+      gap: 0.35rem;
       transition: all 0.15s ease;
     }
 
     .btn-copy:hover {
-      background: var(--bg-surface-active);
       color: var(--text-primary);
-      border-color: var(--text-muted);
+      border-color: var(--border-strong);
     }
 
-    /* Terminal Preview Mockup */
-    .terminal-window {
-      background: var(--code-bg);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-lg);
-      overflow: hidden;
+    .btn-copy.copied {
+      background: var(--emerald-dim);
+      color: var(--emerald);
+      border-color: rgba(52, 211, 153, 0.3);
+    }
+
+    /* Authentic TUI Showcase Window (Matches internal/ui/app.go) */
+    .tui-window {
+      max-width: 860px;
       margin: 2.5rem auto 4.5rem;
-      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      overflow: hidden;
       text-align: left;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+      font-family: var(--font-mono);
     }
 
-    .terminal-header {
+    .tui-titlebar {
       background: var(--bg-surface);
       border-bottom: 1px solid var(--border-subtle);
-      padding: 0.75rem 1.25rem;
+      padding: 0.6rem 1rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
 
-    .terminal-controls {
+    .tui-dots {
       display: flex;
-      gap: 0.45rem;
+      gap: 0.4rem;
     }
 
-    .control-dot {
-      width: 11px;
-      height: 11px;
+    .tui-dot {
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
-      background: #334155;
     }
+    .tui-dot.red { background: #ef4444; }
+    .tui-dot.yellow { background: #f59e0b; }
+    .tui-dot.green { background: #10b981; }
 
-    .terminal-title {
-      font-family: var(--font-mono);
-      font-size: 0.78rem;
+    .tui-win-title {
+      font-size: 0.76rem;
       color: var(--text-muted);
     }
 
-    .terminal-mode-badge {
-      font-family: var(--font-mono);
-      font-size: 0.72rem;
-      padding: 0.1rem 0.5rem;
-      border-radius: var(--radius-sm);
-      background: rgba(56, 189, 248, 0.15);
-      color: var(--accent-cyan);
-      font-weight: 600;
+    .tui-win-badge {
+      font-size: 0.7rem;
+      color: var(--accent);
+      background: var(--accent-dim);
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
     }
 
-    .terminal-body {
-      padding: 1.5rem;
-      font-family: var(--font-mono);
-      font-size: 0.88rem;
+    .tui-viewport {
+      padding: 1.25rem 1.4rem;
+      font-size: 0.86rem;
       line-height: 1.55;
-      color: #cbd5e1;
+      color: #e2e8f0;
       overflow-x: auto;
     }
 
-    .term-dim { color: #64748b; }
-    .term-cyan { color: #38bdf8; font-weight: 600; }
-    .term-green { color: #34d399; font-weight: 600; }
-    .term-yellow { color: #fbbf24; }
-    .term-bold { font-weight: 600; color: #f8fafc; }
-    .term-box {
-      border: 1px solid #334155;
-      padding: 0.6rem 0.9rem;
-      border-radius: var(--radius-sm);
-      margin: 0.75rem 0;
-      background: #0f172a;
+    /* Fresh Session Banner */
+    .tui-welcome {
+      margin-bottom: 1.25rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px dashed #1e293b;
     }
 
-    /* Architecture Grid */
-    .section-title {
-      font-size: 1.85rem;
+    .tui-welcome-logo {
+      color: #38bdf8;
+      font-weight: 600;
+      white-space: pre;
+      line-height: 1.15;
+      margin-bottom: 0.35rem;
+    }
+
+    .tui-welcome-tagline {
+      color: var(--tui-dim);
+      font-size: 0.78rem;
+    }
+
+    .tui-welcome-hint {
+      color: var(--tui-dim);
+      font-size: 0.78rem;
+      margin-top: 0.35rem;
+    }
+
+    /* User Message Box */
+    .tui-msg-user {
+      border-left: 3px solid var(--tui-user);
+      padding: 0.5rem 0.85rem;
+      margin-bottom: 1rem;
+      background: rgba(45, 212, 191, 0.03);
+    }
+
+    .tui-label-user {
+      color: var(--tui-user);
       font-weight: 700;
-      letter-spacing: -0.02em;
-      margin-bottom: 0.75rem;
+      font-size: 0.82rem;
+      margin-bottom: 0.2rem;
+    }
+
+    /* Assistant Message Box */
+    .tui-msg-bot {
+      border-left: 3px solid var(--tui-bot);
+      padding: 0.6rem 0.85rem;
+      margin-bottom: 1rem;
+      background: rgba(244, 63, 94, 0.03);
+    }
+
+    .tui-label-bot-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+    }
+
+    .tui-label-bot {
+      color: var(--tui-bot);
+      font-weight: 700;
+      font-size: 0.82rem;
+    }
+
+    .tui-badge-mode {
+      background: var(--tui-builder);
+      color: #000000;
+      font-weight: 700;
+      font-size: 0.7rem;
+      padding: 0.05rem 0.4rem;
+      border-radius: 2px;
+      line-height: 1.2;
+    }
+
+    .tui-label-model {
+      color: var(--tui-dim);
+      font-size: 0.76rem;
+    }
+
+    /* Diff Output Block */
+    .tui-msg-diff {
+      border-left: 2px solid var(--tui-diff);
+      padding: 0.4rem 0.75rem;
+      margin-bottom: 1rem;
+      background: rgba(255, 255, 255, 0.02);
+      font-size: 0.82rem;
+    }
+
+    .tui-diff-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .tui-diff-tag {
+      color: var(--tui-label);
+      font-weight: 700;
+    }
+
+    .tui-diff-file {
       color: var(--text-primary);
     }
 
-    .section-subtitle {
-      color: var(--text-secondary);
-      font-size: 1.05rem;
-      margin-bottom: 2.5rem;
-      max-width: 720px;
+    .tui-diff-stat {
+      color: var(--tui-dim);
     }
 
-    .features-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-      gap: 1.5rem;
-      margin-bottom: 5rem;
-    }
+    .tui-diff-stat .add { color: var(--emerald); }
+    .tui-diff-stat .del { color: var(--rose); }
 
-    .feature-card {
-      background: var(--bg-surface);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      padding: 1.75rem;
-      transition: border-color 0.15s ease, transform 0.15s ease;
-    }
-
-    .feature-card:hover {
-      border-color: #334155;
-      transform: translateY(-2px);
-    }
-
-    .feature-header {
+    /* Input Prompt */
+    .tui-input-row {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
+      gap: 0.5rem;
+      margin-top: 1rem;
+      padding: 0.4rem 0;
+    }
+
+    .tui-prompt-char {
+      color: var(--tui-user);
+      font-weight: 700;
+      font-size: 1rem;
+    }
+
+    .tui-input-placeholder {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    .tui-cursor {
+      display: inline-block;
+      width: 7px;
+      height: 14px;
+      background: var(--accent);
+      vertical-align: middle;
+      animation: blink 1s step-end infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    /* Sticky Footer Banner */
+    .tui-sticky-footer {
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border-subtle);
+      padding: 0.5rem 1rem;
+      font-size: 0.76rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .tui-footer-left {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .tui-footer-brand {
+      color: var(--tui-bot);
+      font-weight: 700;
+    }
+
+    .tui-footer-mode {
+      color: #34d399;
+      font-weight: 600;
+    }
+
+    .tui-footer-stats {
+      color: var(--tui-dim);
+    }
+
+    .tui-footer-stats span.accent {
+      color: var(--accent);
+    }
+
+    .tui-footer-keys {
+      color: var(--tui-dim);
+      font-size: 0.72rem;
+      padding: 0.25rem 1rem;
+      background: var(--bg-surface-elevated);
+      border-top: 1px solid var(--border-subtle);
+      display: flex;
+      gap: 1rem;
+    }
+
+    /* Section Layout */
+    .section {
+      padding: 2.5rem 0 3rem;
+    }
+
+    .section-head {
+      margin-bottom: 2rem;
+    }
+
+    .section-label {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 0.35rem;
+    }
+
+    .section-heading {
+      font-size: 1.65rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text-primary);
+      margin-bottom: 0.4rem;
+    }
+
+    .section-sub {
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+      max-width: 580px;
+    }
+
+    /* Features Grid */
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1.25rem;
+    }
+
+    .card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      padding: 1.35rem;
+      transition: border-color 0.15s ease;
+    }
+
+    .card:hover {
+      border-color: var(--border-strong);
+    }
+
+    .card-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 6px;
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
       margin-bottom: 0.85rem;
     }
 
-    .feature-icon {
-      font-size: 1.25rem;
-      background: var(--bg-surface-elevated);
-      border: 1px solid var(--border-subtle);
-      padding: 0.4rem;
-      border-radius: var(--radius-sm);
-      line-height: 1;
-    }
-
-    .feature-title {
-      font-size: 1.1rem;
+    .card-title {
+      font-size: 0.98rem;
       font-weight: 600;
       color: var(--text-primary);
+      margin-bottom: 0.4rem;
     }
 
-    .feature-desc {
-      font-size: 0.92rem;
+    .card-desc {
+      font-size: 0.88rem;
       color: var(--text-secondary);
       line-height: 1.55;
     }
 
-    /* Comparison Table */
-    .table-container {
-      background: var(--bg-surface);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      overflow-x: auto;
-      margin-bottom: 5rem;
+    .card-desc code {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--accent);
+      background: var(--bg-code);
+      padding: 0.1rem 0.35rem;
+      border-radius: 4px;
     }
 
-    table.spec-table {
+    /* Comparison Table */
+    .table-box {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      overflow-x: auto;
+    }
+
+    table.data-table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.92rem;
+      font-size: 0.88rem;
       text-align: left;
     }
 
-    table.spec-table th {
+    table.data-table th {
       background: var(--bg-surface-elevated);
-      padding: 1rem 1.25rem;
+      padding: 0.8rem 1.1rem;
       font-weight: 600;
       color: var(--text-primary);
       border-bottom: 1px solid var(--border-subtle);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
     }
 
-    table.spec-table td {
-      padding: 1rem 1.25rem;
+    table.data-table td {
+      padding: 0.9rem 1.1rem;
       border-bottom: 1px solid var(--border-subtle);
       color: var(--text-secondary);
     }
 
-    table.spec-table tr:last-child td {
+    table.data-table tr:last-child td {
       border-bottom: none;
     }
 
-    table.spec-table tr:hover td {
-      background: rgba(255, 255, 255, 0.015);
+    .tag-pass {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      color: var(--emerald);
+      font-weight: 500;
     }
 
-    .tag-green {
-      color: var(--accent-emerald);
+    .tag-fail {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      color: var(--rose);
+    }
+
+    /* Operating Modes */
+    .mode-tag {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
       font-weight: 600;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      display: inline-block;
+      margin-bottom: 0.75rem;
     }
+    .mode-tag.builder { background: var(--accent-dim); color: var(--accent); }
+    .mode-tag.planner { background: var(--purple-dim); color: var(--purple); }
+    .mode-tag.miner { background: var(--amber-dim); color: var(--amber); }
 
-    .tag-red {
-      color: #f87171;
-      display: inline-flex;
+    /* Commands Table with Search */
+    .search-box {
+      margin-bottom: 1rem;
+      display: flex;
       align-items: center;
-      gap: 0.35rem;
-    }
-
-    /* Installation Tabs */
-    .tabs-wrapper {
+      gap: 0.5rem;
       background: var(--bg-surface);
       border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      overflow: hidden;
-      margin-bottom: 5rem;
+      border-radius: var(--radius);
+      padding: 0.45rem 0.85rem;
+      max-width: 320px;
     }
 
-    .tabs-header {
+    .search-box input {
+      background: none;
+      border: none;
+      outline: none;
+      color: var(--text-primary);
+      font-size: 0.85rem;
+      width: 100%;
+      font-family: var(--font-sans);
+    }
+
+    .cmd-badge {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--accent);
+      background: var(--bg-code);
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+    }
+
+    /* Install Tabs */
+    .tab-container {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .tab-header {
       display: flex;
       background: var(--bg-surface-elevated);
       border-bottom: 1px solid var(--border-subtle);
       overflow-x: auto;
     }
 
-    .tab-btn {
+    .tab-item {
       background: none;
       border: none;
-      padding: 0.85rem 1.25rem;
+      padding: 0.75rem 1.15rem;
       font-family: var(--font-sans);
-      font-size: 0.88rem;
+      font-size: 0.85rem;
       font-weight: 500;
       color: var(--text-muted);
       cursor: pointer;
       border-bottom: 2px solid transparent;
-      transition: all 0.15s ease;
       white-space: nowrap;
+      transition: all 0.15s ease;
     }
 
-    .tab-btn:hover {
+    .tab-item:hover {
       color: var(--text-primary);
     }
 
-    .tab-btn.active {
-      color: var(--accent-cyan);
-      border-bottom-color: var(--accent-cyan);
+    .tab-item.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
       background: var(--bg-surface);
     }
 
-    .tab-content {
-      padding: 1.5rem;
+    .tab-body {
+      padding: 1.25rem;
       display: none;
     }
 
-    .tab-content.active {
+    .tab-body.active {
       display: block;
     }
 
-    .code-block {
-      background: var(--code-bg);
+    .code-snippet {
+      background: var(--bg-code);
       border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-sm);
-      padding: 1rem 1.25rem;
+      border-radius: 6px;
+      padding: 0.85rem 1.15rem;
       font-family: var(--font-mono);
-      font-size: 0.9rem;
-      color: var(--text-primary);
-      position: relative;
+      font-size: 0.85rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
       overflow-x: auto;
+    }
+
+    /* Providers Grid */
+    .provider-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 1rem;
+    }
+
+    .provider-item {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      padding: 1.15rem;
+    }
+
+    .provider-head {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 0.35rem;
+    }
+
+    .provider-sub {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      line-height: 1.45;
     }
 
     /* Footer */
     footer {
       border-top: 1px solid var(--border-subtle);
-      background: var(--bg-surface);
-      padding: 3rem 1.5rem;
-      text-align: center;
-      font-size: 0.88rem;
+      padding: 2.5rem 0;
+      margin-top: 4rem;
       color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1.5rem;
     }
 
     .footer-links {
       display: flex;
-      justify-content: center;
-      gap: 1.5rem;
-      margin-bottom: 1rem;
+      gap: 1.25rem;
       list-style: none;
     }
 
     .footer-links a {
       color: var(--text-secondary);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
     }
 
     .footer-links a:hover {
@@ -523,299 +928,344 @@
     }
 
     /* Responsive */
-    @media (max-width: 768px) {
+    @media (max-width: 860px) {
+      .grid-3 { grid-template-columns: 1fr; }
+      .nav-menu { display: none; }
       .hero h1 { font-size: 2.1rem; }
-      .nav-links { display: none; }
-      .features-grid { grid-template-columns: 1fr; }
-      .install-box { flex-direction: column; align-items: stretch; gap: 0.5rem; padding: 0.75rem; }
+      pre.ascii-banner { font-size: 0.88rem; }
     }
   </style>
 </head>
 <body>
 
-  <!-- Navigation Bar -->
-  <header class="header-nav">
-    <div class="header-container">
-      <a href="#" class="brand-logo" id="brand-link">
-        <span>🧠 BroCode</span>
-        <span class="badge-ver">v0.1.0</span>
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="#" class="brand">
+        <div class="brand-icon">
+          <i data-lucide="terminal" style="width: 15px; height: 15px;"></i>
+        </div>
+        <span class="brand-name">BroCode</span>
+        <span class="brand-tag">v0.1.2</span>
       </a>
 
-      <ul class="nav-links">
-        <li><a href="#features">Architecture</a></li>
+      <ul class="nav-menu">
+        <li><a href="#features">Features</a></li>
         <li><a href="#comparison">Why BroCode</a></li>
-        <li><a href="#install">Installation</a></li>
         <li><a href="#modes">Modes</a></li>
         <li><a href="#commands">Commands</a></li>
-        <li><a href="#providers">Providers</a></li>
+        <li><a href="#install">Install</a></li>
       </ul>
 
       <div class="nav-actions">
-        <a href="https://github.com/plumpslabs/bro-code" target="_blank" rel="noopener noreferrer" class="btn-github" id="github-link">
-          <svg height="16" width="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+        <a href="https://github.com/plumpslabs/bro-code" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">
+          <!-- Inline Official GitHub Icon SVG -->
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
+          </svg>
           <span>GitHub</span>
+        </a>
+        <a href="#install" class="btn btn-primary">
+          <span>Get Started</span>
         </a>
       </div>
     </div>
-  </header>
+  </nav>
 
-  <!-- Main Container -->
-  <main class="main-container">
+  <!-- Hero Section -->
+  <main class="container">
+    <section class="hero">
+      <div class="hero-badge">
+        <span>CLI CODING AGENT</span>
+      </div>
 
-    <!-- Hero Section -->
-    <section class="hero" id="hero-section">
-      <div class="hero-ascii-badge">⚡ PURE GO • ZERO-CGO • DETERMINISTIC AGENT</div>
-      <h1>Autonomous AI Coding Agent for Software Engineering</h1>
-      <p class="lead">
-        BroCode executes localized, resilient edits, verifies via Language Server Protocol & automated tests, maintains continuous codebase memory, and protects working trees with zero-loss shadow snapshots.
+      <h1>Autonomous AI Coding Agent</h1>
+
+      <p class="hero-lead">
+        A focused developer assistant designed for surgical code edits, git-safe rollbacks, and self-improving project memory.
       </p>
 
-      <div class="install-box" id="quick-install-box">
-        <code class="install-code"><span class="prompt">$</span>curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash</code>
-        <button class="btn-copy" onclick="copySnippet('curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash', this)" id="btn-quick-copy">
+      <!-- Accurate Monospace ASCII Terminal Card -->
+      <div class="ascii-card">
+        <div class="ascii-top">
+          <div class="ascii-status">
+            <span class="ascii-dot"></span>
+            <span>brocode -v</span>
+          </div>
+          <button class="btn-copy" onclick="copySnippet('┌┐ ┬─┐┌─┐╔═╗┌─┐┌┬┐┌─┐\n├┴┐├┬┘│ │║  │ │ ││├┤\n└─┘┴└─└─┘╚═╝└─┘─┴┘└─┘\nship less, ship right\nBroCode v0.1.2', this)">
+            <i data-lucide="copy" style="width: 12px; height: 12px;"></i>
+            <span>Copy</span>
+          </button>
+        </div>
+
+        <div class="ascii-content-box">
+<pre class="ascii-banner">┌┐ ┬─┐┌─┐╔═╗┌─┐┌┬┐┌─┐
+├┴┐├┬┘│ │║  │ │ ││├┤
+└─┘┴└─└─┘╚═╝└─┘─┴┘└─┘</pre>
+          <div class="ascii-motto">ship less, ship right</div>
+          <div class="ascii-sub">BroCode v0.1.2</div>
+        </div>
+      </div>
+
+      <!-- Quick Install -->
+      <div class="install-bar">
+        <code class="install-cmd"><span class="prompt">$</span>curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash</code>
+        <button class="btn-copy" onclick="copySnippet('curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash', this)">
+          <i data-lucide="copy" style="width: 12px; height: 12px;"></i>
           <span>Copy</span>
         </button>
       </div>
     </section>
 
-    <!-- Terminal Mockup -->
-    <section class="terminal-window" id="terminal-showcase">
-      <div class="terminal-header">
-        <div class="terminal-controls">
-          <div class="control-dot"></div>
-          <div class="control-dot"></div>
-          <div class="control-dot"></div>
+    <!-- Authentic TUI Live Showcase (1:1 with internal/ui/app.go) -->
+    <section class="tui-window">
+      <div class="tui-titlebar">
+        <div class="tui-dots">
+          <div class="tui-dot red"></div>
+          <div class="tui-dot yellow"></div>
+          <div class="tui-dot green"></div>
         </div>
-        <div class="terminal-title">brocode — terminal session</div>
-        <div class="terminal-mode-badge" id="mode-badge">BUILDER</div>
+        <div class="tui-win-title">brocode — ~/src/payments (branch: main)</div>
+        <div class="tui-win-badge">TUI Session</div>
       </div>
-      <div class="terminal-body">
-        <p class="term-dim">// Session initialized in /Users/developer/project (Git: main)</p>
-        <p><span class="term-cyan">›</span> Refactor the payment provider client to support automatic retry with exponential backoff</p>
-        <br>
-        <p class="term-bold">BROCODE:BUILDER:claude-3-7-sonnet</p>
-        <p>I surveyed the codebase using BM25 and identified the relevant files in <span class="term-yellow">internal/payment/client.go</span>. Applying a surgical 5-Tier Resilient Edit to inject exponential backoff.</p>
-        
-        <div class="term-box">
-          <p class="term-green">✔ Snapshot created: refs/brocode/snapshots/turn-42 (Rollback ready via /undo)</p>
-          <p class="term-cyan">✔ Edit applied cleanly: internal/payment/client.go (+24 -6 lines)</p>
-          <p class="term-green">✔ Verified with go test ./internal/payment/... [PASS 1.2s]</p>
+
+      <div class="tui-viewport">
+        <!-- 1. Fresh Session Banner (WelcomeBanner) -->
+        <div class="tui-welcome">
+          <div class="tui-welcome-logo">┌┐ ┬─┐┌─┐╔═╗┌─┐┌┬┐┌─┐
+├┴┐├┬┘│ │║  │ │ ││├┤
+└─┘┴└─└─┘╚═╝└─┘─┴┘└─┘</div>
+          <div class="tui-welcome-tagline">ship less, ship right</div>
+          <div class="tui-welcome-tagline">BroCode v0.1.2</div>
+          <div class="tui-welcome-hint">⚡ Type a prompt or /help for commands.</div>
         </div>
 
-        <p><span class="term-cyan">FILES CHANGED:</span></p>
-        <p class="term-dim">  modified: internal/payment/client.go <span class="term-green">(+24 -6)</span></p>
-        <p class="term-dim">  modified: internal/payment/client_test.go <span class="term-green">(+18 -0)</span></p>
-        <br>
-        <p class="term-dim">Suggestions: type <span class="term-cyan">/undo</span> to revert, or <span class="term-cyan">@client.go</span> to mention a file.</p>
+        <!-- 2. User Message Block (YOU: cyan left border) -->
+        <div class="tui-msg-user">
+          <div class="tui-label-user">YOU</div>
+          <div>Refactor HTTP client with exponential retry on 429 &amp; 503 status codes</div>
+        </div>
+
+        <!-- 3. Assistant Message Block (BROCODE: pink left border) -->
+        <div class="tui-msg-bot">
+          <div class="tui-label-bot-row">
+            <span class="tui-label-bot">BROCODE</span>
+            <span class="tui-badge-mode">BUILDER</span>
+            <span class="tui-label-model">anthropic/claude-3-7-sonnet</span>
+          </div>
+          <div>I surveyed the codebase using BM25 and identified <span style="color: var(--amber);">internal/client/http.go</span>. Applying a surgical 5-tier resilient edit to inject exponential backoff with jitter on transient status codes.</div>
+        </div>
+
+        <!-- 4. Diff / Tool Block (DIFF: gray left border) -->
+        <div class="tui-msg-diff">
+          <div class="tui-diff-header">
+            <span class="tui-diff-tag">DIFF</span>
+            <span class="tui-diff-file">internal/client/http.go</span>
+            <span class="tui-diff-stat">(<span class="add">+32</span> <span class="del">−8</span>) · ctrl+f</span>
+          </div>
+        </div>
+
+        <!-- 5. Prompt Input Line -->
+        <div class="tui-input-row">
+          <span class="tui-prompt-char">❯</span>
+          <span class="tui-input-placeholder">Type a prompt or command (/help, /sessions, /new)...</span>
+          <span class="tui-cursor"></span>
+        </div>
       </div>
-    </section>
 
-    <!-- Architectural Highlights -->
-    <section id="features" style="padding-top: 2rem;">
-      <h2 class="section-title">Engine Architecture & Design</h2>
-      <p class="section-subtitle">Engineered with high rigor to eliminate the common failure modes of speculative AI agents.</p>
-
-      <div class="features-grid">
-        <div class="feature-card">
-          <div class="feature-header">
-            <div class="feature-icon">🛡️</div>
-            <h3 class="feature-title">5-Tier Resilient Editor</h3>
-          </div>
-          <p class="feature-desc">
-            Eliminates "target content not found" errors through a deterministic matching hierarchy: Exact &rarr; CRLF &rarr; Trimmed-lines &rarr; Indent-aligned &rarr; Levenshtein sliding window.
-          </p>
+      <!-- 6. Sticky Bottom Footer Banner (HUD) -->
+      <div class="tui-sticky-footer">
+        <div class="tui-footer-left">
+          <span class="tui-footer-brand">BROCODE</span>
+          <span class="tui-footer-mode">[BUILDER]</span>
+          <span class="tui-label-model">anthropic/claude-3-7-sonnet</span>
         </div>
-
-        <div class="feature-card">
-          <div class="feature-header">
-            <div class="feature-icon">⏪</div>
-            <h3 class="feature-title">Atomic Git Shadow Rollback</h3>
-          </div>
-          <p class="feature-desc">
-            Creates zero-loss Git plumbing snapshots under <code>refs/brocode/snapshots</code> before writing edits. Allows instantaneous <code>/undo</code> without altering working branch commits.
-          </p>
+        <div class="tui-footer-stats">
+          <span>sess:a8f2c3…</span> · <span>14.2k/200.0k</span> · <span>T:1.8k <span class="accent">$0.0042</span></span>
         </div>
-
-        <div class="feature-card">
-          <div class="feature-header">
-            <div class="feature-icon">🐝</div>
-            <h3 class="feature-title">Specialist Swarm Pipeline</h3>
-          </div>
-          <p class="feature-desc">
-            Coordinates a multi-agent workflow: <strong>Architect</strong> (specifies plan) &rarr; <strong>Builder</strong> (executes edits) &rarr; <strong>Auditor</strong> (verifies AST & quality gates).
-          </p>
-        </div>
-
-        <div class="feature-card">
-          <div class="feature-header">
-            <div class="feature-icon">⚡</div>
-            <h3 class="feature-title">Exact Offline BPE Tokenizer</h3>
-          </div>
-          <p class="feature-desc">
-            Calculates exact token budgets using native <code>tiktoken-go</code>. Calibrates context compaction windows with zero external network overhead.
-          </p>
-        </div>
-
-        <div class="feature-card">
-          <div class="feature-header">
-            <div class="feature-icon">🧠</div>
-            <h3 class="feature-title">Continuous Project Memory</h3>
-          </div>
-          <p class="feature-desc">
-            Maintains cross-session knowledge and codebase gotchas in <code>.brocode/memory.md</code>, retrieved dynamically via BM25 relevance with bounded line caps.
-          </p>
-        </div>
-
-        <div class="feature-card">
-          <div class="feature-header">
-            <div class="feature-icon">🌐</div>
-            <h3 class="feature-title">3-Tier Web Search Engine</h3>
-          </div>
-          <p class="feature-desc">
-            Resilient multi-tier documentation search: Tier 1 (Exa) &rarr; Tier 2 (Tavily) &rarr; Tier 3 (Zero-Config DuckDuckGo HTML Lite Fallback with 0 API keys required).
-          </p>
-        </div>
+      </div>
+      <div class="tui-footer-keys">
+        <span>ctrl+c quit</span>
+        <span>shift+tab mode</span>
+        <span>ctrl+f diff</span>
+        <span>/help commands</span>
       </div>
     </section>
 
-    <!-- Comparison Table -->
-    <section id="comparison" style="padding-top: 1rem;">
-      <h2 class="section-title">Why BroCode?</h2>
-      <p class="section-subtitle">Comparing deterministic engineering with speculative junior-agent workflows.</p>
+    <!-- Core Features -->
+    <section id="features" class="section">
+      <div class="section-head">
+        <div class="section-label">Core Capabilities</div>
+        <h2 class="section-heading">Key Features</h2>
+        <p class="section-sub">Pragmatic developer tools built for productive coding sessions.</p>
+      </div>
 
-      <div class="table-container">
-        <table class="spec-table">
+      <div class="grid-3">
+        <div class="card">
+          <div class="card-icon">
+            <i data-lucide="brain-circuit" style="width: 18px; height: 18px;"></i>
+          </div>
+          <h3 class="card-title">Continuous Project Memory</h3>
+          <p class="card-desc">
+            Automatically extracts conventions, architecture decisions, and codebase gotchas into <code>.brocode/memory.md</code> so new sessions always start warm.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">
+            <i data-lucide="zap" style="width: 18px; height: 18px;"></i>
+          </div>
+          <h3 class="card-title">Self-Tuning Efficiency</h3>
+          <p class="card-desc">
+            Observes real context utilization across turns and dynamically calibrates context compaction budgets so the agent gets faster and more cost-efficient over time.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">
+            <i data-lucide="shield-check" style="width: 18px; height: 18px;"></i>
+          </div>
+          <h3 class="card-title">Resilient Code Editor</h3>
+          <p class="card-desc">
+            Applies localized search-and-replace edits that gracefully tolerate line ending, trimming, and indentation differences without failing.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">
+            <i data-lucide="history" style="width: 18px; height: 18px;"></i>
+          </div>
+          <h3 class="card-title">Instant Rollbacks (<code>/undo</code>)</h3>
+          <p class="card-desc">
+            Automatically captures git shadow snapshots before writing file edits, enabling instant, zero-loss rollback with a single <code>/undo</code> command.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">
+            <i data-lucide="layers" style="width: 18px; height: 18px;"></i>
+          </div>
+          <h3 class="card-title">Multi-Mode Workflows</h3>
+          <p class="card-desc">
+            Toggle between <strong>Builder</strong> (coding &amp; test execution), <strong>Planner</strong> (safe architectural analysis), and <strong>Miner</strong> (knowledge exploration).
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">
+            <i data-lucide="terminal" style="width: 18px; height: 18px;"></i>
+          </div>
+          <h3 class="card-title">LSP &amp; MCP Integration</h3>
+          <p class="card-desc">
+            Connects to Language Server Protocol for live diagnostic checks, plus extensible Model Context Protocol (MCP) server integration.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Why BroCode -->
+    <section id="comparison" class="section">
+      <div class="section-head">
+        <div class="section-label">Comparison</div>
+        <h2 class="section-heading">Why BroCode</h2>
+        <p class="section-sub">A straightforward comparison with typical coding tools.</p>
+      </div>
+
+      <div class="table-box">
+        <table class="data-table">
           <thead>
             <tr>
               <th style="width: 25%;">Capability</th>
-              <th style="width: 37%;">BroCode Architecture</th>
-              <th style="width: 38%;">Traditional AI Coding Tools</th>
+              <th style="width: 40%;">BroCode</th>
+              <th style="width: 35%;">Standard Tools</th>
             </tr>
           </thead>
           <tbody>
             <tr>
+              <td><strong>Codebase Memory</strong></td>
+              <td><span class="tag-pass"><i data-lucide="check" style="width: 15px; height: 15px;"></i> Continuous learning (<code>memory.md</code>)</span></td>
+              <td><span class="tag-fail"><i data-lucide="x" style="width: 15px; height: 15px;"></i> Lost after session ends</span></td>
+            </tr>
+            <tr>
+              <td><strong>Context Self-Tuning</strong></td>
+              <td><span class="tag-pass"><i data-lucide="check" style="width: 15px; height: 15px;"></i> Adaptive self-tuning efficiency</span></td>
+              <td><span class="tag-fail"><i data-lucide="x" style="width: 15px; height: 15px;"></i> Hardcoded static limits</span></td>
+            </tr>
+            <tr>
               <td><strong>Code Modification</strong></td>
-              <td><span class="tag-green">✔ 5-Tier Resilient Fuzzy Match</span> (Exact, trimmed, indent-shift, sliding window)</td>
-              <td><span class="tag-red">✖ Strict exact string match</span> (Fails on minor whitespace/CRLF drift)</td>
+              <td><span class="tag-pass"><i data-lucide="check" style="width: 15px; height: 15px;"></i> Resilient fuzzy matching</span></td>
+              <td><span class="tag-fail"><i data-lucide="x" style="width: 15px; height: 15px;"></i> Strict exact string match</span></td>
             </tr>
             <tr>
               <td><strong>Rollback Safety</strong></td>
-              <td><span class="tag-green">✔ Git Shadow Tree Snapshots</span> (Zero-loss time travel via <code>/undo</code>)</td>
-              <td><span class="tag-red">✖ Dirty working tree overwrites</span> (Manual git checkout required)</td>
+              <td><span class="tag-pass"><i data-lucide="check" style="width: 15px; height: 15px;"></i> Instant <code>/undo</code> snapshot</span></td>
+              <td><span class="tag-fail"><i data-lucide="x" style="width: 15px; height: 15px;"></i> Direct disk overwrite</span></td>
             </tr>
             <tr>
-              <td><strong>Token Accounting</strong></td>
-              <td><span class="tag-green">✔ Exact Offline BPE (tiktoken)</span> (Exact token window budgeting)</td>
-              <td><span class="tag-red">✖ Character heuristic guessing</span> (Risks abrupt context overflow)</td>
+              <td><strong>Autocompletion</strong></td>
+              <td><span class="tag-pass"><i data-lucide="check" style="width: 15px; height: 15px;"></i> Live <code>/</code> commands &amp; <code>@</code> files</span></td>
+              <td><span class="tag-fail"><i data-lucide="x" style="width: 15px; height: 15px;"></i> Plain text prompt only</span></td>
             </tr>
             <tr>
-              <td><strong>Project Memory</strong></td>
-              <td><span class="tag-green">✔ Continuous Gotchas (.brocode/memory.md)</span> + Dynamic BM25</td>
-              <td><span class="tag-red">✖ Ephemeral chat context</span> (Repeats past mistakes in new sessions)</td>
-            </tr>
-            <tr>
-              <td><strong>Web Documentation</strong></td>
-              <td><span class="tag-green">✔ 3-Tier Multi-Gateway + Free Zero-Config</span> Fallback</td>
-              <td><span class="tag-red">✖ Hard failure if paid API key missing</span></td>
-            </tr>
-            <tr>
-              <td><strong>Monorepo Performance</strong></td>
-              <td><span class="tag-green">✔ Multi-Stack Enterprise Ignore Filter</span> (500k+ files &lt;100ms)</td>
-              <td><span class="tag-red">✖ Freezes indexing large node_modules/build dirs</span></td>
+              <td><strong>Installation</strong></td>
+              <td><span class="tag-pass"><i data-lucide="check" style="width: 15px; height: 15px;"></i> Single standalone binary</span></td>
+              <td><span class="tag-fail"><i data-lucide="x" style="width: 15px; height: 15px;"></i> Heavy runtime dependencies</span></td>
             </tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <!-- Installation Matrix -->
-    <section id="install" style="padding-top: 1rem;">
-      <h2 class="section-title">Installation & Distribution</h2>
-      <p class="section-subtitle">Available via universal installer script, Go toolchain, Homebrew, or standalone binaries.</p>
-
-      <div class="tabs-wrapper">
-        <div class="tabs-header">
-          <button class="tab-btn active" onclick="switchTab(event, 'tab-curl')" id="tab-btn-curl">Universal Script</button>
-          <button class="tab-btn" onclick="switchTab(event, 'tab-go')" id="tab-btn-go">Go Install</button>
-          <button class="tab-btn" onclick="switchTab(event, 'tab-brew')" id="tab-btn-brew">Homebrew</button>
-          <button class="tab-btn" onclick="switchTab(event, 'tab-source')" id="tab-btn-source">Build Source</button>
-        </div>
-
-        <div id="tab-curl" class="tab-content active">
-          <p style="color: var(--text-secondary); margin-bottom: 0.75rem; font-size: 0.9rem;">Installs pre-compiled binary for macOS (Apple Silicon / Intel) and Linux (amd64 / arm64) to <code>/usr/local/bin</code>:</p>
-          <div class="code-block">
-            <code>curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash</code>
-          </div>
-        </div>
-
-        <div id="tab-go" class="tab-content">
-          <p style="color: var(--text-secondary); margin-bottom: 0.75rem; font-size: 0.9rem;">Install directly via Go toolchain (requires Go 1.24+):</p>
-          <div class="code-block">
-            <code>go install github.com/plumpslabs/bro-code/cmd/brocode@latest</code>
-          </div>
-        </div>
-
-        <div id="tab-brew" class="tab-content">
-          <p style="color: var(--text-secondary); margin-bottom: 0.75rem; font-size: 0.9rem;">Install via Homebrew on macOS or LinuxBrew:</p>
-          <div class="code-block">
-            <code>brew tap plumpslabs/tap && brew install brocode</code>
-          </div>
-        </div>
-
-        <div id="tab-source" class="tab-content">
-          <p style="color: var(--text-secondary); margin-bottom: 0.75rem; font-size: 0.9rem;">Clone and build statically linked binary:</p>
-          <div class="code-block">
-            <code>git clone https://github.com/plumpslabs/bro-code.git
-cd bro-code
-go build -ldflags="-s -w" -o brocode ./cmd/brocode
-sudo mv brocode /usr/local/bin/</code>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <!-- Operating Modes -->
-    <section id="modes" style="padding-top: 1rem;">
-      <h2 class="section-title">Agent Operating Modes</h2>
-      <p class="section-subtitle">Toggle modes instantly during interactive sessions using <code>Shift + Tab</code>.</p>
+    <section id="modes" class="section">
+      <div class="section-head">
+        <div class="section-label">Workflow</div>
+        <h2 class="section-heading">Operating Modes</h2>
+        <p class="section-sub">Toggle modes during interactive sessions using <kbd style="background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); padding: 0.15rem 0.45rem; border-radius: 4px; font-family: var(--font-mono); font-size: 0.8rem;">Shift + Tab</kbd>.</p>
+      </div>
 
-      <div class="features-grid" style="grid-template-columns: repeat(3, 1fr);">
-        <div class="feature-card">
-          <div class="feature-header">
-            <span class="badge-ver" style="background: rgba(59, 130, 246, 0.2); color: #60a5fa; border-color: rgba(59, 130, 246, 0.4);">BUILDER</span>
-          </div>
-          <p class="feature-desc">
-            Autonomous implementation mode. Analyzes call trees, performs resilient edits, executes shell commands, runs test suites, and fixes diagnostics.
+      <div class="grid-3">
+        <div class="card">
+          <span class="mode-tag builder">BUILDER</span>
+          <h3 class="card-title">Implementation Mode</h3>
+          <p class="card-desc">
+            Default execution mode. Inspects source files, performs surgical code edits, runs shell commands, and verifies test suites.
           </p>
         </div>
 
-        <div class="feature-card">
-          <div class="feature-header">
-            <span class="badge-ver" style="background: rgba(168, 85, 247, 0.2); color: #c084fc; border-color: rgba(168, 85, 247, 0.4);">PLANNER</span>
-          </div>
-          <p class="feature-desc">
-            Read-only architectural analysis. Explores repository maps, evaluates blast radiuses, and produces actionable implementation roadmaps without modifying files.
+        <div class="card">
+          <span class="mode-tag planner">PLANNER</span>
+          <h3 class="card-title">Architecture Analysis</h3>
+          <p class="card-desc">
+            Read-only mode. Explores call graphs and drafts implementation roadmaps without modifying files on disk.
           </p>
         </div>
 
-        <div class="feature-card">
-          <div class="feature-header">
-            <span class="badge-ver" style="background: rgba(234, 179, 8, 0.2); color: #fde047; border-color: rgba(234, 179, 8, 0.4);">MINER</span>
-          </div>
-          <p class="feature-desc">
-            Knowledge extraction mode. Scans repository structure, identifies build conventions, and persists durable gotchas to <code>.brocode/memory.md</code>.
+        <div class="card">
+          <span class="mode-tag miner">MINER</span>
+          <h3 class="card-title">Knowledge Extraction</h3>
+          <p class="card-desc">
+            Learns repository structure and captures durable architecture conventions into <code>.brocode/memory.md</code>.
           </p>
         </div>
       </div>
     </section>
 
-    <!-- Slash Commands Reference -->
-    <section id="commands" style="padding-top: 1rem;">
-      <h2 class="section-title">Slash Commands & Shortcuts</h2>
-      <p class="section-subtitle">Type <code>/</code> for floating autocomplete with sliding-window navigation.</p>
+    <!-- Slash Commands Reference (Actual Built-in Commands) -->
+    <section id="commands" class="section">
+      <div class="section-head">
+        <div class="section-label">Commands</div>
+        <h2 class="section-heading">Built-in Slash Commands</h2>
+        <p class="section-sub">Type <code>/</code> in the prompt to open the autocomplete menu.</p>
+      </div>
 
-      <div class="table-container">
-        <table class="spec-table">
+      <div class="search-box">
+        <i data-lucide="search" style="width: 14px; height: 14px; color: var(--text-muted);"></i>
+        <input type="text" id="cmd-search" placeholder="Search commands (/undo, /memory, /lsp...)" onkeyup="filterCommands()">
+      </div>
+
+      <div class="table-box">
+        <table class="data-table" id="commands-table">
           <thead>
             <tr>
               <th style="width: 25%;">Command</th>
@@ -824,114 +1274,223 @@ sudo mv brocode /usr/local/bin/</code>
           </thead>
           <tbody>
             <tr>
-              <td><code>/undo</code></td>
-              <td><strong>Atomic Rollback:</strong> Instantly revert all file modifications from the previous turn via Git shadow snapshots.</td>
+              <td><span class="cmd-badge">/undo</span></td>
+              <td>Roll back current turn changes instantly via git snapshots</td>
             </tr>
             <tr>
-              <td><code>/memory</code></td>
-              <td>Inspect cross-session project memory, architectural decisions, and captured gotchas.</td>
+              <td><span class="cmd-badge">/memory</span></td>
+              <td>View learned project knowledge and codebase gotchas</td>
             </tr>
             <tr>
-              <td><code>/sessions</code></td>
-              <td>Switch, resume, or manage past chat sessions (Press <code>d</code> to delete, <code>D</code> to delete all).</td>
+              <td><span class="cmd-badge">/sessions</span></td>
+              <td>Switch or manage conversation session history</td>
             </tr>
             <tr>
-              <td><code>/models</code></td>
-              <td>Open interactive AI model selector with live dynamic model discovery.</td>
+              <td><span class="cmd-badge">/models</span></td>
+              <td>Select active AI model from connected providers</td>
             </tr>
             <tr>
-              <td><code>/connect</code></td>
-              <td>Interactive setup wizard for LLM providers & API keys (Anthropic, OpenAI, DeepSeek, Ollama, etc.).</td>
+              <td><span class="cmd-badge">/connect</span></td>
+              <td>Configure LLM providers and API keys interactively</td>
             </tr>
             <tr>
-              <td><code>/cost</code></td>
-              <td>View token usage metrics and estimated spend breakdown.</td>
+              <td><span class="cmd-badge">/cost</span></td>
+              <td>View token usage statistics and estimated cost breakdown</td>
             </tr>
             <tr>
-              <td><code>/lsp</code></td>
-              <td>Inspect connected Language Server Protocol status, diagnostics, and supported languages.</td>
+              <td><span class="cmd-badge">/lsp</span></td>
+              <td>Inspect Language Server Protocol diagnostics and status</td>
             </tr>
             <tr>
-              <td><code>/diagnose</code></td>
-              <td>Run self-contained syntax and type error diagnostics on modified files.</td>
+              <td><span class="cmd-badge">/diagnose</span></td>
+              <td>Run autonomous codebase diagnostics on modified files</td>
             </tr>
             <tr>
-              <td><code>/miner</code></td>
-              <td>Switch active mode to MINER.</td>
+              <td><span class="cmd-badge">/miner</span></td>
+              <td>Switch active mode to MINER knowledge exploration</td>
             </tr>
             <tr>
-              <td><code>/clear</code></td>
-              <td>Clear the terminal chat viewport.</td>
+              <td><span class="cmd-badge">/workspace</span></td>
+              <td>Manage multi-repo workspace configurations</td>
+            </tr>
+            <tr>
+              <td><span class="cmd-badge">/mcp</span></td>
+              <td>List and manage Model Context Protocol tools</td>
+            </tr>
+            <tr>
+              <td><span class="cmd-badge">/clear</span></td>
+              <td>Clear the terminal chat viewport</td>
+            </tr>
+            <tr>
+              <td><span class="cmd-badge">/new</span></td>
+              <td>Start a fresh conversation turn</td>
+            </tr>
+            <tr>
+              <td><span class="cmd-badge">/help</span></td>
+              <td>Display help and keyboard shortcuts</td>
             </tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <!-- Supported Providers -->
-    <section id="providers" style="padding-top: 1rem; margin-bottom: 5rem;">
-      <h2 class="section-title">Supported AI Providers</h2>
-      <p class="section-subtitle">BroCode interfaces natively with top frontier and local models with zero proxy dependencies.</p>
+    <!-- Installation -->
+    <section id="install" class="section">
+      <div class="section-head">
+        <div class="section-label">Installation</div>
+        <h2 class="section-heading">Get Started</h2>
+        <p class="section-sub">Choose your preferred installation method.</p>
+      </div>
 
-      <div class="features-grid" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));">
-        <div class="feature-card">
-          <h3 class="feature-title" style="margin-bottom: 0.4rem;">Anthropic</h3>
-          <p class="feature-desc">Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3.5 Haiku</p>
+      <div class="tab-container">
+        <div class="tab-header">
+          <button class="tab-item active" onclick="switchTab(event, 'tab-curl')">Universal Script</button>
+          <button class="tab-item" onclick="switchTab(event, 'tab-go')">Go Install</button>
+          <button class="tab-item" onclick="switchTab(event, 'tab-brew')">Homebrew</button>
+          <button class="tab-item" onclick="switchTab(event, 'tab-source')">Build Source</button>
         </div>
-        <div class="feature-card">
-          <h3 class="feature-title" style="margin-bottom: 0.4rem;">OpenAI</h3>
-          <p class="feature-desc">GPT-4o, o1, o3-mini, GPT-4o-mini</p>
+
+        <div id="tab-curl" class="tab-body active">
+          <p style="color: var(--text-secondary); margin-bottom: 0.75rem; font-size: 0.88rem;">Installs pre-compiled binary for macOS and Linux:</p>
+          <div class="code-snippet">
+            <code>curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash</code>
+            <button class="btn-copy" onclick="copySnippet('curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash', this)">
+              <i data-lucide="copy" style="width: 12px; height: 12px;"></i>
+              <span>Copy</span>
+            </button>
+          </div>
         </div>
-        <div class="feature-card">
-          <h3 class="feature-title" style="margin-bottom: 0.4rem;">DeepSeek</h3>
-          <p class="feature-desc">DeepSeek V3 (Chat), DeepSeek R1 (Reasoner)</p>
+
+        <div id="tab-go" class="tab-body">
+          <p style="color: var(--text-secondary); margin-bottom: 0.75rem; font-size: 0.88rem;">Install via Go toolchain (requires Go 1.24+):</p>
+          <div class="code-snippet">
+            <code>go install github.com/plumpslabs/bro-code/cmd/brocode@latest</code>
+            <button class="btn-copy" onclick="copySnippet('go install github.com/plumpslabs/bro-code/cmd/brocode@latest', this)">
+              <i data-lucide="copy" style="width: 12px; height: 12px;"></i>
+              <span>Copy</span>
+            </button>
+          </div>
         </div>
-        <div class="feature-card">
-          <h3 class="feature-title" style="margin-bottom: 0.4rem;">Poolside / Laguna</h3>
-          <p class="feature-desc">Laguna-S-2.1 code generation models</p>
+
+        <div id="tab-brew" class="tab-body">
+          <p style="color: var(--text-secondary); margin-bottom: 0.75rem; font-size: 0.88rem;">Install via Homebrew tap:</p>
+          <div class="code-snippet">
+            <code>brew tap plumpslabs/tap &amp;&amp; brew install brocode</code>
+            <button class="btn-copy" onclick="copySnippet('brew tap plumpslabs/tap && brew install brocode', this)">
+              <i data-lucide="copy" style="width: 12px; height: 12px;"></i>
+              <span>Copy</span>
+            </button>
+          </div>
         </div>
-        <div class="feature-card">
-          <h3 class="feature-title" style="margin-bottom: 0.4rem;">Ollama / Local</h3>
-          <p class="feature-desc">Qwen 2.5 Coder, Llama 3.3, DeepSeek R1 Local</p>
-        </div>
-        <div class="feature-card">
-          <h3 class="feature-title" style="margin-bottom: 0.4rem;">OpenRouter & Groq</h3>
-          <p class="feature-desc">High-throughput open model hosting</p>
+
+        <div id="tab-source" class="tab-body">
+          <p style="color: var(--text-secondary); margin-bottom: 0.75rem; font-size: 0.88rem;">Build from source:</p>
+          <div class="code-snippet">
+            <code>git clone https://github.com/plumpslabs/bro-code.git &amp;&amp; cd bro-code &amp;&amp; go build -ldflags="-s -w" -o brocode ./cmd/brocode</code>
+            <button class="btn-copy" onclick="copySnippet('git clone https://github.com/plumpslabs/bro-code.git && cd bro-code && go build -ldflags=\"-s -w\" -o brocode ./cmd/brocode', this)">
+              <i data-lucide="copy" style="width: 12px; height: 12px;"></i>
+              <span>Copy</span>
+            </button>
+          </div>
         </div>
       </div>
     </section>
 
+    <!-- Supported Providers -->
+    <section class="section">
+      <div class="section-head">
+        <div class="section-label">Providers</div>
+        <h2 class="section-heading">Supported LLM Providers</h2>
+        <p class="section-sub">Direct API connections with zero proxy dependencies.</p>
+      </div>
+
+      <div class="provider-grid">
+        <div class="provider-item">
+          <div class="provider-head">Anthropic</div>
+          <div class="provider-sub">Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3.5 Haiku</div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-head">OpenAI</div>
+          <div class="provider-sub">GPT-4o, o1, o3-mini, GPT-4o-mini</div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-head">DeepSeek</div>
+          <div class="provider-sub">DeepSeek V3 (Chat), DeepSeek R1 (Reasoner)</div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-head">Google</div>
+          <div class="provider-sub">Gemini 2.0 Flash, Gemini 1.5 Pro</div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-head">Ollama &amp; Local</div>
+          <div class="provider-sub">Qwen 2.5 Coder, Llama 3.3, DeepSeek R1 Local</div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-head">OpenRouter &amp; Groq</div>
+          <div class="provider-sub">Fast cloud inference for open weights</div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <!-- Footer -->
   <footer>
-    <ul class="footer-links">
-      <li><a href="https://github.com/plumpslabs/bro-code" target="_blank" rel="noopener noreferrer">GitHub Repository</a></li>
-      <li><a href="https://github.com/plumpslabs/bro-code/releases" target="_blank" rel="noopener noreferrer">Releases (v0.1.0)</a></li>
-      <li><a href="https://github.com/plumpslabs/bro-code/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a></li>
-    </ul>
-    <p>&copy; 2026 BroCode Project. Built with Pure Go & Zero-CGO.</p>
+    <div class="container footer-inner">
+      <div>
+        <span style="font-weight: 600; color: var(--text-primary);">BroCode</span>
+        <span style="margin-left: 0.5rem;">— ship less, ship right.</span>
+      </div>
+
+      <ul class="footer-links">
+        <li>
+          <a href="https://github.com/plumpslabs/bro-code" target="_blank" rel="noopener noreferrer">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
+            </svg>
+            <span>GitHub</span>
+          </a>
+        </li>
+        <li><a href="https://github.com/plumpslabs/bro-code/releases" target="_blank" rel="noopener noreferrer">Releases</a></li>
+        <li><a href="https://github.com/plumpslabs/bro-code/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a></li>
+      </ul>
+    </div>
   </footer>
 
   <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      if (typeof lucide !== 'undefined') {
+        lucide.createIcons();
+      }
+    });
+
     function switchTab(evt, tabId) {
-      const contents = document.querySelectorAll('.tab-content');
-      contents.forEach(c => c.classList.remove('active'));
+      document.querySelectorAll('.tab-body').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.tab-item').forEach(el => el.classList.remove('active'));
 
-      const buttons = document.querySelectorAll('.tab-btn');
-      buttons.forEach(b => b.classList.remove('active'));
-
-      document.getElementById(tabId).classList.add('active');
+      const target = document.getElementById(tabId);
+      if (target) target.classList.add('active');
       evt.currentTarget.classList.add('active');
     }
 
     function copySnippet(text, btn) {
       navigator.clipboard.writeText(text).then(() => {
-        const original = btn.innerHTML;
-        btn.innerHTML = '<span>Copied!</span>';
+        const orig = btn.innerHTML;
+        btn.classList.add('copied');
+        btn.innerHTML = '<i data-lucide="check" style="width: 12px; height: 12px;"></i><span>Copied!</span>';
+        if (typeof lucide !== 'undefined') lucide.createIcons();
+
         setTimeout(() => {
-          btn.innerHTML = original;
-        }, 2000);
+          btn.classList.remove('copied');
+          btn.innerHTML = orig;
+          if (typeof lucide !== 'undefined') lucide.createIcons();
+        }, 1800);
+      });
+    }
+
+    function filterCommands() {
+      const q = document.getElementById('cmd-search').value.toLowerCase();
+      document.querySelectorAll('#commands-table tbody tr').forEach(row => {
+        row.style.display = row.innerText.toLowerCase().includes(q) ? '' : 'none';
       });
     }
   </script>

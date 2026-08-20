@@ -55,8 +55,11 @@ func TestGuardHeavyPath(t *testing.T) {
 		{"build/out/x", false},
 		{".git/objects/x", false},
 		{"venv/lib/x.py", false},
+		{"myproject/tmp/build.log", false},
 		{"internal/app/handler.go", true},
 		{"src/components/Button.tsx", true},
+		{"/tmp/TestRunner123/001/main.go", true},
+		{"/var/tmp/TestRunner123/001/main.go", true},
 	}
 	for _, c := range cases {
 		err := GuardHeavyPath(c.path)

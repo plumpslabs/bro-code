@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -74,10 +75,22 @@ func ProjectJSONCConfigPath() string {
 	return filepath.Join(".brocode", "config.jsonc")
 }
 
+// opencodeDirs returns opencode's config and data directories, following the
+// same platform conventions opencode itself uses: XDG-style ~/.config and
+// ~/.local/share on Unix (including macOS), and %APPDATA% / %LOCALAPPDATA% on
+// Windows. This keeps the import bridge working cross-platform.
+func opencodeDirs() (configDir, dataDir string) {
+	home, _ := os.UserHomeDir()
+	if runtime.GOOS == "windows" {
+		return os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA")
+	}
+	return filepath.Join(home, ".config", "opencode"), filepath.Join(home, ".local", "share", "opencode")
+}
+
 // OpenCodeConfigPath returns the local OpenCode config file path (~/.config/opencode/opencode.jsonc)
 func OpenCodeConfigPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "opencode", "opencode.jsonc")
+	cfg, _ := opencodeDirs()
+	return filepath.Join(cfg, "opencode.jsonc")
 }
 
 // OpenCodeImportEnabled reports whether BroCode may borrow opencode's config
@@ -170,6 +183,11 @@ func mergeBroCodeConfig(cfg AppConfig, path string) AppConfig {
 // into cfg. Only gap-filling imports are applied: a provider is skipped when
 // BroCode already configures a provider with the same ID or pointing at the
 // same base URL (its own config is authoritative).
+//
+// API keys are borrowed from opencode's own credential store
+// (~/.local/share/opencode/auth.json), which is where opencode persists them —
+// never inline in opencode.jsonc. This lets imported providers authenticate
+// without the user re-entering a key ("numpang" opencode's models).
 func mergeOpenCodeProviders(cfg AppConfig, data []byte) AppConfig {
 	cleanJSON := stripJSONComments(string(data))
 	var openCodeCfg struct {
@@ -184,6 +202,8 @@ func mergeOpenCodeProviders(cfg AppConfig, data []byte) AppConfig {
 			} `json:"models"`
 		} `json:"provider"`
 	}
+
+	authKeys := readOpenCodeAuthKeys(OpenCodeAuthPath())
 
 	if json.Unmarshal([]byte(cleanJSON), &openCodeCfg) == nil {
 		for pID, pData := range openCodeCfg.Provider {
@@ -202,16 +222,54 @@ func mergeOpenCodeProviders(cfg AppConfig, data []byte) AppConfig {
 			for mID := range pData.Models {
 				modelIDs = append(modelIDs, mID)
 			}
+			// Prefer an inline key; otherwise borrow opencode's stored key so
+			// the imported provider can actually authenticate.
+			key := pData.Options.APIKey
+			if key == "" {
+				key = authKeys[pID]
+			}
 			cfg.Providers[pID] = CustomProviderConfig{
 				Protocol: "openai-compatible",
 				BaseURL:  pData.Options.BaseURL,
-				APIKey:   pData.Options.APIKey,
+				APIKey:   key,
 				Models:   modelIDs,
 			}
 		}
 	}
 
 	return cfg
+}
+
+// OpenCodeAuthPath returns opencode's credential store path
+// (~/.local/share/opencode/auth.json on Unix, %LOCALAPPDATA%/opencode/auth.json
+// on Windows), keyed by provider ID.
+func OpenCodeAuthPath() string {
+	_, data := opencodeDirs()
+	return filepath.Join(data, "auth.json")
+}
+
+// readOpenCodeAuthKeys parses opencode's auth.json and returns a map of
+// provider ID → API key. A missing or malformed file yields an empty map. The
+// keys are opencode's own credentials; they are only ever reused to call the
+// same upstream gateway and are never logged.
+func readOpenCodeAuthKeys(path string) map[string]string {
+	out := map[string]string{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	var auth map[string]struct {
+		Key string `json:"key"`
+	}
+	if json.Unmarshal([]byte(stripJSONComments(string(data))), &auth) != nil {
+		return out
+	}
+	for id, e := range auth {
+		if e.Key != "" {
+			out[id] = e.Key
+		}
+	}
+	return out
 }
 
 // baseURLAlreadyConfigured reports whether any BroCode-configured provider

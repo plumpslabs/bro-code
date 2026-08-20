@@ -92,7 +92,18 @@ if curl -sLf "$DOWNLOAD_URL" -o "$TMP_DIR/$ARCHIVE_NAME"; then
     else
         echo "⚠️ checksums.txt not published; skipping verification"
     fi
-    mv "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
+    # GoReleaser wraps each archive in a per-build directory
+    # (e.g. brocode_0.1.3_darwin_arm64/brocode), so locate the binary rather
+    # than assuming it sits at the archive root. Handles .exe on Windows too.
+    BIN=$(find "$TMP_DIR" -type f \( -name "$BINARY_NAME" -o -name "${BINARY_NAME}.exe" \) ! -name '*.txt' ! -name '*.md' ! -name 'LICENSE' | head -1)
+    if [ -z "$BIN" ]; then
+        echo "❌ Could not locate the $BINARY_NAME binary inside the archive."
+        exit 1
+    fi
+    mv "$BIN" "$INSTALL_DIR/$BINARY_NAME"
+    if [ "$OS" = "windows" ]; then
+        mv "$INSTALL_DIR/$BINARY_NAME" "$INSTALL_DIR/${BINARY_NAME}.exe" 2>/dev/null || true
+    fi
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
     echo "✅ BroCode successfully installed to $INSTALL_DIR/$BINARY_NAME"
 else

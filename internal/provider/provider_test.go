@@ -1089,3 +1089,50 @@ func TestOpenAIStreamCompleteToolCalls(t *testing.T) {
 		t.Errorf("expected accumulated arguments, got %q", tc.Arguments)
 	}
 }
+
+// TestOpenCodeImportBringsAuthKey proves an imported opencode.jsonc provider
+// borrows its API key from opencode's credential store (auth.json) when the
+// key is not inline in opencode.jsonc — so the imported provider can actually
+// authenticate instead of failing with a 401.
+func TestOpenCodeImportBringsAuthKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	ocDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(ocDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	ocJSON := `{
+		"provider": {
+			"mygw": {
+				"options": {"baseURL": "https://gw.example/v1"},
+				"models": {"m1": {"name": "M1"}}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(ocDir, "opencode.jsonc"), []byte(ocJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// opencode persists the key out-of-band in auth.json, never inline.
+	authDir := filepath.Join(home, ".local", "share", "opencode")
+	if err := os.MkdirAll(authDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	authJSON := `{"mygw": {"type": "api", "key": "oc-secret-key"}}`
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(authJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := LoadConfig()
+	p, ok := cfg.Providers["mygw"]
+	if !ok {
+		t.Fatalf("expected mygw imported, got %+v", cfg.Providers)
+	}
+	if p.BaseURL != "https://gw.example/v1" {
+		t.Errorf("base URL mismatch: %q", p.BaseURL)
+	}
+	if p.APIKey != "oc-secret-key" {
+		t.Errorf("expected imported provider to borrow opencode auth key, got %q", p.APIKey)
+	}
+}

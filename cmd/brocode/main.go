@@ -37,6 +37,12 @@ func main() {
 		os.Exit(0)
 	}
 
+	// `brocode report <id> [--json]` — local-first session benchmark export.
+	if len(os.Args) > 1 && os.Args[1] == "report" {
+		runReportCommand(os.Args[2:])
+		os.Exit(0)
+	}
+
 	flagVersion := flag.Bool("v", false, "Print version and exit")
 	flagVersionLong := flag.Bool("version", false, "Print version and exit")
 	flagProvider := flag.String("provider", "", "LLM provider ID (opencode, deepseek, poolside, anthropic, openai, openrouter, groq, google, ollama)")
@@ -303,6 +309,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Clean exit screen: banner + session ID + resume hint + feedback link,
+	// shown on every normal quit (and on Ctrl+C, since bubbletea returns from
+	// Run on SIGINT). Privacy-safe — no data leaves the machine; the issues
+	// link is offered so the user can attach a `brocode report` export by hand.
+	printExitScreen(sessionID)
+
 	// Session-end memory capture: short sessions that never hit the
 	// compaction threshold still leave their goal + touched files in project
 	// memory. Deterministic and non-blocking (no LLM call) — it runs after
@@ -313,6 +325,27 @@ func main() {
 			_ = mem.CaptureSession(sessionID, events)
 		}
 	}
+}
+
+// printExitScreen renders a compact goodbye after the TUI exits. It reuses the
+// same banner as `brocode -v`, then shows the session ID so the user can resume
+// with `-c` or `--session <id>`, plus the issues link to share a session report.
+// No content is uploaded — the link is offered so the user can attach a
+// `brocode report <id> --json` export by hand (local-first, privacy-safe).
+func printExitScreen(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	fmt.Println()
+	fmt.Println(version.Banner())
+	fmt.Println(version.Info())
+	fmt.Println("────────────────────────────────────────")
+	fmt.Printf("Session: %s\n", sessionID)
+	fmt.Printf("Lanjut sesi:  brocode -c    (atau)  brocode --session %s\n", sessionID)
+	fmt.Println("Bagikan laporan sesi / feedback:")
+	fmt.Printf("  %s\n", "https://github.com/plumpslabs/bro-code/issues")
+	fmt.Printf("  (lampirkan: brocode report %s --json)\n", sessionID)
+	fmt.Println()
 }
 
 // replaySession prints a session's chronological event trajectory as plain

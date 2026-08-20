@@ -1,7 +1,9 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -304,6 +306,21 @@ func (s *Store) CleanupReplayDuplicates(sessionID string) (int, error) {
 	}
 	removed, _ := res.RowsAffected()
 	return int(removed), nil
+}
+
+// GetSession retrieves a single session by ID. It returns an error wrapping
+// sql.ErrNoRows when the session does not exist.
+func (s *Store) GetSession(id string) (*Session, error) {
+	row := s.db.QueryRowContext(context.Background(),
+		`SELECT id, created_at, project_path, status, COALESCE(mode, 'BUILDER') FROM sessions WHERE id = ?`, id)
+	var sess Session
+	if err := row.Scan(&sess.ID, &sess.CreatedAt, &sess.ProjectPath, &sess.Status, &sess.Mode); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("session not found: %s", id)
+		}
+		return nil, err
+	}
+	return &sess, nil
 }
 
 // ListSessions retrieves all sessions from the SQLite database.

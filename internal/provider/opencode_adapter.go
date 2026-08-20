@@ -42,7 +42,7 @@ type OpenCodeAdapter struct {
 // personal/third-party URL), so no opencode installation is required.
 func NewOpenCodeAdapter() *OpenCodeAdapter {
 	return &OpenCodeAdapter{
-		http: NewOpenAIAdapter("https://router.opencode.ai/v1", ""),
+		http: NewOpenAIAdapter("https://opencode.ai/zen/v1", ""),
 	}
 }
 

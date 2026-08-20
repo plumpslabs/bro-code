@@ -112,9 +112,21 @@ func GuardHeavyPath(path string) error {
 }
 
 // hasPathPart reports whether any slash-separated segment of path equals part.
+// Root system temporary directories (/tmp, /var/tmp, /temp) are excluded so that
+// temporary test directories or OS scratch paths are not falsely classified as heavy repo directories.
 func hasPathPart(path, part string) bool {
-	for _, seg := range strings.Split(path, "/") {
+	segs := strings.Split(path, "/")
+	for i, seg := range segs {
 		if seg == part {
+			// Skip OS-level root temp directory (/tmp, /temp, /var/tmp)
+			if part == "tmp" || part == "temp" {
+				if i == 1 && segs[0] == "" { // e.g. /tmp/... or /temp/...
+					continue
+				}
+				if i == 2 && segs[0] == "" && segs[1] == "var" { // e.g. /var/tmp/...
+					continue
+				}
+			}
 			return true
 		}
 	}

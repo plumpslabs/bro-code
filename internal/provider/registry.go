@@ -173,7 +173,7 @@ var BuiltinProviders = []ProviderInfo{
 		Name:           "BroCode Free Gateway",
 		Protocol:       "openai-compatible",
 		APIKeyEnvVar:   "", // No key required
-		DefaultBaseURL: "https://router.opencode.ai/v1",
+		DefaultBaseURL: "https://opencode.ai/zen/v1",
 		DefaultModels:  OpenCodeFreeModels,
 		ContextLimits:  builtinContextLimits["opencode"],
 	},
