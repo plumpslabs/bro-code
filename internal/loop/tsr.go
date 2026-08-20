@@ -13,12 +13,14 @@ const maxTSRAttempts = 4
 // that needs reproduction. Generic words like "error" or "fail" are avoided to prevent
 // false positives on standard feature requests (e.g. "return error on overflow").
 var bugFixSignals = []string{
-	"fix bug", "perbaiki bug", "ada bug", "bug fix", "fix error", "perbaiki error",
+	"bug", "buggy", "fix bug", "perbaiki bug", "ada bug", "bug fix", "fix error", "perbaiki error",
 	"ada error", "dapat error", "terjadi error", "muncul error", "runtime error",
-	"panic:", "stack trace", "traceback", "segfault", "null pointer",
+	"errors on", "error on", "errors when", "error when", "error saat",
+	"failing", "fails", "failed with",
+	"panic", "panics", "stack trace", "traceback", "segfault", "null pointer",
 	"crash", "crashes", "crashing", "freeze", "deadlock",
 	"not working", "doesn't work", "does not work", "isn't working", "is not working",
-	"tidak jalan", "tidak berfungsi", "tidak bekerja", "ngehang", "nggak jalan",
+	"tidak jalan", "tidak berfungsi", "tidak bekerja", "ngehang", "nggak jalan", "gagal",
 	"broken", "regression", "memory leak",
 }
 
