@@ -15,7 +15,7 @@ func TestKnowledgeUpdateAndQuery(t *testing.T) {
 	defer st.Close()
 
 	// Insert knowledge entry for a file.
-	err = st.UpdateKnowledge("file:src/auth/login.go", "go", "package auth\nfunc handleLogin() {}", nil)
+	err = st.UpdateKnowledge("file:src/auth/login.go", "go", "package auth\nfunc handleLogin() {}", nil, nil)
 	if err != nil {
 		t.Fatalf("UpdateKnowledge failed: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestKnowledgeInvalidation(t *testing.T) {
 	defer st.Close()
 
 	// Insert then invalidate. UpdateKnowledge is now synchronous (prune is sync).
-	_ = st.UpdateKnowledge("file:src/auth/login.go", "go", "package auth", nil)
+	_ = st.UpdateKnowledge("file:src/auth/login.go", "go", "package auth", nil, nil)
 	entries, _ := st.QueryKnowledge("login")
 	if len(entries) == 0 {
 		t.Fatal("expected 1 entry before invalidation")
@@ -82,7 +82,7 @@ func TestKnowledgeHardCap(t *testing.T) {
 	// Insert 60 entries — should cap to 50.
 	for i := 0; i < 60; i++ {
 		key := fmt.Sprintf("file:src/file_%d.go", i)
-		_ = st.UpdateKnowledge(key, "go", "package main", nil)
+		_ = st.UpdateKnowledge(key, "go", "package main", nil, nil)
 	}
 
 	// Verify count is ≤50 via direct query.
@@ -105,7 +105,7 @@ func TestKnowledgePruneStale(t *testing.T) {
 	defer st.Close()
 
 	// Insert with low weight and manually age it.
-	_ = st.UpdateKnowledge("file:stale.go", "go", "old content", nil)
+	_ = st.UpdateKnowledge("file:stale.go", "go", "old content", nil, nil)
 	// Manually set weight=0.5 and old last_seen.
 	_, _ = st.db.Exec("UPDATE knowledge SET weight = 0.5, last_seen = ?", "2000-01-01 00:00:00")
 
@@ -132,8 +132,8 @@ func TestKnowledgeReinforceWeight(t *testing.T) {
 	defer st.Close()
 
 	// Same content re-read twice — hash matches → weight boosted.
-	_ = st.UpdateKnowledge("file:src/main.go", "go", "package main\nfunc main(){}", nil)
-	_ = st.UpdateKnowledge("file:src/main.go", "go", "package main\nfunc main(){}", nil)
+	_ = st.UpdateKnowledge("file:src/main.go", "go", "package main\nfunc main(){}", nil, nil)
+	_ = st.UpdateKnowledge("file:src/main.go", "go", "package main\nfunc main(){}", nil, nil)
 
 	var weight float64
 	_ = st.db.QueryRow("SELECT weight FROM knowledge WHERE key = ?", "file:src/main.go").Scan(&weight)
@@ -151,12 +151,12 @@ func TestKnowledgeNewContentInvalidates(t *testing.T) {
 	defer st.Close()
 
 	// Insert with content hash A.
-	_ = st.UpdateKnowledge("file:src/main.go", "go", "package main\nfunc old() {}", nil)
+	_ = st.UpdateKnowledge("file:src/main.go", "go", "package main\nfunc old() {}", nil, nil)
 	var hash1 string
 	_ = st.db.QueryRow("SELECT json_extract(val, '$.hash') FROM knowledge WHERE key = ?", "file:src/main.go").Scan(&hash1)
 
 	// Re-read with different content → hash changes → NEW entry (no weight boost).
-	_ = st.UpdateKnowledge("file:src/main.go", "go", "package main\nfunc new() {}", nil)
+	_ = st.UpdateKnowledge("file:src/main.go", "go", "package main\nfunc new() {}", nil, nil)
 	var hash2 string
 	_ = st.db.QueryRow("SELECT json_extract(val, '$.hash') FROM knowledge WHERE key = ?", "file:src/main.go").Scan(&hash2)
 

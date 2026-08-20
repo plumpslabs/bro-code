@@ -52,6 +52,33 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
+	// SQLite is a single-writer engine. BroCode writes from many concurrent
+	// goroutines (knowledge capture, action notes, reflection, event append)
+	// plus the main turn thread. Without configuration, a writer that cannot
+	// acquire the lock returns SQLITE_BUSY(5) ("database is locked") instead
+	// of waiting — surfacing exactly that error under high write concurrency.
+	// Fix: (a) serialize through one connection, (b) WAL lets readers and one
+	// writer coexist, (c) busy_timeout makes writers retry instead of failing.
+	// MaxOpenConns(1) is REQUIRED so the busy_timeout/WAL pragmas apply to the
+	// single shared connection (a sql.DB pool would otherwise leave some
+	// connections without them). It also means initSchema must never issue a
+	// second statement while a result set is still open on that connection
+	// (see the explicit rows.Close() before the ALTER below).
+	db.SetMaxOpenConns(1)
+	// WAL is best-effort: a few filesystems reject it. The DB still works
+	// without it — just less concurrent — so never block startup over it.
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		fmt.Fprintf(os.Stderr, "brocode: sqlite WAL unavailable: %v\n", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=10000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to configure sqlite busy_timeout: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to configure sqlite synchronous: %w", err)
+	}
+
 	s := &Store{db: db}
 	if err := s.initSchema(); err != nil {
 		db.Close()
@@ -119,7 +146,6 @@ func (s *Store) initSchema() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	hasMode := false
 	for rows.Next() {
 		var cid int
@@ -127,6 +153,7 @@ func (s *Store) initSchema() error {
 		var notnull, pk int
 		var dflt any
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
 			return err
 		}
 		if name == "mode" {
@@ -134,6 +161,14 @@ func (s *Store) initSchema() error {
 			break
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	// Close the result set BEFORE any other statement. With MaxOpenConns(1)
+	// the connection is single-threaded; issuing ALTER while `rows` is still
+	// open would deadlock waiting for the same connection.
+	rows.Close()
 	if !hasMode {
 		if _, err := s.db.Exec("ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT 'BUILDER'"); err != nil {
 			return err

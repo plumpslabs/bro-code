@@ -35,13 +35,38 @@ remains a clean extension point behind the same `Reflect` signature.
 
 Single SQLite DB (the existing session store), three tables:
 
-- `knowledge` — file content hashes + co-read/edit neighbor edges (the graph).
+- `knowledge` — file content hashes + co-read/edit neighbor edges + **whole-file
+  symbol index** (the graph).
 - `notes` — experience / hotfile / fact / belief / decision / gotcha notes with
   provenance + weight + confidence.
 - `events` — session event stream (user/assistant/tool/compaction).
 
 Both `knowledge` and `notes` share one `*store.Store` handle, so they are wired
 with a single `SetKnowledgeStore` call in `internal/ui/app.go`.
+
+## Big-file comprehension (the "5000 lines, only 1000 known" problem)
+
+A naive capture stores only what was *shown* to the model. read_file leans by
+default: files >150 lines return a head preview (or a shrinkwrap/range slice),
+so a 5000-line file would leave 4000 lines permanently "unknown" to the graph.
+
+BroCode solves this without force-cutting and without embeddings:
+
+- **Capture happens inside `ReadFileTool`** on every read (full / shrinkwrap /
+  range). It has the FULL file content in hand, so it indexes **every symbol's
+  line range** (`SymbolRange{Name, Kind, Start, End}`) across the entire file —
+  even when only a span was returned to the model.
+- The index is regex/AST-boundary aligned per language (cAST / RepoCoder style:
+  chunk on function/class boundaries, not arbitrary N lines) and capped at 80
+  symbols/file.
+- **Recall is position-aware (coarse-to-fine):** a query like "omega handler"
+  matches the `omega` symbol and `FormatKnowledgeHints` surfaces it *first* with
+  its line span (`omega (L4953-4953)`), so the agent jumps straight there with
+  `read_file(start_line/end_line)` instead of re-reading the whole file.
+
+Net effect: the agent always knows where everything is in a huge file, the graph
+stays tiny (hashes + tags + ≤80 line spans, no file content), and there is zero
+added read latency (capture is async + recovered).
 
 ## Benchmark (thesis validation)
 
@@ -58,7 +83,9 @@ duplicate-tolerant (UPSERT-by-(kind,subject) reinforces weight).
 ## Files
 
 - `internal/store/notes.go` — note store (Record / Recall / QueryForPrompt / Prune)
-- `internal/store/db.go` — `notes` table schema
+- `internal/store/symbols.go` — whole-file structural index (`SymbolRange`: name →
+  line span), language-aware regex extraction, bounded to 80 symbols/file
+- `internal/store/db.go` — `notes` + `knowledge` (with `symbols`) table schema
 - `internal/tool/registry.go` — centralized capture hooks (catch-all notes, lsp invalidation, turn-file neighbor edges)
 - `internal/tool/context_recall.go` — agent-facing recall tool
 - `internal/tool/memory.go` — cross-session facts (memory.md) — complementary, not replaced

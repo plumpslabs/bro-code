@@ -224,6 +224,9 @@ func (r *Registry) SetKnowledgeStore(st *store.Store) {
 	if crt, ok := r.tools["context_recall"].(*ContextRecallTool); ok {
 		crt.Store = st
 	}
+	if rft, ok := r.tools["read_file"].(*ReadFileTool); ok {
+		rft.knowledgeStore = st
+	}
 }
 
 // SetSandbox applies a granular per-tool permission policy (from
@@ -555,24 +558,10 @@ func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (result s
 		go r.recordActionNote(ctx, name, argsJSON, result, err)
 	}
 
-	// Async knowledge update after read_file succeeds (full-file reads only).
-	if r.knowledgeStore != nil && name == "read_file" && err == nil && result != "" {
-		path := extractPathFromArgs(argsJSON)
-		if path != "" {
-			resolved := resolvePath(path)
-			// Check this was a full-file read (no range/shrinkwrap).
-			if !hasRangeOrShrinkwrap(argsJSON) && !isGuardBlocked(result) {
-				go func(p, content string) {
-					defer func() { recover() }() // safety: never leak on knowledge update panic
-					lang := detectFileLanguage(p)
-					// Link to other files touched this turn (co-occurrence
-					// edges) so the graph reflects real working relationships.
-					neighbors := neighborsFromTurn(ctx, p)
-					_ = r.knowledgeStore.UpdateKnowledge(knowledgeKey(p), lang, content, neighbors)
-				}(resolved, result)
-			}
-		}
-	}
+	// Note: read_file's Smart Context Graph capture now lives inside
+	// ReadFileTool.Execute (it has the FULL file content there, so it can index
+	// every symbol's line range even when only a span/shrinkwrap/head is shown
+	// to the model). Writing tools below still invalidate on mutation.
 
 	return result, err
 }
@@ -634,28 +623,6 @@ func (r *Registry) recordActionNote(ctx context.Context, name, argsJSON, result 
 		tags = append(tags, p)
 	}
 	_ = r.knowledgeStore.RecordNote(kind, resolved, outcome, provenance, tags)
-}
-
-// hasRangeOrShrinkwrap checks if the read_file args specify start_line/end_line
-// or shrinkwrap: true — in those cases the content isn't a full-file read.
-func hasRangeOrShrinkwrap(argsJSON string) bool {
-	var args struct {
-		StartLine  int    `json:"start_line"`
-		EndLine    int    `json:"end_line"`
-		Shrinkwrap bool   `json:"shrinkwrap"`
-	}
-	if json.Unmarshal([]byte(argsJSON), &args) == nil {
-		return args.StartLine > 0 || args.EndLine > 0 || args.Shrinkwrap
-	}
-	return false
-}
-
-// isGuardBlocked checks if the result contains a GuardFile error message
-// (secrets/heavy dirs blocked). We still update knowledge for those so the
-// hash is tracked — the agent just won't get content, but the file is
-// "known". Actually, for safety on large files we skip.
-func isGuardBlocked(result string) bool {
-	return strings.Contains(result, "error") && strings.Contains(result, "guard")
 }
 
 // knowledgeKey normalizes a file path into a knowledge table key.
@@ -752,7 +719,12 @@ func (r *Registry) SubRegistry() *Registry {
 // ---------------- Built-in Tools ----------------
 
 // ReadFileTool
-type ReadFileTool struct{}
+type ReadFileTool struct {
+	// knowledgeStore is wired by SetKnowledgeStore so every read captures a
+	// whole-file structural index into the Smart Context Graph even when only
+	// a span/shrinkwrap/head is returned to the model. Nil disables capture.
+	knowledgeStore *store.Store
+}
 
 func (t *ReadFileTool) Name() string { return "read_file" }
 func (t *ReadFileTool) Description() string {
@@ -805,6 +777,25 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	}
 
 	lines := strings.Split(string(data), "\n")
+
+	// Whole-file structural capture for the Smart Context Graph. This read may
+	// return only a span / shrinkwrap / head preview, but we index the ENTIRE
+	// file's symbols (line ranges) and store them — so future sessions know
+	// every symbol's position and never lose context to a force-cut. Runs
+	// async with recover(): zero added read latency. extractSymbols is run
+	// inside UpdateKnowledge from the full content, so positions cover all
+	// lines even when the model only ever saw a slice.
+	if t.knowledgeStore != nil {
+		resolved := args.Path
+		lang := detectFileLanguage(resolved)
+		full := string(data)
+		go func(p, content string) {
+			defer func() { recover() }()
+			recordTurnFile(ctx, p)
+			neighbors := neighborsFromTurn(ctx, p)
+			_ = t.knowledgeStore.UpdateKnowledge(knowledgeKey(p), lang, content, neighbors, nil)
+		}(resolved, full)
+	}
 
 	// Range read (start_line/end_line): stream ONLY the requested span from disk
 	// instead of loading the whole file into memory (P3). Essential for huge files

@@ -18,6 +18,7 @@ type KnowledgeEntry struct {
 	Language  string           `json:"lang"`      // detected stack ("go", "ts", "python", ...)
 	Tags      []string         `json:"tags"`      // extracted keywords (func names, imports)
 	Neighbors []KnowledgeLink  `json:"neighbors"` // files frequently co-read (max 3)
+	Symbols   []SymbolRange    `json:"symbols,omitempty"` // whole-file structural index (name→line span)
 }
 
 // KnowledgeLink is a weighted edge to another file.
@@ -58,8 +59,9 @@ const (
 
 // UpdateKnowledge stores a knowledge entry for a file. Called asynchronously
 // after read_file succeeds. If the entry already exists with the same hash,
-// only `weight` is incremented (reinforcement learning signal).
-func (s *Store) UpdateKnowledge(key, language string, content string, neighbors []KnowledgeLink) error {
+// only `weight` is incremented (reinforcement learning signal). `symbols` is
+// the whole-file structural index (optional; extracted from content when nil).
+func (s *Store) UpdateKnowledge(key, language string, content string, neighbors []KnowledgeLink, symbols []SymbolRange) error {
 	if s == nil || key == "" || content == "" {
 		return nil
 	}
@@ -69,12 +71,19 @@ func (s *Store) UpdateKnowledge(key, language string, content string, neighbors 
 	if len(neighbors) > KnowledgeMaxNeighbors {
 		neighbors = neighbors[:KnowledgeMaxNeighbors]
 	}
+	if symbols == nil {
+		symbols = extractSymbols(content, language)
+	}
+	if len(symbols) > knowledgeMaxSymbols {
+		symbols = symbols[:knowledgeMaxSymbols]
+	}
 
 	entry := KnowledgeEntry{
 		Hash:      hash,
 		Language:  language,
 		Tags:      tags,
 		Neighbors: neighbors,
+		Symbols:   symbols,
 	}
 
 	val, err := json.Marshal(entry)
@@ -84,7 +93,7 @@ func (s *Store) UpdateKnowledge(key, language string, content string, neighbors 
 
 	// UPSERT: if existing entry has same hash, just bump weight.
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.Exec(`
+	const upsert = `
 		INSERT INTO knowledge (key, val, weight, created_at, last_seen)
 		VALUES (?, ?, 1.5, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET
@@ -95,7 +104,20 @@ func (s *Store) UpdateKnowledge(key, language string, content string, neighbors 
 				THEN knowledge.weight + 0.3
 				ELSE 1.5 END,
 			last_seen = ?
-	`, key, string(val), now, now, now)
+	`
+	// Retry on SQLITE_BUSY: the connection is shared and serialized, but a
+	// worst-case contention window still needs a bounded retry rather than a
+	// hard error surfaced to the model.
+	for attempt := 0; attempt < 3; attempt++ {
+		_, err = s.db.Exec(upsert, key, string(val), now, now, now)
+		if err == nil {
+			break
+		}
+		if !isSQLiteBusy(err) {
+			return err
+		}
+		sleepBackoff(attempt)
+	}
 	if err != nil {
 		return err
 	}
@@ -149,6 +171,17 @@ func (s *Store) QueryKnowledge(prompt string) ([]KnowledgeEntryRow, error) {
 			for _, kw := range keywords {
 				if strings.Contains(strings.ToLower(tag), kw) {
 					relevance += 1.0
+					break
+				}
+			}
+		}
+		// Boost on symbol-name matches: this is what makes a query like "login
+		// handler" resolve to handleLogin(L42-88) inside a 5000-line file,
+		// even though the model never read the whole file.
+		for _, sym := range entry.Symbols {
+			for _, kw := range keywords {
+				if strings.Contains(strings.ToLower(sym.Name), kw) {
+					relevance += 1.5
 					break
 				}
 			}
@@ -332,18 +365,57 @@ func sortKnowledge(entries []KnowledgeEntryRow) {
 }
 
 // FormatKnowledgeHints renders knowledge entries into a compact system-prompt
-// block for injection by the engine.
-func FormatKnowledgeHints(entries []KnowledgeEntryRow) string {
+// block for injection by the engine. For each relevant file it also lists the
+// matched symbols with their line spans, so the model knows exactly where to
+// jump (read_file(start_line/end_line)) instead of re-reading the whole file.
+// `query` (the current prompt) is used to prioritize the symbols whose names
+// match — so a query like "omega handler" surfaces omega(L4953-4953) first,
+// even inside a 5000-line file whose first symbols are unrelated.
+func FormatKnowledgeHints(entries []KnowledgeEntryRow, query string) string {
 	if len(entries) == 0 {
 		return ""
+	}
+	kws := strings.Fields(strings.ToLower(query))
+	rankSym := func(s SymbolRange) bool {
+		if len(kws) == 0 {
+			return false
+		}
+		for _, kw := range kws {
+			if strings.Contains(strings.ToLower(s.Name), kw) {
+				return true
+			}
+		}
+		return false
 	}
 	var sb strings.Builder
 	sb.WriteString("🧠 **SMART CONTEXT** — Previously analyzed files relevant to your request:\n")
 	for _, e := range entries {
 		path := strings.TrimPrefix(e.Key, knowledgeKeyPrefix)
-		sb.WriteString(fmt.Sprintf("- `%s` (%s, last seen: %s) — %d relationships, weight %.1f\n",
-			path, e.Entry.Language, e.SeenAt.Format("2006-01-02"), len(e.Entry.Neighbors), e.Weight))
+		sb.WriteString(fmt.Sprintf("- `%s` (%s, %d symbols, last seen: %s, weight %.1f)\n",
+			path, e.Entry.Language, len(e.Entry.Symbols), e.SeenAt.Format("2006-01-02"), e.Weight))
+		// Surface up to 6 symbol anchors, matched symbols first (then a
+		// structural sample), so the relevant region is always visible.
+		matched := e.Entry.Symbols[:0:0]
+		rest := e.Entry.Symbols[:0:0]
+		for _, sym := range e.Entry.Symbols {
+			if rankSym(sym) {
+				matched = append(matched, sym)
+			} else {
+				rest = append(rest, sym)
+			}
+		}
+		shown := 0
+		for _, sym := range append(matched, rest...) {
+			sb.WriteString(fmt.Sprintf("    • %s `%s` (L%d-%d)\n", sym.Kind, sym.Name, sym.Start, sym.End))
+			shown++
+			if shown >= 6 {
+				if len(e.Entry.Symbols) > 6 {
+					sb.WriteString(fmt.Sprintf("    • … +%d more symbols (use code_locate or read_file range)\n", len(e.Entry.Symbols)-6))
+				}
+				break
+			}
+		}
 	}
-	sb.WriteString("→ Skip re-reading unchanged files; focus on new logic.\n")
+	sb.WriteString("→ Jump straight to the relevant symbol with read_file(start_line/end_line); skip re-reading unchanged files.\n")
 	return sb.String()
 }

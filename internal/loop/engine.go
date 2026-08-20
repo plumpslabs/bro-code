@@ -2245,7 +2245,7 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 	if e.knowledge != nil && iteration == 1 {
 		hints, err := e.knowledge.QueryKnowledge(in.UserPrompt)
 		if err == nil && len(hints) > 0 {
-			in.KnowledgeHints = store.FormatKnowledgeHints(hints)
+			in.KnowledgeHints = store.FormatKnowledgeHints(hints, in.UserPrompt)
 			if onUpdate != nil {
 				onUpdate(e.state, "🧠 Smart Context: Recalled previously analyzed files")
 			}

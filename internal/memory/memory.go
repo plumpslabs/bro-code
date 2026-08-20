@@ -116,7 +116,18 @@ func (s *Store) Path() string {
 // load reads the memory file and parses it into sectioned facts. It tolerates
 // duplicate section headers (each `## ` header appends rather than resets its
 // section) so append-only writes that repeat a header stay parse-correct.
+//
+// Callers already holding s.mu must use loadUnlocked(); everyone else uses
+// load(), which locks. Without this, concurrent warm-start reads race the
+// PruneStale/Retain mutations of s.facts (reported DATA RACE under -race).
 func (s *Store) load() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadUnlocked()
+}
+
+// loadUnlocked parses the memory file into s.facts. Callers MUST hold s.mu.
+func (s *Store) loadUnlocked() {
 	s.facts = map[string][]string{}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -196,7 +207,7 @@ func (s *Store) PruneStale() int {
 	// loaded may already be true if Retain ran this session; reuse the cached
 	// facts so pruning stays consistent with appended writes.
 	if !s.loaded {
-		s.load()
+		s.loadUnlocked()
 		s.loaded = true
 	}
 	pruned := 0
@@ -413,7 +424,7 @@ func (s *Store) Retain(section, fact string) (bool, error) {
 	// via append-only writes. Avoids a full re-read + re-parse on every Retain
 	// (the hot path when the agent records many facts in one turn).
 	if !s.loaded {
-		s.load()
+		s.loadUnlocked()
 		s.loaded = true
 	}
 	norm := normalize(fact)
