@@ -322,6 +322,7 @@ func main() {
 			mem := memory.NewStore(cwd)
 			_ = mem.CaptureSession(sessionID, events)
 		}
+		_, _ = bcontext.Reflect(st)
 	}
 }
 
