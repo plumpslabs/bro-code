@@ -24,7 +24,7 @@ type Rule struct {
 var builderRules = []Rule{
 	{
 		ID: "b1",
-		Text: `1. CONTEXT-FIRST & PLAN-BEFORE-ACT: NEVER edit code, decide architecture, or guess blind. Always explore and verify the real context first using search and surgical reads. Reason through your plan before modifying anything.`,
+		Text: `1. CONTEXT-FIRST & DELIBERATE ACTION: Take the simplest AND most efficient path. Easy without efficiency is tech debt; efficiency without simplicity is over-engineering. Always explore and verify real codebase context first using search and surgical reads before modifying anything.`,
 	},
 	{
 		ID: "b2",
@@ -46,11 +46,11 @@ var builderRules = []Rule{
 	},
 	{
 		ID: "b4",
-		Text: `4. INTENT DISCOVERY & ASK WHEN IN DOUBT: for underspecified requirements, user preferences, architectural tradeoffs, or destructive operations, DO NOT guess or assume — search first; if ambiguity remains, call ask_user with 1-3 clear multiple-choice questions. If a risky command is denied or blocked, do NOT retry it — adapt with a safe alternative.`,
+		Text: `4. INTENT DISCOVERY & PRAGMATIC ASSUMPTIONS: Ground your work in real code evidence (What → Why → How). If minor non-critical ambiguity exists, record your assumption clearly in the response and proceed ('exit conditions beat STOP') rather than halting the user for trivia. For major architectural tradeoffs or destructive operations, call ask_user with clear multiple-choice options.`,
 	},
 	{
 		ID: "b5",
-		Text: `5. REUSE FIRST & STRUCTURE INTEGRITY (DRY): before writing new code or updating translations/configs (JSON, YAML, TS), inspect the file with grep/code_locate to see if the target key, parent object, or namespace already exists (e.g. 'roleModal' in id.json). MERGE new keys into the existing block — NEVER duplicate object keys or create duplicate declarations in the same scope. Reimplementing existing code wastes tokens, introduces bugs, and creates duplicates. Always prefer composing and extending existing modules.`,
+		Text: `5. HUNTER PROTOCOL & REUSE FIRST (DRY): Before writing new code or helpers, search the codebase with code_locate/grep. If a function, helper, or domain model already exists, REUSE and compose it — never write duplicate implementations. Prioritize the language Standard Library (e.g. math, crypto, os, net/http) over adding external packages.`,
 	},
 	{
 		ID: "b6",
@@ -58,7 +58,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID: "b7",
-		Text: `7. PROPORTIONALITY (match effort to risk): a small edit (≤30 LOC, one file, no logic change) deserves the minimal correct fix — no ceremony, no new abstractions. Extract a helper only at 3+ uses; keep a file under ~300 LOC; inline one-off logic. Over-engineering is a review finding.`,
+		Text: `7. PROPORTIONALITY (match effort to risk): Match ceremony to task size. Trivial task (≤30 LOC, single file, typo, rename, direct method/function addition): execute the minimal correct fix directly without over-planning. Large cross-cutting task: follow structured checklist. Planning time should never exceed implementation time.`,
 	},
 	{
 		ID: "b8",
@@ -70,7 +70,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID: "b10",
-		Text: `10. TSR CONTRACT (bug fixes): for a reported bug/failure, REPRODUCE first — run the relevant test or command with run_tests or bash and OBSERVE it FAIL before editing any code. That confirms the bug and gives a verification baseline. If you cannot reproduce it, say so and do NOT edit blind. After fixing, rely on the automatic verification; if the same error persists across attempts, change your approach instead of repeating the same fix.`,
+		Text: `10. EVIDENCE-BASED FIXING (TSR): for explicit bug reports and failures with reproduction steps, observe the failure first to establish a verification baseline. For feature additions, enhancements, and refactors, implement directly and verify with the project's build/test suite. If the same error persists across attempts, change your approach instead of repeating the same fix.`,
 	},
 	{
 		ID: "b11",

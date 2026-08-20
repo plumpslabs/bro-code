@@ -9,18 +9,17 @@ import (
 // giving up gracefully (the typed revision contract's max_attempts).
 const maxTSRAttempts = 4
 
-// bugFixSignals are lowercase substrings that suggest the task is a bug fix —
-// something is failing and needs to be made to work. Deliberately
-// conservative: arming the REPRODUCE gate on a pure feature request would nag
-// the model into a pointless reproduce.
+// bugFixSignals are targeted substrings indicating an explicit bug report or failure
+// that needs reproduction. Generic words like "error" or "fail" are avoided to prevent
+// false positives on standard feature requests (e.g. "return error on overflow").
 var bugFixSignals = []string{
-	"error", "exception", "panic", "traceback", "stack trace",
-	"fail", "failed", "failing", "failure", "bug", "buggy", "broken",
-	"crash", "crashes", "crashing", "segfault", "null pointer",
+	"fix bug", "perbaiki bug", "ada bug", "bug fix", "fix error", "perbaiki error",
+	"ada error", "dapat error", "terjadi error", "muncul error", "runtime error",
+	"panic:", "stack trace", "traceback", "segfault", "null pointer",
+	"crash", "crashes", "crashing", "freeze", "deadlock",
 	"not working", "doesn't work", "does not work", "isn't working", "is not working",
-	"gagal", "error", "tidak jalan", "tidak berfungsi", "tidak bekerja", "ngehang", "nggak jalan",
-	"regression", "hang", "hangs", "freeze", "freezes", "deadlock", "race",
-	"leak", "leaks", "panic:",
+	"tidak jalan", "tidak berfungsi", "tidak bekerja", "ngehang", "nggak jalan",
+	"broken", "regression", "memory leak",
 }
 
 // providedReproSignals are patterns that indicate the user already supplied a
