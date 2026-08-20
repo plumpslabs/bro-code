@@ -275,9 +275,6 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 	var cmd string
 	switch tc.Name {
 	case "write_file":
-		// Only CREATING a new file is gated — that is the critical action.
-		// Overwriting an existing file is normal edit work (shown in the
-		// change summary, reviewed via review_changes, but not gated per write).
 		var args struct {
 			Path string `json:"path"`
 		}
@@ -285,10 +282,10 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 			return false, "invalid write_file arguments: " + err.Error(), nil
 		}
 		args.Path = resolvePath(args.Path)
-		if _, err := os.Stat(args.Path); err == nil {
-			return true, "", nil // existing file → normal edit
+		if err := GuardFile(args.Path); err != nil {
+			return false, err.Error(), nil
 		}
-		return r.gateFileAction(ctx, "create_file", args.Path)
+		return true, "", nil
 	case "delete_file":
 		var args struct {
 			Path string `json:"path"`

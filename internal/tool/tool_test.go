@@ -805,40 +805,34 @@ func TestGateFileActionCreateAndDelete(t *testing.T) {
 
 	reg := NewRegistry()
 
-	// Overwriting an existing file is NOT gated (normal edit work).
-	approved, _, err := reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+existing+`","content":"v2"}`))
+	// write_file in the workspace proceeds autonomously without gating.
+	approved, _, err := reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+newPath+`","content":"v"}`))
 	if err != nil || !approved {
-		t.Fatalf("overwrite must not be gated: approved=%v err=%v", approved, err)
+		t.Fatalf("write_file must proceed autonomously: approved=%v err=%v", approved, err)
 	}
 
-	// Creating a new file without a confirm handler (headless) proceeds.
-	approved, _, err = reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+newPath+`","content":"v"}`))
-	if err != nil || !approved {
-		t.Fatalf("headless create must proceed: approved=%v err=%v", approved, err)
-	}
-
-	// With a handler: deny (discard) blocks the create.
+	// delete_file with handler: deny (discard) blocks the delete.
 	reg.SetFileActionHandler(func(_ context.Context, req FileActionRequest) (FileActionDecision, error) {
-		if req.Kind != "create_file" {
-			t.Errorf("expected create_file request, got %q", req.Kind)
+		if req.Kind != "delete_file" {
+			t.Errorf("expected delete_file request, got %q", req.Kind)
 		}
 		return FileActionDecision{Allow: false}, nil
 	})
-	approved, reason, err := reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+newPath+`","content":"v"}`))
+	approved, reason, err := reg.GateAction(context.Background(), providerToolCall("delete_file", `{"path":"`+existing+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if approved || !strings.Contains(reason, "discarded") {
-		t.Fatalf("create must be discardable: approved=%v reason=%q", approved, reason)
+		t.Fatalf("delete must be discardable: approved=%v reason=%q", approved, reason)
 	}
 
-	// Always allow persists for the session.
+	// Always allow persists for the session on delete.
 	reg.SetFileActionHandler(func(_ context.Context, _ FileActionRequest) (FileActionDecision, error) {
 		return FileActionDecision{Allow: true, Always: true}, nil
 	})
-	approved, _, err = reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+newPath+`","content":"v"}`))
+	approved, _, err = reg.GateAction(context.Background(), providerToolCall("delete_file", `{"path":"`+existing+`"}`))
 	if err != nil || !approved {
-		t.Fatalf("always-allow create must proceed: approved=%v err=%v", approved, err)
+		t.Fatalf("always-allow delete must proceed: approved=%v err=%v", approved, err)
 	}
 	// Second call: handler must NOT be invoked again (always-allow remembered).
 	calls := 0
@@ -846,7 +840,7 @@ func TestGateFileActionCreateAndDelete(t *testing.T) {
 		calls++
 		return FileActionDecision{Allow: false}, nil
 	})
-	approved, _, err = reg.GateAction(context.Background(), providerToolCall("write_file", `{"path":"`+newPath+`","content":"v"}`))
+	approved, _, err = reg.GateAction(context.Background(), providerToolCall("delete_file", `{"path":"`+existing+`"}`))
 	if err != nil || !approved {
 		t.Fatalf("always-allow must be remembered: approved=%v err=%v", approved, err)
 	}
