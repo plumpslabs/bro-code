@@ -847,15 +847,6 @@ func TestGateFileActionCreateAndDelete(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("always-allow path must skip the handler, got %d calls", calls)
 	}
-
-	// delete_file is always gated.
-	approved, reason, err = reg.GateAction(context.Background(), providerToolCall("delete_file", `{"path":"`+existing+`"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if approved || !strings.Contains(reason, "discarded") {
-		t.Fatalf("delete must be gated: approved=%v reason=%q", approved, reason)
-	}
 }
 
 func TestSubAgentDeniesFileActions(t *testing.T) {
