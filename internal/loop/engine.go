@@ -1931,12 +1931,21 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					// Track files the model edited so the native convention checker
 					// can review them (debug leftovers, markers, type safety,
 					// duplicate symbols) before the turn is declared done.
-				if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" {
-					if p := extractToolPath(pending[i].tc.Arguments); p != "" {
-						e.editedFiles = append(e.editedFiles, p)
-						// Keep the session symbol index current after real edits.
-						if e.onFileEdited != nil && err == nil {
-							e.onFileEdited(p)
+				if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" || pending[i].tc.Name == "delete_file" || pending[i].tc.Name == "lsp_fix" || pending[i].tc.Name == "lsp_rename" || pending[i].tc.Name == "run_tests" {
+					// Active mutation or verification is tangible task progress:
+					// reset the read-only exploration stall counters so complex refactoring
+					// tasks across multiple files have a full runway to complete.
+					e.toolOnlyRounds = 0
+					e.toolReminderSent = false
+					e.toolReminder2Sent = false
+					e.exploredStalls = 0
+					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" {
+						if p := extractToolPath(pending[i].tc.Arguments); p != "" {
+							e.editedFiles = append(e.editedFiles, p)
+							// Keep the session symbol index current after real edits.
+							if e.onFileEdited != nil && err == nil {
+								e.onFileEdited(p)
+							}
 						}
 					}
 				}
