@@ -3964,13 +3964,22 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 			if width > 0 {
 				diffBarStyle = diffBarStyle.Width(width)
 			}
-			labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
-			if filesExpanded {
-				return diffBarStyle.Render(labelStyle.Render("DIFF") + "  " + path + "\n" + formatDiffLines(diff))
-			}
 			add, del := diffStat(diff)
+			actionLabel := "DIFF"
+			labelColor := "178" // gold for modified
+			if del == 0 && add > 0 && !strings.Contains(diff, "@@ ") {
+				actionLabel = "CREATE"
+				labelColor = "42" // green for newly created
+			} else if add == 0 && del > 0 && !strings.Contains(diff, "@@ ") {
+				actionLabel = "DELETE"
+				labelColor = "196" // red for deleted
+			}
+			labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(labelColor)).Bold(true)
+			if filesExpanded {
+				return diffBarStyle.Render(labelStyle.Render(actionLabel) + "  " + path + "\n" + formatDiffLines(diff))
+			}
 			statStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-			return diffBarStyle.Render(labelStyle.Render("DIFF") + "  " + path + "  " + statStyle.Render(fmt.Sprintf("(+%d −%d) · [press Ctrl+F for diff]", add, del)))
+			return diffBarStyle.Render(labelStyle.Render(actionLabel) + "  " + path + "  " + statStyle.Render(fmt.Sprintf("(+%d −%d) · [press Ctrl+F for diff]", add, del)))
 		}
 
 
