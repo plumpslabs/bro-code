@@ -1037,6 +1037,15 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.verifyErrorStreak = 0
 	e.lastVerifyErr = ""
 	e.repairSucceeded = false
+	// Reset per-turn tool budget, repetition, and exploration counters
+	e.toolOnlyRounds = 0
+	e.toolReminderSent = false
+	e.toolReminder2Sent = false
+	e.exploredStalls = 0
+	e.lastExploredTarget = ""
+	e.lastToolCall = provider.ToolCall{}
+	e.lastToolCallRepeats = 0
+	e.explored = nil
 	// Reset the per-turn cost budget counter.
 	e.costUSD = 0
 	e.turnTokens = 0
