@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/plumpslabs/bro-code/internal/memory"
 	"github.com/plumpslabs/bro-code/internal/provider"
@@ -890,5 +891,36 @@ func TestGitToolCommitGated(t *testing.T) {
 	approved, _, err = r.GateAction(context.Background(), providerToolCall("git", `{"action":"commit","message":"fix"}`))
 	if err != nil || !approved {
 		t.Fatalf("git commit must be allowable: approved=%v err=%v", approved, err)
+	}
+}
+
+func TestWriteFileAutonomousAndInstant(t *testing.T) {
+	r := NewRegistry()
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "perf_test.go")
+
+	start := time.Now()
+	// 1. Gate check: must be immediate (0 modal waiting)
+	approved, reason, err := r.GateAction(context.Background(), providerToolCall("write_file", fmt.Sprintf(`{"path":%q,"content":"package perf"}`, target)))
+	if err != nil || !approved {
+		t.Fatalf("write_file gate failed: approved=%v reason=%s err=%v", approved, reason, err)
+	}
+	gateDuration := time.Since(start)
+	if gateDuration > 5*time.Millisecond {
+		t.Fatalf("write_file gate took too long: %v (expected < 5ms)", gateDuration)
+	}
+
+	// 2. Execution: must write to disk in < 5ms
+	start = time.Now()
+	res, err := r.Execute(context.Background(), "write_file", fmt.Sprintf(`{"path":%q,"content":"package perf\n\nfunc Run() {}"}`, target))
+	if err != nil {
+		t.Fatalf("write_file execution failed: %v", err)
+	}
+	execDuration := time.Since(start)
+	if execDuration > 10*time.Millisecond {
+		t.Fatalf("write_file execution took too long: %v (expected < 10ms)", execDuration)
+	}
+	if !strings.Contains(res, "Successfully wrote") {
+		t.Fatalf("unexpected write_file result: %s", res)
 	}
 }
