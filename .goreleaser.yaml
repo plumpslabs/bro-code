@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 version: 2
 
 project_name: brocode
@@ -13,38 +14,42 @@ builds:
     env:
       - CGO_ENABLED=0
     goos:
-      - darwin
       - linux
+      - darwin
       - windows
       - freebsd
     goarch:
       - amd64
       - arm64
     ldflags:
-      - -s -w
-      - -X github.com/plumpslabs/bro-code/internal/version.Version={{.Version}}
-      - -X github.com/plumpslabs/bro-code/internal/version.Commit={{.FullCommit}}
-      - -X github.com/plumpslabs/bro-code/internal/version.Date={{.Date}}
+      - -s -w -X github.com/plumpslabs/bro-code/internal/version.Version={{.Version}}
 
 archives:
-  - id: default
-    builds:
-      - brocode
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format: tar.gz
     format_overrides:
       - goos: windows
-        format: zip
-    files:
-      - README.md
-      - LICENSE
+        formats:
+          - zip
 
 checksum:
-  name_template: "checksums.txt"
+  name_template: 'checksums.txt'
 
 changelog:
   sort: asc
   filters:
     exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  github:
+    owner: plumpslabs
+    name: bro-code
+  mode: replace
+  replace_existing_artifacts: true
+  replace_existing_draft: true
+  draft: false
+  prerelease: auto
