@@ -595,6 +595,28 @@ func iterationsForComplexity(t complexityTier) int {
 	}
 }
 
+// explorationBudget returns the adaptive warn, final warn, and absolute caps
+// based on the active mode (PLANNER/MINER vs BUILDER) and prompt complexity.
+func (e *Engine) explorationBudget() (warnRounds, finalWarnRounds, maxAbsolute, exploredCap int) {
+	mode := e.Mode()
+	prompt := e.context.LastUserPrompt()
+	tier := classifyTaskComplexity(prompt)
+
+	if mode == "PLANNER" || mode == "MINER" {
+		// Deep research & architectural discovery modes need wider runway.
+		if tier == tierComplex {
+			return 14, 18, 24, 25
+		}
+		return 10, 14, 20, 18
+	}
+
+	// BUILDER mode: keep standard coding turns snappy and focused on shipping edits.
+	if tier == tierComplex {
+		return 10, 14, 18, 18
+	}
+	return toolWarnRounds, toolFinalWarnRounds, maxToolOnlyAbsolute, exploredWarnCap
+}
+
 func CalculateAdaptiveToolBudget(prompt string, mode string) int {
 	base := 16
 	if mode == "MINER" || mode == "PLANNER" {
@@ -1298,7 +1320,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// model (no new files for several rounds) is cut off. The reminders
 		// never demand a fabricated answer — the model may honestly report
 		// what it knows and what context is still missing.
-		if e.toolOnlyRounds >= toolWarnRounds && !e.toolReminderSent {
+		warnRounds, finalWarnRounds, maxAbsolute, exploredCap := e.explorationBudget()
+
+		if e.toolOnlyRounds >= warnRounds && !e.toolReminderSent {
 			e.toolReminderSent = true
 			// The reminder must NOT forbid tools absolutely: a model that
 			// knows exactly which one more read (a specific line range of a
@@ -1312,7 +1336,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 			continue
 		}
-		if e.toolOnlyRounds >= toolFinalWarnRounds && !e.toolReminder2Sent {
+		if e.toolOnlyRounds >= finalWarnRounds && !e.toolReminder2Sent {
 			e.toolReminder2Sent = true
 			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. You may make AT MOST ONE more tool call — only a specific read you already know you need (a file or line range) — and then you MUST write your answer in the next response. No further exploration, no re-reading. If you cannot fully answer, give a partial answer with what you know and state clearly what context is still missing — never fabricate." + e.exploredSummary())
 			if onUpdate != nil {
@@ -1324,7 +1348,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// DISTINCT files yet still hasn't answered — continued reading is now
 		// over-exploration, not progress (it was resetting the stall counter by
 		// touching a new file each round).
-		if !e.toolReminder2Sent && e.toolOnlyRounds >= toolWarnRounds && len(e.explored) >= exploredWarnCap {
+		if !e.toolReminder2Sent && e.toolOnlyRounds >= warnRounds && len(e.explored) >= exploredCap {
 			e.toolReminder2Sent = true
 			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: You have already examined " + fmt.Sprintf("%d", len(e.explored)) + " distinct files without answering. Make AT MOST ONE more targeted read if you truly need it, then write your answer. Do NOT keep opening new files." + e.exploredSummary())
 			if onUpdate != nil {
@@ -1362,8 +1386,8 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// Hard stop after the FINAL WARNING: the model was already told "one more
 		// read, then answer" — if it is still only calling tools after the grace
 		// rounds, force synthesis instead of letting it read in circles.
-		toolBudgetExhausted := e.toolOnlyRounds >= adaptiveCap && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxToolOnlyAbsolute)
-		if e.toolReminder2Sent && e.toolOnlyRounds >= toolFinalWarnRounds+finalWarnHardStop {
+		toolBudgetExhausted := e.toolOnlyRounds >= adaptiveCap && (e.exploredStalls >= 4 || e.toolOnlyRounds >= maxAbsolute)
+		if e.toolReminder2Sent && e.toolOnlyRounds >= finalWarnRounds+finalWarnHardStop {
 			toolBudgetExhausted = true
 		}
 		if toolBudgetExhausted {
