@@ -1,6 +1,6 @@
 # BroCode Architecture Specification
 
-> **Version**: v0.1.5  
+> **Version**: v0.1.6  
 > **Target Audience**: Developers, contributors, and systems engineers.
 
 This document details the internal architecture, data flow, and subsystems of BroCode.
