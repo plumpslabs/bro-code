@@ -40,7 +40,6 @@ func NewOpenAIAdapter(baseURL, apiKey string) *OpenAIAdapter {
 type openAIChatMessage struct {
 	Role       string           `json:"role"`
 	Content    string           `json:"content"`
-	Reasoning  string           `json:"reasoning_content,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
@@ -135,7 +134,6 @@ func buildOpenAIRequest(req CompletionRequest, stream bool) (*openAIChatRequest,
 		oMsg := openAIChatMessage{
 			Role:       msg.Role,
 			Content:    msg.Content,
-			Reasoning:  msg.Reasoning,
 			ToolCallID: msg.ToolCallID,
 		}
 		for _, tc := range msg.ToolCalls {
