@@ -2132,10 +2132,23 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// "### OUT-OF-SCOPE FINDINGS" section; persist those to project
 		// memory so a follow-up task can pick them up instead of losing them
 		// to the chat history. Deterministic parse, no extra LLM call.
-		if e.Mode() == "BUILDER" && e.mem != nil {
-			if n := e.mem.CaptureOutOfScopeFindings(resp.Content); n > 0 {
-				if onUpdate != nil {
-					onUpdate(e.state, fmt.Sprintf("📋 %d out-of-scope finding(s) captured to project memory", n))
+		if e.Mode() == "BUILDER" {
+			if len(e.editedFiles) > 0 {
+				_, _ = plan.MarkStepsDoneByEditedFiles(e.repoRoot, e.editedFiles)
+				if archived, archPath, _ := plan.AutoArchiveIfDone(e.repoRoot); archived {
+					if onUpdate != nil {
+						onUpdate(e.state, fmt.Sprintf("📦 All plan tasks completed — archived to %s", filepath.Base(archPath)))
+					}
+					if e.mem != nil {
+						_, _ = e.mem.Retain("Active Plan", fmt.Sprintf("[Completed] Plan finished & archived to %s", filepath.Base(archPath)))
+					}
+				}
+			}
+			if e.mem != nil {
+				if n := e.mem.CaptureOutOfScopeFindings(resp.Content); n > 0 {
+					if onUpdate != nil {
+						onUpdate(e.state, fmt.Sprintf("📋 %d out-of-scope finding(s) captured to project memory", n))
+					}
 				}
 			}
 		}

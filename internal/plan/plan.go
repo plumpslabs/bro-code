@@ -104,6 +104,60 @@ func ArchiveCurrentPlan(workspaceDir string) (string, error) {
 	return archivePath, nil
 }
 
+// IsAllStepsDone checks if all steps in the plan have been marked done.
+func (p *Plan) IsAllStepsDone() bool {
+	if p == nil || len(p.Steps) == 0 {
+		return false
+	}
+	for _, s := range p.Steps {
+		if s.Status != "done" {
+			return false
+		}
+	}
+	return true
+}
+
+// MarkStepsDoneByEditedFiles matches edited file paths against step descriptions,
+// marking matching steps as done and saving the updated plan.
+func MarkStepsDoneByEditedFiles(workspaceDir string, editedFiles []string) (*Plan, error) {
+	p, err := LoadCurrentPlan(workspaceDir)
+	if err != nil || p == nil || len(p.Steps) == 0 {
+		return nil, err
+	}
+	changed := false
+	for i := range p.Steps {
+		if p.Steps[i].Status == "done" {
+			continue
+		}
+		for _, ef := range editedFiles {
+			base := filepath.Base(ef)
+			desc := p.Steps[i].Description
+			if strings.Contains(desc, ef) || strings.Contains(desc, base) {
+				p.Steps[i].Status = "done"
+				changed = true
+				break
+			}
+		}
+	}
+	if changed {
+		_ = SaveCurrentPlan(workspaceDir, p)
+	}
+	return p, nil
+}
+
+// AutoArchiveIfDone archives the plan if all steps have been marked done.
+func AutoArchiveIfDone(workspaceDir string) (bool, string, error) {
+	p, err := LoadCurrentPlan(workspaceDir)
+	if err != nil || p == nil || len(p.Steps) == 0 {
+		return false, "", err
+	}
+	if p.IsAllStepsDone() {
+		archPath, err := ArchiveCurrentPlan(workspaceDir)
+		return true, archPath, err
+	}
+	return false, "", nil
+}
+
 // ParseMarkdownPlan extracts goal, status, checklist tasks, and impacted files.
 func ParseMarkdownPlan(md string) *Plan {
 	p := &Plan{
