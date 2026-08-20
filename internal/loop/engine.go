@@ -916,7 +916,7 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		health:            newProviderHealth(),
 		fallbackPolicy:    FallbackAuto,
 		repoRoot:          tools.RepoRoot(),
-		planGateEnabled:  true,
+		planGateEnabled:   false,
 		tuning:            prompt.DefaultTuning(),
 		earlyExitOnError: true, // default: stop on mutating tool failure
 	}
@@ -1059,6 +1059,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.loadedSkills = map[string]bool{}
 	e.skillDirs = map[string]string{}
 	e.turnUsedTools = false
+	e.applyModePolicy()
 	// Reset the turn's recorded file changes so the review complexity gate and
 	// the UI summary only ever see THIS turn's edits (headless contexts like
 	// the bench harness and tests have no UI ResetChanges call).
