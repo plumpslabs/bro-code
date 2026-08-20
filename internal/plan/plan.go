@@ -59,9 +59,16 @@ func LoadCurrentPlan(workspaceDir string) (*Plan, error) {
 }
 
 // SaveCurrentPlan writes the active plan into .brocode/current_plan.md.
+// If an existing plan with a different goal was active, it safely archives
+// the previous plan into .brocode/plans/archive/ first so past tasks are never lost.
 func SaveCurrentPlan(workspaceDir string, p *Plan) error {
 	if p == nil {
 		return nil
+	}
+	if existing, err := LoadCurrentPlan(workspaceDir); err == nil && existing != nil && len(existing.Steps) > 0 {
+		if sanitizeSlug(existing.Goal) != sanitizeSlug(p.Goal) {
+			_, _ = ArchiveCurrentPlan(workspaceDir)
+		}
 	}
 	path := CurrentPlanPath(workspaceDir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -90,6 +90,8 @@ var plannerRules = []Rule{
 	{ID: "p1", Text: `1. Focus on inspecting codebase, analyzing files, and proposing high-level step-by-step implementation plans.`},
 	{ID: "p2", Text: `2. DO NOT modify any source files or execute write_file/edit_file tools.`},
 	{ID: "p3", Text: `3. Use read_file, list_dir, grep, and glob to research before writing your plan.`},
+	{ID: "p4", Text: `4. EXISTING PLAN INITIATIVE: Check if an active plan already exists in context (ACTIVE TASK PLAN). If an existing uncompleted plan is present and the user asks for a new task or revision, proactively acknowledge it and clarify whether to (a) append steps to the existing plan, (b) archive and replace it, or (c) prioritize it first.`},
+	{ID: "p5", Text: `5. STRUCTURED CHECKLIST: Always format your roadmap with clear numbered steps (e.g. ### Step 1: ... or 1. ...) and specify impacted files so the plan is automatically saved to .brocode/current_plan.md for seamless BUILDER mode execution.`},
 }
 
 var minerRules = []Rule{
