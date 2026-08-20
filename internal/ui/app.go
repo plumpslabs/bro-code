@@ -266,6 +266,7 @@ type Model struct {
 	// every frame — that is what makes long unbounded history viable.
 	renderedHistory string
 	historyKey      string
+	historyVersion  uint64
 	// trimNoticeShown records whether the "older messages pruned" notice has
 	// already been inserted into the chat log, so a pathological session that
 	// hits the safety ceiling announces it once instead of silently dropping
@@ -424,6 +425,7 @@ const maxChatMessages = 5000
 // only an extreme safety ceiling (maxChatMessages) can trim it, and that is
 // announced once so it is never mistaken for a bug.
 func (m *Model) appendMessages(msgs ...string) {
+	m.historyVersion++
 	m.messages = append(m.messages, msgs...)
 	if len(m.messages) > maxChatMessages {
 		trimmed := len(m.messages) - maxChatMessages
@@ -440,6 +442,7 @@ func (m *Model) appendMessages(msgs ...string) {
 // repeated edits grow a single entry in the history instead of one entry per
 // edit — while an edit to a NEW file still appends a fresh entry.
 func (m *Model) upsertDiffMessage(path, diff string) {
+	m.historyVersion++
 	prefix := "DIFF:\n" + path + "\n"
 	for i := len(m.messages) - 1; i >= 0; i-- {
 		if strings.HasPrefix(m.messages[i], prefix) {
@@ -3418,13 +3421,13 @@ func (m *Model) lastAssistantAnswer() string {
 	return ""
 }
 
-// logKey is a cheap fingerprint of the message list (count + last message) so
+// logKey is a cheap fingerprint of the message list so
 // the cache only invalidates when the history actually changes.
 func (m *Model) logKey() string {
 	if len(m.messages) == 0 {
 		return "0|"
 	}
-	return fmt.Sprintf("%d|%s", len(m.messages), m.messages[len(m.messages)-1])
+	return fmt.Sprintf("v%d|%d|%s", m.historyVersion, len(m.messages), m.messages[len(m.messages)-1])
 }
 
 // buildLogChrome renders everything below the log viewport — the live
