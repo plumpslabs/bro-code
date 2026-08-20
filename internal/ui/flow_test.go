@@ -395,43 +395,57 @@ func TestFileConfirmBarFlow(t *testing.T) {
 	}
 }
 
-// TestTurnResultAppendsFileSummary verifies the FILES change summary is
-// appended after a turn that touched files, with the compact block rendered by
-// default and the diff revealed when filesExpanded is toggled.
+// TestTurnResultAppendsFileSummary verifies file changes surface as live
+// per-edit DIFF entries during the turn (engine onChange → fileDiffMsg) and
+// that the turn-end does NOT append a batched FILES summary. The DIFF entry is
+// collapsed by default (compact (+N −M)) and reveals the +/- diff when
+// filesExpanded is toggled with ctrl+f.
 func TestTurnResultAppendsFileSummary(t *testing.T) {
 	m := newTestApp()
 	tool.ResetChanges()
 	defer tool.ResetChanges()
 
-	// Record a change the way write_file would.
+	// Record a change the way write_file would, then drive the live stream the
+	// engine emits for it (onChange → SetOnChange → fileDiffMsg).
 	tool.RecordChange(tool.FileChange{Path: "src/a.ts", Action: "created", New: "x\ny\n"})
+	diff := tool.CumulativeChangeDiff("src/a.ts")
+	m.Update(fileDiffMsg{path: "src/a.ts", diff: diff})
 
+	// A live DIFF entry must be present.
+	var di int = -1
+	for i, msg := range m.messages {
+		if strings.HasPrefix(msg, "DIFF:\n") {
+			di = i
+		}
+	}
+	if di < 0 {
+		t.Fatal("expected a live DIFF entry, got none")
+	}
+
+	// Settling the turn must NOT append a batched FILES summary.
 	m.Update(turnResultMsg{content: "done", err: nil, mode: "BUILDER"})
-	// The diff is shown by default (no ctrl+f needed); ctrl+f collapses it.
-	if !m.filesExpanded {
-		t.Fatal("summary must start expanded (diff visible without ctrl+f)")
-	}
-	if len(m.messages) == 0 {
-		t.Fatal("no messages appended")
-	}
-	last := m.messages[len(m.messages)-1]
-	if !strings.HasPrefix(last, "FILES:\n") {
-		t.Fatalf("expected FILES summary message, got %q", last)
+	for _, msg := range m.messages {
+		if strings.HasPrefix(msg, "FILES:\n") {
+			t.Fatalf("turn-end must not append a FILES summary, got %q", msg)
+		}
 	}
 
-	// Default (expanded) render shows the +/- diff lines.
-	expanded := ansiRegex.ReplaceAllString(formatMessage(last, 120, true), "")
-	if !strings.Contains(expanded, "src/a.ts") {
-		t.Fatalf("summary missing file row:\n%s", expanded)
+	// Collapsed render hides the diff body but shows the path and (+N −M) stat.
+	collapsed := ansiRegex.ReplaceAllString(formatMessage(m.messages[di], 120, false), "")
+	if !strings.Contains(collapsed, "src/a.ts") {
+		t.Fatalf("collapsed entry missing file path:\n%s", collapsed)
 	}
-	if !strings.Contains(expanded, "+ x") {
-		t.Fatalf("expanded summary missing diff lines:\n%s", expanded)
+	if !strings.Contains(collapsed, "(+") {
+		t.Fatalf("collapsed entry missing (+N −M) stat:\n%s", collapsed)
 	}
-
-	// Collapsed render (ctrl+f) hides the diff body but keeps the row.
-	collapsed := ansiRegex.ReplaceAllString(formatMessage(last, 120, false), "")
 	if strings.Contains(collapsed, "+ x") {
-		t.Fatalf("collapsed summary must hide the diff body:\n%s", collapsed)
+		t.Fatalf("collapsed entry must hide the diff body:\n%s", collapsed)
+	}
+
+	// Expanded render (ctrl+f) reveals the diff body.
+	expanded := ansiRegex.ReplaceAllString(formatMessage(m.messages[di], 120, true), "")
+	if !strings.Contains(expanded, "+ x") {
+		t.Fatalf("expanded entry missing diff lines:\n%s", expanded)
 	}
 }
 

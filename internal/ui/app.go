@@ -337,8 +337,9 @@ type Model struct {
 	fileConfirmPath string
 	fileConfirmSel  int // 0=Allow once, 1=Always allow, 2=Discard
 
-	// filesExpanded toggles the FILES change summary at the end of the answer
-	// between compact per-file rows and the full +/- diff (ctrl+f).
+	// filesExpanded toggles expansion of file-change entries (both the live
+	// per-edit DIFF entries and restored FILES: recaps) between a compact
+	// (+N −M) row and the full red/green +/- diff. Toggled with ctrl+f.
 	filesExpanded bool
 
 	// activityLog, when set (via the --log flag), receives a real-time stream of
@@ -1241,25 +1242,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Ready"
 		}
 
-		// Append the turn's file-change summary (create/edit/delete) right
-		// after the answer, so the user sees exactly which files were touched
-		// with +/- line markers — collapsed to one row per file, expandable
-		// with ctrl+f. Appended even on error/interrupt so partial edits are
-		// never silently lost.
+		// Persist the turn's file changes to the session event log so a future
+		// /resume or audit can reconstruct what a turn touched. The live per-edit
+		// DIFF entries (engine onChange → fileDiffMsg) already streamed into the
+		// chat during the turn, so we deliberately do NOT append a batched
+		// end-of-turn FILES summary — that would suddenly flood the chat once the
+		// agent finishes (noisy, non-predictable). Restored sessions still get a
+		// recap from this event (rendered by the FILES: branch in formatMessage).
 		if ch := tool.TakeChanges(); len(ch) > 0 {
-			// Persist the change list to the session event log so a future
-			// /resume or audit can reconstruct what a turn touched (the changes
-			// are otherwise ephemeral — in-memory only between turns).
 			if st := m.context.Store(); st != nil {
 				if payload, err := json.Marshal(ch); err == nil {
 					_, _ = st.AppendEvent(m.context.SessionID(), "file_changes", string(payload), 0)
 				}
-			}
-			if files := tool.FileChangesMessage(ch); files != "" {
-				// Show the full +/- diff at turn end without requiring ctrl+f
-				// (the per-edit live DIFF entries already stream during the turn).
-				m.filesExpanded = true
-				m.appendMessages(files)
 			}
 		}
 
@@ -3781,6 +3775,30 @@ func formatDiffLines(text string) string {
 	return sb.String()
 }
 
+// diffStat counts added/removed lines in a unified diff (ignoring the
+// +++/--- file headers and @@ hunk markers) so a collapsed DIFF entry can
+// show a compact (+N −M) summary.
+func diffStat(diff string) (add, del int) {
+	for _, line := range strings.Split(diff, "\n") {
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case '+':
+			if strings.HasPrefix(line, "+++") {
+				continue
+			}
+			add++
+		case '-':
+			if strings.HasPrefix(line, "---") {
+				continue
+			}
+			del++
+		}
+	}
+	return
+}
+
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // isStatusLine reports whether a trimmed line looks like an OpenCode CLI
@@ -3904,7 +3922,9 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 		}
 
 		// Live per-edit diff (engine onChange → fileDiffMsg): show the changed
-		// file path with a red/green unified diff as soon as each edit lands.
+		// file path immediately as each edit lands. Collapsed by default to a
+		// (+N −M) stat so the chat stays quiet; ctrl+f expands to the full
+		// red/green unified diff.
 		if strings.HasPrefix(msg, "DIFF:\n") {
 			body := strings.TrimPrefix(msg, "DIFF:\n")
 			path, diff := body, ""
@@ -3916,7 +3936,12 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 				diffBarStyle = diffBarStyle.Width(width)
 			}
 			labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true)
-			return diffBarStyle.Render(labelStyle.Render("DIFF") + "  " + path + "\n" + formatDiffLines(diff))
+			if filesExpanded {
+				return diffBarStyle.Render(labelStyle.Render("DIFF") + "  " + path + "\n" + formatDiffLines(diff))
+			}
+			add, del := diffStat(diff)
+			statStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+			return diffBarStyle.Render(labelStyle.Render("DIFF") + "  " + path + "  " + statStyle.Render(fmt.Sprintf("(+%d −%d) · ctrl+f", add, del)))
 		}
 
 
