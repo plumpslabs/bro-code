@@ -1137,6 +1137,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case stepProgressMsg:
+		if strings.HasPrefix(msg.info, "DIFF:\n") {
+			body := strings.TrimPrefix(msg.info, "DIFF:\n")
+			path, diff := body, ""
+			if nl := strings.Index(body, "\n"); nl >= 0 {
+				path, diff = body[:nl], body[nl+1:]
+			}
+			m.upsertDiffMessage(path, diff)
+			return m, nil
+		}
 		str := msg.info
 		// Progress events that land AFTER the turn has already settled (the
 		// adapter's stderr goroutine may still flush lines after turnResultMsg)

@@ -1991,13 +1991,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				}
 			}
 
-			// Live red/green diff entry per edit (P2 #2): surface a cumulative
-			// diff for every path that gained a NEW change this round. Driven
-			// by the change list rather than tool names, so write_file,
-			// edit_file, delete_file AND LSP-driven edits (lsp_fix/lsp_rename)
-			// all surface in the chat in real time. The UI replaces the path's
-			// previous entry, so one file keeps one growing diff.
-			if e.onChange != nil {
+			// Live red/green diff entry per edit: surface a cumulative
+			// diff for every path that gained a NEW change this round directly via onUpdate.
+			if onUpdate != nil {
 				if n := tool.ChangesLen(); n > e.lastChangeDiffEmit {
 					chs := tool.PeekChanges()[e.lastChangeDiffEmit:n]
 					e.lastChangeDiffEmit = n
@@ -2008,7 +2004,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						}
 						seen[ch.Path] = true
 						if d := tool.CumulativeChangeDiff(ch.Path); d != "" {
-							e.onChange(ch.Path, d)
+							onUpdate(e.state, "DIFF:\n"+ch.Path+"\n"+d)
 						}
 					}
 				}
