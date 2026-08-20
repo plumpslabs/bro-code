@@ -23,6 +23,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/repo"
 	"github.com/plumpslabs/bro-code/internal/skill"
 	"github.com/plumpslabs/bro-code/internal/store"
+	"github.com/plumpslabs/bro-code/internal/tokens"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
@@ -141,6 +142,20 @@ type Engine struct {
 	// changes have already been surfaced to the activity slot this turn, so
 	// the real-time diff (P2 #2) emits only on a NEW change (not every round).
 	turnTokens int
+	// turnProductiveTokens counts completion tokens from rounds that produced
+	// the deliverable: a final answer, or a round that executed a file-mutating
+	// tool (write/edit/create/delete). The complement of turnTokens is overhead
+	// (exploration that changed nothing). Together they form the Productive
+	// Token Ratio — BroCode's north-star efficiency metric.
+	turnProductiveTokens int
+	// lastRoundOutput holds the COMPLETION (output) token count of the most
+	// recent completion. The Productive Token Ratio numerator credits OUTPUT
+	// tokens of rounds that produced a deliverable (answer or file mutation) —
+	// not the round's total — so re-sent context / system-prompt tax (input
+	// tokens) is never counted as "work" (the metric must not be gamed; see
+	// docs/PHILOSOPHY.md north-star metric). The denominator (turnTokens) still
+	// uses each request's full TotalTokens, including compacted/re-sent history.
+	lastRoundOutput int
 	// turnCompactions counts how many context compactions fired during this
 	// turn (delta of the manager's session counter, captured at turn start).
 	// Surfaced alongside tokens so a token spike is explainable: a turn that
@@ -935,6 +950,14 @@ func (e *Engine) TurnTokens() int {
 	return e.turnTokens
 }
 
+// TurnTokenStats returns the turn's token economy: total tokens vs. the
+// productive subset (answer + file-mutating rounds). The ratio is BroCode's
+// north-star efficiency metric — a high ratio means the agent went straight to
+// the result instead of thrashing through the codebase.
+func (e *Engine) TurnTokenStats() tokens.TurnTokenStats {
+	return tokens.NewTurnTokenStats(e.turnTokens, e.turnProductiveTokens)
+}
+
 // TurnCompactions returns how many context compactions fired during the most
 // recent turn (delta of the session counter, so repeated turns accumulate).
 func (e *Engine) TurnCompactions() int {
@@ -995,6 +1018,8 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	// Reset the per-turn cost budget counter.
 	e.costUSD = 0
 	e.turnTokens = 0
+	e.turnProductiveTokens = 0
+	e.lastRoundOutput = 0
 	e.turnCompactions = 0
 	e.compactionBaseline = e.context.CompactCount()
 	e.lastChangeEmit = 0
@@ -1483,6 +1508,12 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				resp.Content = cleaned
 			}
 		}
+		// North-star metric: a completion that ends the turn with an answer
+		// (no further tool calls) is productive — credit its tokens now.
+		// (Rounds that spawn file-mutating tools are credited separately below.)
+		if len(resp.ToolCalls) == 0 {
+			e.turnProductiveTokens += e.lastRoundOutput
+		}
 
 		// Remember the model's last reasoning so a tool-budget abort can tell
 		// the user WHAT the agent was stuck on ("search for more models…")
@@ -1527,6 +1558,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 			pending := make([]pendingTool, len(resp.ToolCalls))
 			execCount := 0
+			// Tracks whether this round executed a file-mutating tool, so its
+			// completion tokens can be credited as productive (north-star metric).
+			roundMutation := false
 
 			for i, tc := range resp.ToolCalls {
 				// Strict mode tool guards: PLANNER is fully read-only (no bash,
@@ -1623,7 +1657,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 
 				toolInfo := formatToolCallInfo(tc.Name, tc.Arguments)
 				if onUpdate != nil {
-					onUpdate(e.state, fmt.Sprintf("%s", toolInfo))
+					onUpdate(e.state, toolInfo)
 				}
 
 				// Track what the model has actually explored so budget reminders
@@ -1738,10 +1772,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					continue
 				}
 
-				pending[i] = pendingTool{tc: tc, exec: true}
-				e.turnUsedTools = true // any tool reaching execution = tools used this turn
-				execCount++
+			pending[i] = pendingTool{tc: tc, exec: true}
+			e.turnUsedTools = true // any tool reaching execution = tools used this turn
+			if isFileMutationTool(tc.Name) {
+				roundMutation = true
 			}
+			execCount++
+		}
+		// A round that executed a file mutation is productive: credit the
+		// completion tokens that produced it (the deliverable, not overhead).
+		if roundMutation {
+			e.turnProductiveTokens += e.lastRoundOutput
+		}
 
 			// PHASE 2 — EXECUTION: run every pending call. Read-only tools
 			// (read_file, grep, glob, list_dir, search_code, fetch_url,
@@ -2219,10 +2261,7 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 		// but counter-productive when the turn is already near the compaction
 		// threshold — it would just buy a compaction the model didn't need.
 		if remain := e.context.MaxWindow() - e.context.TotalContextTokens(); remain < 32*1024 {
-			budget := remain / 2
-			if budget < 4*1024 {
-				budget = 4 * 1024
-			}
+			budget := max(remain / 2, 4 * 1024)
 			e.mem.SetWarmStartBudget(budget)
 		} else {
 			e.mem.SetWarmStartBudget(0)
@@ -2748,6 +2787,17 @@ func (e *Engine) finalSynth(ctx context.Context, reason string, marker string) (
 
 // isRepeatToolCall reports whether a tool call is an exact repeat of the
 // previous one in this turn (same name and identical arguments).
+// isFileMutationTool reports whether a tool name changes the filesystem
+// (write/edit/create/delete). Rounds that execute these are credited as
+// productive for the Productive Token Ratio metric.
+func isFileMutationTool(name string) bool {
+	switch name {
+	case "write_file", "edit_file", "create_file", "delete_file":
+		return true
+	}
+	return false
+}
+
 func isRepeatToolCall(tc, prev provider.ToolCall) bool {
 	if prev.Name == "" {
 		return false
@@ -2970,6 +3020,7 @@ func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, r
 	if resp != nil && (resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0) {
 		e.costUSD += provider.EstimateCostUSDWithCache(req.Model, resp.Usage.PromptTokens, resp.Usage.PromptCacheHitTokens, resp.Usage.CompletionTokens)
 		e.turnTokens += resp.Usage.TotalTokens
+		e.lastRoundOutput = resp.Usage.CompletionTokens
 	}
 	return resp, nil
 }
