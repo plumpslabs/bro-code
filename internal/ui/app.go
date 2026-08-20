@@ -470,6 +470,7 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 	// never leak stale entries into the next turn's summary.
 	tool.ResetChanges()
 	m.filesExpanded = false
+	m.engine.SetMode(m.mode)
 	m.appendMessages("YOU:\n" + userQuery)
 	m.status = "Thinking..."
 	m.turnStart = time.Now()
@@ -2093,6 +2094,31 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.engine.SetMode(m.mode)
 		m.persistMode()
 		m.appendNote("⛏️ MINER mode active — explore the codebase and I'll persist verified knowledge (architecture, build commands, conventions, decisions, gotchas) into project memory. Shift+Tab to switch back to BUILDER.")
+
+	case "/builder":
+		m.mode = "BUILDER"
+		m.engine.SetMode(m.mode)
+		m.persistMode()
+		m.appendNote("🔨 BUILDER mode active — autonomous coding agent with full read, write, edit, and execution capabilities.")
+
+	case "/planner":
+		m.mode = "PLANNER"
+		m.engine.SetMode(m.mode)
+		m.persistMode()
+		m.appendNote("📋 PLANNER mode active — read-only architecture and strategy agent.")
+
+	case "/mode":
+		if len(parts) > 1 {
+			target := strings.ToUpper(strings.TrimSpace(parts[1]))
+			if target == "BUILDER" || target == "PLANNER" || target == "MINER" {
+				m.mode = target
+				m.engine.SetMode(m.mode)
+				m.persistMode()
+				m.appendNote(fmt.Sprintf("✅ Mode switched to %s", m.mode))
+				return m, nil
+			}
+		}
+		m.appendMessages("Usage: /mode <builder|planner|miner> (or toggle with Shift+Tab)")
 
 	case "/memory":
 		if m.memStore != nil {
