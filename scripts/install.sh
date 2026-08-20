@@ -47,7 +47,7 @@ echo "🚀 Installing BroCode for $OS/$ARCH into $INSTALL_DIR..."
 LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || true)
 
 if [ -z "$LATEST_TAG" ]; then
-    LATEST_TAG="v0.1.1"
+    LATEST_TAG="v0.1.2"
 fi
 
 EXT="tar.gz"
@@ -67,6 +67,30 @@ if curl -sLf "$DOWNLOAD_URL" -o "$TMP_DIR/$ARCHIVE_NAME"; then
         unzip -q "$TMP_DIR/$ARCHIVE_NAME" -d "$TMP_DIR"
     else
         tar -xzf "$TMP_DIR/$ARCHIVE_NAME" -C "$TMP_DIR"
+    fi
+    # Verify checksum against the release's checksums.txt (GoReleaser-published)
+    # so a tampered/mismatched binary is never installed.
+    echo "🔐 Verifying checksum..."
+    if curl -sLf "https://github.com/$REPO/releases/download/$LATEST_TAG/checksums.txt" -o "$TMP_DIR/checksums.txt"; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL=$(sha256sum "$TMP_DIR/$ARCHIVE_NAME" | awk '{print $1}')
+        elif command -v shasum >/dev/null 2>&1; then
+            ACTUAL=$(shasum -a 256 "$TMP_DIR/$ARCHIVE_NAME" | awk '{print $1}')
+        else
+            ACTUAL=""
+        fi
+        if [ -n "$ACTUAL" ]; then
+            EXPECTED=$(grep -E "(^|[^A-Za-z0-9])$ARCHIVE_NAME([^A-Za-z0-9]|$)" "$TMP_DIR/checksums.txt" | awk '{print $1}' | head -1)
+            if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
+                echo "❌ Checksum mismatch! expected $EXPECTED got $ACTUAL"
+                exit 1
+            fi
+            echo "✅ Checksum verified ($ACTUAL)"
+        else
+            echo "⚠️ No sha256 tool available; skipping checksum verification"
+        fi
+    else
+        echo "⚠️ checksums.txt not published; skipping verification"
     fi
     mv "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
