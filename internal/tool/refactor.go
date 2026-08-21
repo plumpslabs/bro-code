@@ -39,6 +39,7 @@ func (t *CodeOutlineTool) Execute(ctx context.Context, argsJSON string) (string,
 	if strings.TrimSpace(args.Path) == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	args.Path = resolvePath(args.Path)
 
 	syms, err := search.OutlineFile(args.Path)
 	if err != nil {
@@ -99,6 +100,9 @@ func (t *CodeImpactTool) Execute(ctx context.Context, argsJSON string) (string, 
 	}
 	if strings.TrimSpace(args.Symbol) == "" {
 		return "", fmt.Errorf("symbol is required")
+	}
+	if args.File != "" {
+		args.File = resolvePath(args.File)
 	}
 
 	cwd, _ := os.Getwd()
@@ -164,6 +168,7 @@ func (t *RefactorClusterTool) Execute(ctx context.Context, argsJSON string) (str
 	if strings.TrimSpace(args.Path) == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	args.Path = resolvePath(args.Path)
 
 	clusters, err := search.ClusterFileSymbols(args.Path)
 	if err != nil {

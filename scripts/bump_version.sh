@@ -88,7 +88,7 @@ echo "🧪 Running full test suite..."
 go test ./...
 
 echo "📦 Staging and committing version bump..."
-git add "$VERSION_FILE" docs/index.html README.md docs/ARCHITECTURE.md docs/CLI_REFERENCE.md scripts/install.sh scripts/bump_version.sh
+git add -A
 git commit -m "chore(release): bump version to $NEW_VER"
 
 echo "🏷️ Creating git release tag $NEW_VER..."

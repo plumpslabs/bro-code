@@ -2175,6 +2175,26 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			_ = e.mem.CaptureMinerFindings(resp.Content, explored)
 		}
 
+		// PLANNER mode (or any turn producing a structured execution plan):
+		// Automatically parse and save to .brocode/current_plan.md and project memory
+		// so BUILDER mode immediately inherits the active plan without language bias!
+		parsedPlan := plan.ParseMarkdownPlan(resp.Content)
+		if parsedPlan != nil && len(parsedPlan.Steps) >= 1 && (e.Mode() == "PLANNER" || len(parsedPlan.Steps) >= 2) {
+			_ = plan.SaveCurrentPlan(e.repoRoot, parsedPlan)
+			if onUpdate != nil {
+				onUpdate(e.state, fmt.Sprintf("📋 Active plan saved with %d step(s) to .brocode/current_plan.md", len(parsedPlan.Steps)))
+			}
+			if e.mem != nil {
+				for _, step := range parsedPlan.Steps {
+					clean := step.Description
+					if len(clean) > 150 {
+						clean = clean[:150] + "…"
+					}
+					_, _ = e.mem.Retain("Active Plan", clean)
+				}
+			}
+		}
+
 		// Out-of-scope findings capture (rule b13): a BUILDER turn that
 		// noticed real issues OUTSIDE its task scope ends its answer with a
 		// "### OUT-OF-SCOPE FINDINGS" section; persist those to project

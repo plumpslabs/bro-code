@@ -742,24 +742,20 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 				lastGoal = c
 			}
 		case "assistant_msg":
-			// If the assistant output a plan/roadmap from PLANNER mode or an explicit plan block, capture to current_plan.md & memory.md
-			isPlanner := msg.Mode == "PLANNER"
-			hasPlanHeader := strings.Contains(msg.Content, "# 🎯 Plan:") || strings.Contains(msg.Content, "# Plan:") || strings.Contains(msg.Content, "## 📋 Tasks")
-			if isPlanner || hasPlanHeader {
-				parsed := plan.ParseMarkdownPlan(msg.Content)
-				if parsed != nil && len(parsed.Steps) >= 2 {
-					if s.path != "" {
-						wsDir := filepath.Dir(filepath.Dir(s.path))
-						_ = plan.SaveCurrentPlan(wsDir, parsed)
+			// If the assistant output an execution plan, capture to current_plan.md & memory.md
+			parsed := plan.ParseMarkdownPlan(msg.Content)
+			if parsed != nil && len(parsed.Steps) >= 1 && (msg.Mode == "PLANNER" || len(parsed.Steps) >= 2) {
+				if s.path != "" {
+					wsDir := filepath.Dir(filepath.Dir(s.path))
+					_ = plan.SaveCurrentPlan(wsDir, parsed)
+				}
+				for _, step := range parsed.Steps {
+					clean := step.Description
+					if len(clean) > 150 {
+						clean = clean[:150] + "…"
 					}
-					for _, step := range parsed.Steps {
-						clean := step.Description
-						if len(clean) > 150 {
-							clean = clean[:150] + "…"
-						}
-						if ok, err := s.retainWithTimestamp("Active Plan", clean); err == nil && ok {
-							changed = true
-						}
+					if ok, err := s.retainWithTimestamp("Active Plan", clean); err == nil && ok {
+						changed = true
 					}
 				}
 			}
@@ -832,27 +828,4 @@ func trimFacts(facts map[string][]string, cap int) {
 		}
 		facts[biggest] = facts[biggest][1:]
 	}
-}
-
-// isPlanStepLine detects whether a line formatted as a plan/roadmap step (numbered list,
-// markdown header step, checkbox task, or bullet step) in English or Indonesian.
-func isPlanStepLine(line string) bool {
-	l := strings.TrimSpace(line)
-	if len(l) < 5 {
-		return false
-	}
-	lower := strings.ToLower(l)
-	clean := strings.TrimLeft(lower, "#*-• \t")
-	if strings.HasPrefix(clean, "step ") || strings.HasPrefix(clean, "langkah ") ||
-		strings.HasPrefix(clean, "phase ") || strings.HasPrefix(clean, "tahap ") ||
-		strings.HasPrefix(clean, "task ") || strings.HasPrefix(clean, "action ") {
-		return true
-	}
-	if len(clean) > 3 && clean[0] >= '1' && clean[0] <= '9' && (clean[1] == '.' || clean[1] == ')' || clean[1] == ':') {
-		return true
-	}
-	if strings.HasPrefix(l, "- [ ]") || strings.HasPrefix(l, "- [x]") || strings.HasPrefix(l, "* [ ]") {
-		return true
-	}
-	return false
 }

@@ -190,7 +190,8 @@ func AutoArchiveIfDone(workspaceDir string) (bool, string, error) {
 	return false, "", nil
 }
 
-// ParseMarkdownPlan extracts goal, status, checklist tasks, and impacted files.
+// ParseMarkdownPlan extracts goal, status, checklist tasks, and impacted files
+// using universal Markdown structural grammar (GFM task lists, ordered lists, numbered headings).
 func ParseMarkdownPlan(md string) *Plan {
 	p := &Plan{
 		Status:    "ACTIVE",
@@ -199,22 +200,30 @@ func ParseMarkdownPlan(md string) *Plan {
 
 	lines := strings.Split(md, "\n")
 	stepIdx := 1
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "# ") {
-			goal := strings.TrimPrefix(trimmed, "# ")
+		if trimmed == "" {
+			continue
+		}
+
+		// First markdown heading is taken as the Goal / Title
+		if p.Goal == "" && strings.HasPrefix(trimmed, "#") {
+			goal := strings.TrimLeft(trimmed, "# \t")
 			goal = strings.TrimPrefix(goal, "🎯 ")
 			goal = strings.TrimPrefix(goal, "Plan: ")
 			p.Goal = strings.TrimSpace(goal)
 			continue
 		}
+
 		if strings.HasPrefix(trimmed, "**Status:**") {
 			status := strings.TrimPrefix(trimmed, "**Status:**")
 			p.Status = strings.TrimSpace(status)
 			continue
 		}
-		// Checklist task detection
-		if strings.HasPrefix(trimmed, "- [x]") || strings.HasPrefix(trimmed, "* [x]") || strings.HasPrefix(trimmed, "- [X]") || strings.HasPrefix(trimmed, "* [X]") {
+
+		// GFM checklist task detection: "- [ ]", "* [ ]", "+ [ ]", "- [x]", etc.
+		if isChecklistDone(trimmed) {
 			desc := cleanTaskDesc(trimmed[5:])
 			p.Steps = append(p.Steps, PlanStep{
 				ID:          fmt.Sprintf("step_%d", stepIdx),
@@ -222,20 +231,9 @@ func ParseMarkdownPlan(md string) *Plan {
 				Status:      "done",
 			})
 			stepIdx++
-		} else if strings.HasPrefix(trimmed, "- [ ]") || strings.HasPrefix(trimmed, "* [ ]") {
+			continue
+		} else if isChecklistPending(trimmed) {
 			desc := cleanTaskDesc(trimmed[5:])
-			status := "pending"
-			if strings.Contains(trimmed, "✅") || strings.Contains(trimmed, "✔️") || strings.Contains(trimmed, "[x]") {
-				status = "done"
-			}
-			p.Steps = append(p.Steps, PlanStep{
-				ID:          fmt.Sprintf("step_%d", stepIdx),
-				Description: desc,
-				Status:      status,
-			})
-			stepIdx++
-		} else if isStepHeader(trimmed) {
-			desc := cleanTaskDesc(cleanStepDesc(trimmed))
 			status := "pending"
 			if strings.Contains(trimmed, "✅") || strings.Contains(trimmed, "✔️") {
 				status = "done"
@@ -246,12 +244,96 @@ func ParseMarkdownPlan(md string) *Plan {
 				Status:      status,
 			})
 			stepIdx++
+			continue
+		}
+
+		// Structural numbered step detection: "### 1. Title", "1. Title", "2) Title"
+		if desc, ok := extractStructuralStep(trimmed); ok {
+			status := "pending"
+			if strings.Contains(trimmed, "✅") || strings.Contains(trimmed, "✔️") {
+				status = "done"
+			}
+			p.Steps = append(p.Steps, PlanStep{
+				ID:          fmt.Sprintf("step_%d", stepIdx),
+				Description: cleanTaskDesc(desc),
+				Status:      status,
+			})
+			stepIdx++
+			continue
+		}
+
+		// Structural file path detection in bullet points or backticks
+		if (strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ")) && !strings.HasPrefix(trimmed, "- [") {
+			clean := strings.TrimLeft(trimmed, "-* \t`")
+			clean = strings.TrimRight(clean, "` \t")
+			if isLikelyFilePath(clean) {
+				p.Files = append(p.Files, clean)
+			}
 		}
 	}
+
 	if p.Goal == "" && len(p.Steps) > 0 {
 		p.Goal = p.Steps[0].Description
 	}
 	return p
+}
+
+func isChecklistDone(s string) bool {
+	return strings.HasPrefix(s, "- [x]") || strings.HasPrefix(s, "* [x]") || strings.HasPrefix(s, "+ [x]") ||
+		strings.HasPrefix(s, "- [X]") || strings.HasPrefix(s, "* [X]") || strings.HasPrefix(s, "+ [X]")
+}
+
+func isChecklistPending(s string) bool {
+	return strings.HasPrefix(s, "- [ ]") || strings.HasPrefix(s, "* [ ]") || strings.HasPrefix(s, "+ [ ]")
+}
+
+// extractStructuralStep parses numbered headings ("### 1. Title") and numbered list items ("1. Title", "1) Title")
+func extractStructuralStep(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return "", false
+	}
+	// 1. Heading followed by number: "### 1. Title" or "#### 1. Title"
+	if strings.HasPrefix(trimmed, "#") {
+		h := strings.TrimLeft(trimmed, "# \t")
+		if len(h) >= 2 && h[0] >= '1' && h[0] <= '9' {
+			for i := 1; i < len(h); i++ {
+				if h[i] == '.' || h[i] == ')' || h[i] == ':' || h[i] == ' ' {
+					return strings.TrimSpace(h[i+1:]), true
+				}
+				if h[i] < '0' || h[i] > '9' {
+					break
+				}
+			}
+		}
+		return "", false
+	}
+	// 2. Numbered list items: "1. Title", "2) Title", "1: Title"
+	clean := strings.TrimLeft(trimmed, "*-•+ \t")
+	if len(clean) >= 2 && clean[0] >= '1' && clean[0] <= '9' {
+		for i := 1; i < len(clean); i++ {
+			if clean[i] == '.' || clean[i] == ')' || clean[i] == ':' {
+				if i+1 < len(clean) && (clean[i+1] == ' ' || clean[i+1] == '\t') {
+					return strings.TrimSpace(clean[i+2:]), true
+				}
+			}
+			if clean[i] < '0' || clean[i] > '9' {
+				break
+			}
+		}
+	}
+	return "", false
+}
+
+func isLikelyFilePath(s string) bool {
+	if strings.Contains(s, " ") || len(s) < 3 {
+		return false
+	}
+	if strings.Contains(s, "/") || strings.Contains(s, "\\") {
+		return true
+	}
+	ext := filepath.Ext(s)
+	return ext != "" && len(ext) <= 6
 }
 
 // RenderMarkdownPlan formats a Plan into standard GitHub-flavored Markdown.
@@ -293,21 +375,6 @@ func cleanTaskDesc(desc string) string {
 	s = strings.TrimSuffix(s, "✔️")
 	s = strings.TrimSuffix(s, "(done)")
 	s = strings.TrimSuffix(s, "(completed)")
-	return strings.TrimSpace(s)
-}
-
-func isStepHeader(line string) bool {
-	l := strings.ToLower(strings.TrimSpace(line))
-	clean := strings.TrimLeft(l, "#*-• \t")
-	if strings.HasPrefix(clean, "step ") || strings.HasPrefix(clean, "langkah ") ||
-		strings.HasPrefix(clean, "phase ") || strings.HasPrefix(clean, "tahap ") {
-		return true
-	}
-	return false
-}
-
-func cleanStepDesc(line string) string {
-	s := strings.TrimLeft(line, "#*-• \t")
 	return strings.TrimSpace(s)
 }
 

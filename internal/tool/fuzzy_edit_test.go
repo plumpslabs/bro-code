@@ -122,3 +122,156 @@ const b = 2;`,
 		})
 	}
 }
+
+func TestValidateSyntaxIntegrity(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		orig     string
+		modified string
+		wantErr  bool
+	}{
+		{
+			name:     "Valid JS/TSX balance",
+			path:     "src/components/Card.tsx",
+			orig:     "function Card() { return (<div><span>Hello</span></div>); }",
+			modified: "function Card() { return (<div><span>World</span></div>); }",
+			wantErr:  false,
+		},
+		{
+			name:     "Unbalanced closing parenthesis in JSX",
+			path:     "src/components/MessageBubble.tsx",
+			orig:     "const f = () => { return 1; };",
+			modified: "const f = () => { return 1; }));",
+			wantErr:  true,
+		},
+		{
+			name:     "Unbalanced curly brace in TSX",
+			path:     "src/components/MessageBubble.tsx",
+			orig:     "const a = { x: 1 };",
+			modified: "const a = { x: 1 }};",
+			wantErr:  true,
+		},
+		{
+			name:     "Valid JSON",
+			path:     "config.json",
+			orig:     `{"name": "test"}`,
+			modified: `{"name": "test2", "age": 20}`,
+			wantErr:  false,
+		},
+		{
+			name:     "Invalid JSON",
+			path:     "config.json",
+			orig:     `{"name": "test"}`,
+			modified: `{"name": "test2", "age": }`,
+			wantErr:  true,
+		},
+		{
+			name:     "Valid Go file",
+			path:     "main.go",
+			orig:     "package main\nfunc main() { fmt.Println(1) }",
+			modified: "package main\nfunc main() { fmt.Println(2) }",
+			wantErr:  false,
+		},
+		{
+			name:     "Unbalanced Go curly brace",
+			path:     "main.go",
+			orig:     "package main\nfunc main() { fmt.Println(1) }",
+			modified: "package main\nfunc main() { fmt.Println(1) ",
+			wantErr:  true,
+		},
+		{
+			name:     "Valid Python with comments and strings",
+			path:     "app.py",
+			orig:     "def calc(a, b):\n    # comment (with parens)\n    return [a + b]  \"\"\"triple (str)\"\"\"",
+			modified: "def calc(a, b):\n    # comment (with parens)\n    return [a * b]  \"\"\"triple (str)\"\"\"",
+			wantErr:  false,
+		},
+		{
+			name:     "Unbalanced Python bracket",
+			path:     "app.py",
+			orig:     "def calc(a, b):\n    return [a + b]",
+			modified: "def calc(a, b):\n    return [a + b]]",
+			wantErr:  true,
+		},
+		{
+			name:     "Valid Rust",
+			path:     "src/main.rs",
+			orig:     "fn main() { println!(\"hello {:?}\", (1, 2)); }",
+			modified: "fn main() { println!(\"world {:?}\", (3, 4)); }",
+			wantErr:  false,
+		},
+		{
+			name:     "Unbalanced Rust delimiter",
+			path:     "src/main.rs",
+			orig:     "fn main() { println!(\"hello\"); }",
+			modified: "fn main() { println!(\"hello\"); }}",
+			wantErr:  true,
+		},
+		{
+			name:     "Valid SQL with dash comments",
+			path:     "schema.sql",
+			orig:     "SELECT * FROM users WHERE id IN (1, 2, 3); -- ignore ( )",
+			modified: "SELECT id, name FROM users WHERE id IN (1, 2, 3); -- ignore ( )",
+			wantErr:  false,
+		},
+		{
+			name:     "Unbalanced SQL parentheses",
+			path:     "schema.sql",
+			orig:     "SELECT * FROM users WHERE id IN (1, 2, 3);",
+			modified: "SELECT * FROM users WHERE id IN (1, 2, 3));",
+			wantErr:  true,
+		},
+		{
+			name:     "Valid Java/C#/PHP/C++ class",
+			path:     "App.java",
+			orig:     "public class App { public static void main(String[] args) { System.out.println(1); } }",
+			modified: "public class App { public static void main(String[] args) { System.out.println(2); } }",
+			wantErr:  false,
+		},
+		{
+			name:     "Markdown prose ignores asymmetric punctuation",
+			path:     "README.md",
+			orig:     "# Notes\nHere is a smiley :) and a list [1, 2",
+			modified: "# Notes\nHere is another smiley ;) and [1, 2, 3",
+			wantErr:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateSyntaxIntegrity(tc.path, tc.orig, tc.modified)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestFindClosestBlock(t *testing.T) {
+	content := `package main
+
+func calculateTotal(items []Item) int {
+    var sum int = 0
+    for _, it := range items {
+        sum += it.Price * it.Qty
+    }
+    return sum
+}`
+
+	target := `    var sum = 0
+    for _, it := range items {
+        sum += it.Price
+    }`
+
+	closest := FindClosestBlock(content, target)
+	if closest == "" {
+		t.Fatalf("expected closest block match, got empty")
+	}
+	if !strings.Contains(closest, "sum += it.Price * it.Qty") {
+		t.Errorf("expected closest block to contain actual file lines, got: %s", closest)
+	}
+}

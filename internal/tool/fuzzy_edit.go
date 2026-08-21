@@ -1,8 +1,10 @@
 package tool
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 )
 
@@ -370,4 +372,220 @@ func charOverlap(a, b map[rune]bool) float64 {
 		}
 	}
 	return float64(intersect) / float64(union)
+}
+
+// ValidateSyntaxIntegrity checks whether an edited file contains broken syntax
+// or unbalanced delimiters that would break execution (e.g. malformed JSX,
+// unclosed braces/parentheses/brackets, invalid JSON).
+// ValidateSyntaxIntegrity checks whether an edited file contains broken syntax
+// or unbalanced delimiters across ALL programming languages, scripts, markup,
+// and config files (Go, Rust, Python, JS/TS/JSX/TSX, C/C++, C#, Java, Kotlin,
+// PHP, Ruby, Swift, Dart, Lua, SQL, HTML, XML, YAML, TOML, JSON, etc.).
+func ValidateSyntaxIntegrity(path, originalContent, newContent string) error {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".json":
+		var v any
+		if err := json.Unmarshal([]byte(newContent), &v); err != nil {
+			return fmt.Errorf("invalid JSON syntax: %w", err)
+		}
+		return nil
+	case ".md", ".markdown", ".txt", ".csv", ".tsv", ".log", ".diff", ".patch":
+		// Prose, logs, and documentation files frequently have asymmetric punctuation in free text.
+		return nil
+	default:
+		return checkDelimiterBalance(ext, originalContent, newContent)
+	}
+}
+
+func checkDelimiterBalance(ext, original, modified string) error {
+	origCounts := countDelimiters(ext, original)
+	modCounts := countDelimiters(ext, modified)
+
+	if origCounts['('] == origCounts[')'] && modCounts['('] != modCounts[')'] {
+		return fmt.Errorf("unbalanced parentheses: '(' count (%d) does not match ')' count (%d)", modCounts['('], modCounts[')'])
+	}
+	if origCounts['{'] == origCounts['}'] && modCounts['{'] != modCounts['}'] {
+		return fmt.Errorf("unbalanced curly braces: '{' count (%d) does not match '}' count (%d)", modCounts['{'], modCounts['}'])
+	}
+	if origCounts['['] == origCounts[']'] && modCounts['['] != modCounts[']'] {
+		return fmt.Errorf("unbalanced square brackets: '[' count (%d) does not match ']' count (%d)", modCounts['['], modCounts[']'])
+	}
+	return nil
+}
+
+func countDelimiters(ext, s string) map[rune]int {
+	counts := make(map[rune]int)
+	inString := false
+	var strQuote rune
+	inLineComment := false
+	inBlockComment := false
+	inHTMLComment := false
+	inTripleQuote := false
+	var tripleQuoteChar rune
+	escaped := false
+
+	isHashCommentLang := isHashCommentExt(ext)
+	isDashCommentLang := isDashCommentExt(ext)
+	isHTMLFamily := isHTMLExt(ext)
+
+	runes := []rune(s)
+	n := len(runes)
+	for i := 0; i < n; i++ {
+		r := runes[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if r == '\\' && (inString || inTripleQuote) {
+			escaped = true
+			continue
+		}
+		if inLineComment {
+			if r == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+		if inBlockComment {
+			if r == '*' && i+1 < n && runes[i+1] == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+		if inHTMLComment {
+			if r == '-' && i+2 < n && runes[i+1] == '-' && runes[i+2] == '>' {
+				inHTMLComment = false
+				i += 2
+			}
+			continue
+		}
+		if inTripleQuote {
+			if r == tripleQuoteChar && i+2 < n && runes[i+1] == tripleQuoteChar && runes[i+2] == tripleQuoteChar {
+				inTripleQuote = false
+				i += 2
+			}
+			continue
+		}
+		if inString {
+			if r == strQuote {
+				inString = false
+			}
+			continue
+		}
+
+		// Triple-quote check (Python / Julia)
+		if (r == '"' || r == '\'') && i+2 < n && runes[i+1] == r && runes[i+2] == r {
+			inTripleQuote = true
+			tripleQuoteChar = r
+			i += 2
+			continue
+		}
+
+		// HTML comment check
+		if isHTMLFamily && r == '<' && i+3 < n && runes[i+1] == '!' && runes[i+2] == '-' && runes[i+3] == '-' {
+			inHTMLComment = true
+			i += 3
+			continue
+		}
+
+		// Line comment check based on language family
+		if r == '/' && i+1 < n {
+			if runes[i+1] == '/' {
+				inLineComment = true
+				i++
+				continue
+			} else if runes[i+1] == '*' {
+				inBlockComment = true
+				i++
+				continue
+			}
+		}
+		if isHashCommentLang && r == '#' {
+			inLineComment = true
+			continue
+		}
+		if isDashCommentLang && r == '-' && i+1 < n && runes[i+1] == '-' {
+			inLineComment = true
+			i++
+			continue
+		}
+
+		// String literals
+		if r == '"' || r == '\'' || r == '`' {
+			inString = true
+			strQuote = r
+			continue
+		}
+
+		switch r {
+		case '(', ')', '{', '}', '[', ']':
+			counts[r]++
+		}
+	}
+	return counts
+}
+
+func isHashCommentExt(ext string) bool {
+	switch ext {
+	case ".py", ".pyi", ".pyw", ".rb", ".rake", ".sh", ".bash", ".zsh", ".yaml", ".yml",
+		".toml", ".r", ".pl", ".pm", ".ex", ".exs", ".dockerfile", ".env", ".nim", ".jl":
+		return true
+	}
+	return false
+}
+
+func isDashCommentExt(ext string) bool {
+	switch ext {
+	case ".sql", ".lua", ".hs", ".ada", ".vhdl":
+		return true
+	}
+	return false
+}
+
+func isHTMLExt(ext string) bool {
+	switch ext {
+	case ".html", ".htm", ".xml", ".svg", ".vue", ".svelte", ".jsx", ".tsx":
+		return true
+	}
+	return false
+}
+
+// FindClosestBlock scans content for the line window of the same length as target
+// that has the highest similarity to target, providing an immediate diagnostic suggestion.
+func FindClosestBlock(content, target string) string {
+	targetLines := strings.Split(strings.TrimSpace(target), "\n")
+	if len(targetLines) == 0 {
+		return ""
+	}
+	contentLines := strings.Split(content, "\n")
+	if len(contentLines) < len(targetLines) {
+		return ""
+	}
+
+	bestScore := 0.0
+	bestStart := -1
+	targetLen := len(targetLines)
+
+	for i := 0; i <= len(contentLines)-targetLen; i++ {
+		score := 0.0
+		for j := 0; j < targetLen; j++ {
+			score += lineSimilarity(strings.TrimSpace(targetLines[j]), strings.TrimSpace(contentLines[i+j]))
+		}
+		avg := score / float64(targetLen)
+		if avg > bestScore && avg >= 0.4 {
+			bestScore = avg
+			bestStart = i
+		}
+	}
+
+	if bestStart >= 0 {
+		end := bestStart + targetLen
+		if end > len(contentLines) {
+			end = len(contentLines)
+		}
+		return strings.Join(contentLines[bestStart:end], "\n")
+	}
+	return ""
 }

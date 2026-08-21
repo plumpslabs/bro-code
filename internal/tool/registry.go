@@ -978,6 +978,13 @@ func (t *WriteFileTool) Execute(ctx context.Context, argsJSON string) (string, e
 		action = "modified"
 	}
 
+	// Syntax integrity validation: reject broken brackets/delimiters
+	if old != "" {
+		if err := ValidateSyntaxIntegrity(args.Path, old, final); err != nil {
+			return "", fmt.Errorf("syntax integrity check failed for %s: %w. File was NOT overwritten. Please verify the code before writing.", args.Path, err)
+		}
+	}
+
 	// JSON structural validation: ensure no duplicate keys in object scope
 	if strings.HasSuffix(strings.ToLower(args.Path), ".json") {
 		if err := ValidateJSONNoDuplicateKeys(final); err != nil {
@@ -1001,19 +1008,31 @@ type EditFileTool struct{}
 
 func (t *EditFileTool) Name() string { return "edit_file" }
 func (t *EditFileTool) Description() string {
-	return "Edit a file. PREFER a positional edit with start_line/end_line — you get line numbers from code_locate, so you can edit a span WITHOUT reading the whole file first (token-cheap). When no range is given, falls back to exact-string replacement of `target` with `replacement`."
+	return "Edit a file using surgical search & replace. Provide 'target' (the exact verbatim code snippet from read_file) and 'replacement' (the new code), or an array of 'edits' for atomic multi-chunk changes. 'start_line' and 'end_line' are optional to narrow the search window in large files."
 }
 func (t *EditFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"path":        map[string]any{"type": "string", "description": "Target file path"},
-			"target":      map[string]any{"type": "string", "description": "Exact text to replace (used only when start_line/end_line are NOT given)"},
-			"replacement": map[string]any{"type": "string", "description": "Replacement text (or the new content for the start_line/end_line span)"},
-			"start_line":  map[string]any{"type": "integer", "description": "1-based start line of the span to replace (positional edit — no full read needed)"},
-			"end_line":    map[string]any{"type": "integer", "description": "1-based end line (exclusive) of the span to replace; omit to replace from start_line to EOF"},
+			"target":      map[string]any{"type": "string", "description": "Exact verbatim code block to replace from read_file"},
+			"replacement": map[string]any{"type": "string", "description": "New replacement code"},
+			"start_line":  map[string]any{"type": "integer", "description": "Optional 1-based start line to narrow the search window in large files"},
+			"end_line":    map[string]any{"type": "integer", "description": "Optional 1-based end line to narrow the search window in large files"},
+			"edits": map[string]any{
+				"type":        "array",
+				"description": "Optional array of atomic edit chunks [{target, replacement}, ...] applied sequentially with all-or-nothing rollback",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"target":      map[string]any{"type": "string", "description": "Exact verbatim code block to replace"},
+						"replacement": map[string]any{"type": "string", "description": "New replacement code"},
+					},
+					"required": []string{"target", "replacement"},
+				},
+			},
 		},
-		"required": []string{"path", "replacement"},
+		"required": []string{"path"},
 	}
 }
 func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, error) {
@@ -1023,6 +1042,10 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		Replacement string `json:"replacement"`
 		StartLine   int    `json:"start_line"`
 		EndLine     int    `json:"end_line"`
+		Edits       []struct {
+			Target      string `json:"target"`
+			Replacement string `json:"replacement"`
+		} `json:"edits"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
@@ -1049,12 +1072,26 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		content = content[3:]
 	}
 	newContent := content
-
-	// Edit strategy:
-	// 1. If target text is provided, try multi-tier resilient replacement first (exact → CRLF → indent → line-trimmed → block-anchor → fuzzy).
-	// 2. If target is empty but start_line/end_line are given, fall back to surgical positional replacement.
 	editRange := ""
-	if args.Target != "" {
+
+	if len(args.Edits) > 0 {
+		// Multi-chunk atomic transaction
+		for idx, hunk := range args.Edits {
+			if hunk.Target == "" {
+				continue
+			}
+			res, _, err := ApplyResilientEdit(newContent, hunk.Target, hunk.Replacement)
+			if err != nil {
+				diag := ""
+				if closest := FindClosestBlock(newContent, hunk.Target); closest != "" {
+					diag = fmt.Sprintf("\nDid you mean:\n---\n%s\n---", closest)
+				}
+				return "", fmt.Errorf("chunk #%d failed in %s: %w.%s Tip: inspect with read_file to copy the exact code block", idx+1, args.Path, err, diag)
+			}
+			newContent = res
+		}
+		editRange = fmt.Sprintf(" (%d atomic chunks)", len(args.Edits))
+	} else if args.Target != "" {
 		res, tier, err := ApplyResilientEdit(content, args.Target, args.Replacement)
 		if err == nil {
 			newContent = res
@@ -1083,7 +1120,11 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 			newContent = strings.Join(updated, "\n")
 			editRange = fmt.Sprintf(" (lines %d-%d)", args.StartLine, end)
 		} else {
-			return "", fmt.Errorf("target block not found in %s: %w. Tip: use read_file first to see the exact code or use start_line/end_line", args.Path, err)
+			diag := ""
+			if closest := FindClosestBlock(content, args.Target); closest != "" {
+				diag = fmt.Sprintf("\nDid you mean:\n---\n%s\n---", closest)
+			}
+			return "", fmt.Errorf("target block not found in %s: %w.%s Tip: use read_file first to copy the exact code block", args.Path, err, diag)
 		}
 	} else if args.StartLine > 0 || args.EndLine > 0 {
 		// Pure positional edit without target
@@ -1107,11 +1148,16 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		newContent = strings.Join(updated, "\n")
 		editRange = fmt.Sprintf(" (lines %d-%d)", args.StartLine, end)
 	} else {
-		return "", fmt.Errorf("edit_file requires either 'target' text to replace or 'start_line'/'end_line'")
+		return "", fmt.Errorf("edit_file requires 'target' text to replace or 'edits' array. Please inspect with read_file and provide the exact verbatim target block")
 	}
 
 	if newContent == content {
 		return fmt.Sprintf("No change made to %s", args.Path), nil
+	}
+
+	// Syntax integrity validation: reject broken brackets, malformed JSX, unbalanced tokens
+	if err := ValidateSyntaxIntegrity(args.Path, content, newContent); err != nil {
+		return "", fmt.Errorf("syntax integrity check failed for %s: %w. Edit was REJECTED to prevent file corruption. Please inspect with read_file and provide a balanced replacement block.", args.Path, err)
 	}
 
 	// JSON structural validation: ensure no duplicate keys in object scope
@@ -1302,7 +1348,7 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		excl = append(excl, "--exclude-dir="+d)
 	}
 
-	cmdArgs := append([]string{"-rn", "-I"}, append(excl, args.Pattern, args.Path)...)
+	cmdArgs := append([]string{"-E", "-rn", "-I"}, append(excl, args.Pattern, args.Path)...)
 	cmd := exec.CommandContext(ctx, "grep", cmdArgs...)
 	output, err := cmd.Output()
 	// grep exits 1 when there are NO matches — that is a normal result, not an
@@ -1323,6 +1369,22 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	if len(lines) == 1 && lines[0] == "" {
+		// Case-insensitive fallback: if exact case returned 0 matches and query contains uppercase/mixed letters
+		if strings.ToLower(args.Pattern) != args.Pattern || strings.ToUpper(args.Pattern) != args.Pattern {
+			cmdArgsI := append([]string{"-E", "-rn", "-I", "-i"}, append(excl, args.Pattern, args.Path)...)
+			cmdI := exec.CommandContext(ctx, "grep", cmdArgsI...)
+			if outI, errI := cmdI.Output(); errI == nil && len(outI) > 0 {
+				iLines := strings.Split(strings.TrimSpace(string(outI)), "\n")
+				if len(iLines) > 0 && iLines[0] != "" {
+					if len(iLines) > 30 {
+						iLines = iLines[:30]
+					}
+					msg := fmt.Sprintf("[No exact case-sensitive matches. Found %d case-insensitive matches]:\n%s", len(iLines), strings.Join(iLines, "\n"))
+					toolResultCache.Put("grep", grepKey, msg, "global")
+					return msg, nil
+				}
+			}
+		}
 		toolResultCache.Put("grep", grepKey, "No matches found.", "global")
 		return "No matches found.", nil
 	}
@@ -1531,8 +1593,10 @@ type BashTool struct {
 	WorkDir string
 }
 
-func (t *BashTool) Name() string        { return "bash" }
-func (t *BashTool) Description() string { return "Execute shell command" }
+func (t *BashTool) Name() string { return "bash" }
+func (t *BashTool) Description() string {
+	return "Execute shell commands in the workspace. Fully available for exploration, git commands (diff, log, status), terminal tools (grep, ripgrep, find, jq), running test suites, compilers, and project utilities. Destructive system operations (rm -rf /, disk formatting) and dumping secret files (.env, private keys) are protected."
+}
 func (t *BashTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -1572,15 +1636,21 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		return t.execInContainer(tctx, args.Command)
 	}
 
+	cmdStr := args.Command
+	// Map /workspace references on host shell to the project root directory
+	if t.WorkDir != "" && strings.Contains(cmdStr, "/workspace") {
+		cmdStr = strings.ReplaceAll(cmdStr, "/workspace", t.WorkDir)
+	}
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		if bashPath, err := exec.LookPath("bash"); err == nil {
-			cmd = exec.CommandContext(tctx, bashPath, "-c", args.Command)
+			cmd = exec.CommandContext(tctx, bashPath, "-c", cmdStr)
 		} else {
-			cmd = exec.CommandContext(tctx, "cmd.exe", "/c", args.Command)
+			cmd = exec.CommandContext(tctx, "cmd.exe", "/c", cmdStr)
 		}
 	} else {
-		cmd = exec.CommandContext(tctx, "sh", "-c", args.Command)
+		cmd = exec.CommandContext(tctx, "sh", "-c", cmdStr)
 	}
 	out, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(out))

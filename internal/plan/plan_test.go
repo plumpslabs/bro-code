@@ -85,3 +85,60 @@ func TestSaveLoadAndArchiveCurrentPlan(t *testing.T) {
 		t.Errorf("expected current_plan.md to be removed after archiving")
 	}
 }
+
+func TestParseMarkdownPlan_UniversalLanguageAgnostic(t *testing.T) {
+	// Scenario 1: Numbered heading format (like event 88 from session logs)
+	md1 := `## Rencana Perbaikan UI Bubble Kontak
+
+### Masalah
+Teks putih di latar belakang biru.
+
+### Solusi
+Berikut rencananya:
+
+#### 1. **Identifikasi Pola Bubble Kontak**
+Pastikan selector CSS benar.
+
+#### 2. **Perbaikan Warna Teks di Mode Terang**
+Ganti class Tailwind.
+
+#### 3. **Perbaikan Warna Teks di Mode Gelap**
+Gunakan text-slate-200.
+
+#### 4. **Penempatan Ikon yang Sesuai**
+Tambahkan UserIcon dan Phone.
+
+- crm-react-vite-tailwind-modern/src/pages/followup/section/OmnichannelPanel/components/MessageBubble.tsx
+`
+	p1 := ParseMarkdownPlan(md1)
+	if p1.Goal != "Rencana Perbaikan UI Bubble Kontak" {
+		t.Errorf("expected goal 'Rencana Perbaikan UI Bubble Kontak', got '%s'", p1.Goal)
+	}
+	if len(p1.Steps) != 4 {
+		t.Fatalf("expected 4 steps, got %d", len(p1.Steps))
+	}
+	if len(p1.Files) != 1 {
+		t.Errorf("expected 1 file, got %d", len(p1.Files))
+	}
+
+	// Scenario 2: Japanese numbered list format
+	md2 := `# 認証機能の実装計画
+
+1. JWTトークンの生成関数の作成
+2. ミドルウェアへのトークン検証の追加
+3. ユニットテストの作成
+
+- /pkg/auth/jwt.go
+- /pkg/middleware/auth.go
+`
+	p2 := ParseMarkdownPlan(md2)
+	if p2.Goal != "認証機能の実装計画" {
+		t.Errorf("expected Japanese goal, got '%s'", p2.Goal)
+	}
+	if len(p2.Steps) != 3 {
+		t.Fatalf("expected 3 steps, got %d", len(p2.Steps))
+	}
+	if len(p2.Files) != 2 {
+		t.Errorf("expected 2 files, got %d", len(p2.Files))
+	}
+}

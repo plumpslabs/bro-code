@@ -274,16 +274,36 @@ func tscAvailableIn(dir, pm string) bool {
 	return pm == "bun" || pm == "pnpm"
 }
 
-// planVerificationForFiles plans verification checks scoped to the directories
-// containing editedFiles when possible, falling back to full repo plan.
+// findProjectRootForFile walks up the directory hierarchy starting from the file's
+// directory to find the nearest ancestor directory containing a recognized project config.
+func findProjectRootForFile(filePath string) string {
+	clean := filepath.ToSlash(filepath.Clean(filePath))
+	dir := filepath.Dir(clean)
+	for dir != "." && dir != "/" && dir != "" {
+		base := filepath.Base(dir)
+		if !isHeavyVerifyDir(base) && len(planIn(dir)) > 0 {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	if len(planIn(".")) > 0 {
+		return "."
+	}
+	return ""
+}
+
+// planVerificationForFiles plans verification checks scoped to the nearest project
+// roots containing editedFiles when possible, falling back to full repo plan.
 func planVerificationForFiles(editedFiles []string) []checkCmd {
 	if len(editedFiles) > 0 {
 		subdirs := make(map[string]bool)
 		for _, f := range editedFiles {
-			clean := filepath.ToSlash(filepath.Clean(f))
-			parts := strings.Split(clean, "/")
-			if len(parts) > 1 && !isHeavyVerifyDir(parts[0]) {
-				subdirs[parts[0]] = true
+			if root := findProjectRootForFile(f); root != "" {
+				subdirs[root] = true
 			}
 		}
 		var subCmds []checkCmd

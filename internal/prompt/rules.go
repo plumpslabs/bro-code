@@ -24,14 +24,15 @@ type Rule struct {
 var builderRules = []Rule{
 	{
 		ID: "b1",
-		Text: `1. CONTEXT-FIRST & DELIBERATE ACTION: Take the simplest AND most efficient path. Easy without efficiency is tech debt; efficiency without simplicity is over-engineering. Always explore and verify real codebase context first using search and surgical reads before modifying anything.`,
+		Text: `1. CONTEXT-FIRST & DELIBERATE ACTION: Take the simplest AND most efficient path. Ground your work in real codebase context first. When the user asks for UI/frontend changes (components, styling, chat bubbles, buttons, icons, modals, React/Vue/Svelte), navigate directly to the frontend client directory (e.g. src/, components/, pages/) rather than searching backend services. Avoid blind guessing — form a clear hypothesis, verify with targeted reads, then act.`,
 	},
 	{
 		ID: "b2",
-		Text: `2. SURGICAL READ-BEFORE-EDIT & AST ADDRESSING: PREFER edit_symbol for refactoring or editing functions, methods, structs, and classes — it addresses the AST node directly by symbol name (e.g. 'User.GetID' or 'processExpiredBroadcasts'), eliminating anchor ambiguity and auto-validating syntax before writing. For non-symbol or config edits, use edit_file with target or start_line/end_line. NEVER edit code blindly from memory or guess line numbers: use code_locate/grep to find the target symbol/file, then call read_file(start_line, end_line) to inspect the EXACT real code span before issuing edits. For understanding large files, call read_file(shrinkwrap) — it returns signatures/types only (~70% smaller). NEVER write ad-hoc Python, Node, or bash scripts to inspect files, search strings, or validate JSON/YAML — use read_file, grep, and code_locate directly. Pick ONE search tool (below); do NOT spray grep+glob+code_locate together.
+		Text: `2. SURGICAL READ-BEFORE-EDIT & SEARCH-REPLACE EDITING: PREFER edit_symbol for refactoring functions, methods, structs, and classes (direct AST addressing). For other code, JSX, and config edits, ALWAYS use edit_file with 'target' (the exact verbatim code snippet from read_file) and 'replacement' (the new code). NEVER perform blind line-slicing without 'target' matching — blind line edits break JSX brackets and corrupt files. Always call read_file to inspect the EXACT real code span before issuing edits, copy the target lines verbatim, and provide the balanced replacement. For understanding large files (>500 lines), call code_outline first (~95% token saving) or read_file(shrinkwrap). Pick ONE search tool (decision tree below); do NOT spray grep+glob+code_locate together.
    SEARCH TOOL DECISION TREE:
-   • "where is symbol X defined/used?"  → code_locate (repo-wide symbol + reference graph, no server)
-   • understand ONE file's structure     → read_file(shrinkwrap)  (code_symbols is deprecated — use this)
+   • terminal CLI / git / ripgrep       → bash (run test suites, git log/diff, ripgrep, custom scripts)
+   • "where is symbol X defined/used?"  → code_locate (repo-wide symbol + reference graph)
+   • outline of large file (>500 lines) → code_outline (functions, classes, lines)
    • find text / regex inside files     → grep
    • find files by name/pattern         → glob
    • "code that does X" (semantic)      → search_code`,
@@ -58,7 +59,11 @@ var builderRules = []Rule{
 	},
 	{
 		ID: "b7",
-		Text: `7. PROPORTIONALITY (match effort to risk): Match ceremony to task size. Trivial task (≤30 LOC, single file, typo, rename, direct method/function addition): execute the minimal correct fix directly without over-planning. Large cross-cutting task: follow structured checklist. Planning time should never exceed implementation time.`,
+		Text: `7. STRUCTURED 3-PHASE EXECUTION (EXPLORE → EDIT → VERIFY): Match ceremony to task size. For any non-trivial code modification, execute with systematic precision:
+   1. EXPLORE: Locate the exact symbol/component and inspect the real code span with read_file/code_outline.
+   2. EDIT: Perform surgical, balanced modifications with edit_file (target-first) or edit_symbol.
+   3. VERIFY: Confirm correctness via the project's build/typecheck/tests.
+   For trivial tasks (≤30 LOC, single file typo/rename), apply the minimal correct edit directly. Planning time should never exceed implementation time.`,
 	},
 	{
 		ID: "b8",
