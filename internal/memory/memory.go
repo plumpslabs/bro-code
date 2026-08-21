@@ -742,11 +742,12 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 				lastGoal = c
 			}
 		case "assistant_msg":
-			// If the assistant output a plan/roadmap (e.g. from PLANNER mode), capture to current_plan.md & memory.md
-			contentLower := strings.ToLower(msg.Content)
-			if strings.Contains(contentLower, "plan") || strings.Contains(contentLower, "roadmap") || strings.Contains(contentLower, "langkah") || strings.Contains(contentLower, "tahap") || strings.Contains(contentLower, "rencana") {
+			// If the assistant output a plan/roadmap from PLANNER mode or an explicit plan block, capture to current_plan.md & memory.md
+			isPlanner := msg.Mode == "PLANNER"
+			hasPlanHeader := strings.Contains(msg.Content, "# 🎯 Plan:") || strings.Contains(msg.Content, "# Plan:") || strings.Contains(msg.Content, "## 📋 Tasks")
+			if isPlanner || hasPlanHeader {
 				parsed := plan.ParseMarkdownPlan(msg.Content)
-				if parsed != nil && len(parsed.Steps) > 0 {
+				if parsed != nil && len(parsed.Steps) >= 2 {
 					if s.path != "" {
 						wsDir := filepath.Dir(filepath.Dir(s.path))
 						_ = plan.SaveCurrentPlan(wsDir, parsed)

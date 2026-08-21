@@ -1180,7 +1180,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// When tools execute, record a live process block in the chat stream for read/search tools.
 		// File mutations (edit_file/write_file/delete_file) are handled by upsertDiffMessage (DIFF/CREATE/DELETE bars).
-		if msg.state == loop.StateActing && (strings.HasPrefix(msg.info, "📖 ") || strings.HasPrefix(msg.info, "🔧 ") || strings.HasPrefix(msg.info, "⚙️ ") || strings.HasPrefix(msg.info, "📡 ") || strings.HasPrefix(msg.info, "🧪 ")) {
+		if msg.state == loop.StateActing && (strings.HasPrefix(msg.info, "📖") || strings.HasPrefix(msg.info, "🔧") || strings.HasPrefix(msg.info, "⚙️") || strings.HasPrefix(msg.info, "📡") || strings.HasPrefix(msg.info, "🧪") || strings.HasPrefix(msg.info, "✍️") || strings.HasPrefix(msg.info, "🗑️")) {
 			procMsg := "PROCESS:\n" + strings.TrimSpace(msg.info)
 			if len(m.messages) == 0 || m.messages[len(m.messages)-1] != procMsg {
 				m.appendMessages(procMsg)
@@ -1575,6 +1575,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logViewport.HalfPageUp()
 			return m, nil
 
+		case "ctrl+d":
+			m.logViewport.HalfPageDown()
+			return m, nil
+
 		case "ctrl+p":
 			// In-TUI pager for the last assistant answer (no subprocess): the
 			// viewport locks to the answer, keys scroll it, q/Esc/Ctrl+P exit.
@@ -1958,6 +1962,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		case "shift+up", "ctrl+up", "alt+up":
+			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
+				m.logViewport.ScrollUp(1)
+				return m, nil
+			}
+
+		case "shift+down", "ctrl+down", "alt+down":
+			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
+				m.logViewport.ScrollDown(1)
+				return m, nil
+			}
+
 		case "up":
 			if m.autocomplete.Active && len(m.autocomplete.Items) > 0 {
 				if m.autocomplete.Selected > 0 {
@@ -1991,6 +2007,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.connectProviderSel--
 				return m, nil
 			}
+			if m.turnRunning && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk {
+				m.logViewport.ScrollUp(1)
+				return m, nil
+			}
 			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk && !strings.Contains(m.promptInput.Value(), "\n") {
 				if len(m.promptHistory) > 0 {
 					if m.historyIdx > 0 {
@@ -2012,6 +2032,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.showAsk && m.askCustomQ < 0 {
 				m.askMove(1)
+				return m, nil
+			}
+			if m.turnRunning && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk {
+				m.logViewport.ScrollDown(1)
 				return m, nil
 			}
 			if m.showModels {
@@ -3232,9 +3256,14 @@ func (m *Model) View() tea.View {
 					m.renderedLog = log
 				}
 			} else if key := m.logKey(); key != m.renderedKey || vpHeight != m.renderedH {
+				wasAtBottom := m.logViewport.AtBottom()
 				m.logViewport.SetContent(log)
 				if key != m.renderedKey || m.renderedH == 0 {
-					m.parkLogAfterNewContent(log, vpHeight, contentWidth)
+					// If the user has scrolled up to read history while the agent is running,
+					// preserve the user's scroll position instead of snapping back to bottom.
+					if wasAtBottom || !m.turnRunning {
+						m.parkLogAfterNewContent(log, vpHeight, contentWidth)
+					}
 				}
 				// Height-only change (the live activity slot grew/shrunk): content
 				// is identical, so preserve the reading position — the viewport's

@@ -3299,31 +3299,31 @@ func formatToolCallInfo(name, argsJSON string) string {
 		}
 		if name == "write_file" {
 			path, _ := m["path"].(string)
-			return fmt.Sprintf("✍️ write_file %s", shortenPath(path))
+			return fmt.Sprintf("✍️  write_file %s", shortenPath(path))
 		}
 		if name == "delete_file" {
 			path, _ := m["path"].(string)
-			return fmt.Sprintf("🗑️ delete_file %s", shortenPath(path))
+			return fmt.Sprintf("🗑️  delete_file %s", shortenPath(path))
 		}
 		if name == "read_file" {
 			path, _ := m["path"].(string)
 			if s, ok := m["start_line"].(float64); ok && s > 0 {
-				return fmt.Sprintf("📖 read_file %s:L%d", shortenPath(path), int(s))
+				return fmt.Sprintf("📖  read_file %s:L%d", shortenPath(path), int(s))
 			}
-			return fmt.Sprintf("📖 read_file %s", shortenPath(path))
+			return fmt.Sprintf("📖  read_file %s", shortenPath(path))
 		}
 		if path, ok := m["path"].(string); ok && path != "" {
-			return fmt.Sprintf("🔧 %s %s", name, shortenPath(path))
+			return fmt.Sprintf("🔧  %s %s", name, shortenPath(path))
 		}
 		if pattern, ok := m["pattern"].(string); ok && pattern != "" {
-			return fmt.Sprintf("🔧 %s %s", name, pattern)
+			return fmt.Sprintf("🔧  %s %s", name, pattern)
 		}
 		if cmd, ok := m["command"].(string); ok && cmd != "" {
 			firstLine := strings.TrimSpace(strings.Split(cmd, "\n")[0])
 			if len(firstLine) > 50 {
 				firstLine = firstLine[:47] + "…"
 			}
-			return fmt.Sprintf("⚙️ %s %s", name, firstLine)
+			return fmt.Sprintf("⚙️  %s %s", name, firstLine)
 		}
 	}
 	return name

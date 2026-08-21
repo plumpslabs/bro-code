@@ -841,5 +841,5 @@ func compactToolSummary(tools []string) string {
 	for _, name := range order {
 		parts = append(parts, fmt.Sprintf("%s (x%d)", name, counts[name]))
 	}
-	return fmt.Sprintf("PROCESS:\n⚙️ Process (%d tools executed): %s", len(tools), strings.Join(parts, " · "))
+	return fmt.Sprintf("PROCESS:\n⚙️  Process (%d tools executed): %s", len(tools), strings.Join(parts, " · "))
 }

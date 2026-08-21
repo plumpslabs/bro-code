@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -77,6 +78,10 @@ func SaveCurrentPlan(workspaceDir string, p *Plan) error {
 	return os.WriteFile(path, []byte(RenderMarkdownPlan(p)), 0o644)
 }
 
+// maxArchivePlans is the maximum number of completed plans kept in the archive directory.
+// Older plans beyond this limit are automatically pruned to prevent repo bloat.
+const maxArchivePlans = 5
+
 // ArchiveCurrentPlan moves a completed current_plan.md to .brocode/plans/archive/
 // and cleans up current_plan.md so no stale tasks linger.
 func ArchiveCurrentPlan(workspaceDir string) (string, error) {
@@ -85,6 +90,9 @@ func ArchiveCurrentPlan(workspaceDir string) (string, error) {
 		return "", err
 	}
 	p.Status = "COMPLETED"
+	for i := range p.Steps {
+		p.Steps[i].Status = "done"
+	}
 	archiveDir := ArchiveDirPath(workspaceDir)
 	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
 		return "", err
@@ -101,7 +109,31 @@ func ArchiveCurrentPlan(workspaceDir string) (string, error) {
 		return "", err
 	}
 	_ = os.Remove(CurrentPlanPath(workspaceDir))
+	_ = pruneOldArchives(archiveDir, maxArchivePlans)
 	return archivePath, nil
+}
+
+func pruneOldArchives(archiveDir string, maxCount int) error {
+	entries, err := os.ReadDir(archiveDir)
+	if err != nil || len(entries) <= maxCount {
+		return err
+	}
+	var mdFiles []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			mdFiles = append(mdFiles, e.Name())
+		}
+	}
+	if len(mdFiles) <= maxCount {
+		return nil
+	}
+	// Sort ascending (oldest first because timestamp prefix is YYYY-MM-DD_HHMMSS)
+	sort.Strings(mdFiles)
+	toDelete := len(mdFiles) - maxCount
+	for i := 0; i < toDelete; i++ {
+		_ = os.Remove(filepath.Join(archiveDir, mdFiles[i]))
+	}
+	return nil
 }
 
 // IsAllStepsDone checks if all steps in the plan have been marked done.
@@ -182,8 +214,8 @@ func ParseMarkdownPlan(md string) *Plan {
 			continue
 		}
 		// Checklist task detection
-		if strings.HasPrefix(trimmed, "- [x]") || strings.HasPrefix(trimmed, "* [x]") {
-			desc := strings.TrimSpace(trimmed[5:])
+		if strings.HasPrefix(trimmed, "- [x]") || strings.HasPrefix(trimmed, "* [x]") || strings.HasPrefix(trimmed, "- [X]") || strings.HasPrefix(trimmed, "* [X]") {
+			desc := cleanTaskDesc(trimmed[5:])
 			p.Steps = append(p.Steps, PlanStep{
 				ID:          fmt.Sprintf("step_%d", stepIdx),
 				Description: desc,
@@ -191,19 +223,27 @@ func ParseMarkdownPlan(md string) *Plan {
 			})
 			stepIdx++
 		} else if strings.HasPrefix(trimmed, "- [ ]") || strings.HasPrefix(trimmed, "* [ ]") {
-			desc := strings.TrimSpace(trimmed[5:])
+			desc := cleanTaskDesc(trimmed[5:])
+			status := "pending"
+			if strings.Contains(trimmed, "✅") || strings.Contains(trimmed, "✔️") || strings.Contains(trimmed, "[x]") {
+				status = "done"
+			}
 			p.Steps = append(p.Steps, PlanStep{
 				ID:          fmt.Sprintf("step_%d", stepIdx),
 				Description: desc,
-				Status:      "pending",
+				Status:      status,
 			})
 			stepIdx++
 		} else if isStepHeader(trimmed) {
-			desc := cleanStepDesc(trimmed)
+			desc := cleanTaskDesc(cleanStepDesc(trimmed))
+			status := "pending"
+			if strings.Contains(trimmed, "✅") || strings.Contains(trimmed, "✔️") {
+				status = "done"
+			}
 			p.Steps = append(p.Steps, PlanStep{
 				ID:          fmt.Sprintf("step_%d", stepIdx),
 				Description: desc,
-				Status:      "pending",
+				Status:      status,
 			})
 			stepIdx++
 		}
@@ -236,7 +276,7 @@ func RenderMarkdownPlan(p *Plan) string {
 		if step.Status == "done" {
 			marker = "[x]"
 		}
-		sb.WriteString("- " + marker + " " + step.Description + "\n")
+		sb.WriteString("- " + marker + " " + cleanTaskDesc(step.Description) + "\n")
 	}
 	if len(p.Files) > 0 {
 		sb.WriteString("\n## 📁 Impacted Files\n")
@@ -245,6 +285,15 @@ func RenderMarkdownPlan(p *Plan) string {
 		}
 	}
 	return sb.String()
+}
+
+func cleanTaskDesc(desc string) string {
+	s := strings.TrimSpace(desc)
+	s = strings.TrimSuffix(s, "✅")
+	s = strings.TrimSuffix(s, "✔️")
+	s = strings.TrimSuffix(s, "(done)")
+	s = strings.TrimSuffix(s, "(completed)")
+	return strings.TrimSpace(s)
 }
 
 func isStepHeader(line string) bool {
