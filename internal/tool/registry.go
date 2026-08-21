@@ -260,7 +260,7 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 	// lsp_fix/lsp_rename write to disk through the LSP client, so they are
 	// blocked here too — read-only mode must be airtight.
 	if r.readOnly && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "edit_symbol" || tc.Name == "delete_file" || tc.Name == "lsp_fix" || tc.Name == "lsp_rename") {
-		return false, fmt.Sprintf("⚠️ [READ-ONLY MODE]: Tool '%s' is disabled in read-only mode (PLANNER/MINER). Switch to BUILDER (Shift+Tab) to modify code.", tc.Name), nil
+		return false, fmt.Sprintf("⚠️ [READ-ONLY MODE]: Tool '%s' is disabled in PLANNER mode. You do NOT need to write any plan file to disk yourself. Simply output your plan directly as markdown text in your chat response and BroCode will automatically save it to .brocode/current_plan.md. Do NOT attempt to write to .agents/ or any other folders.", tc.Name), nil
 	}
 	if r.readOnlyBash && tc.Name == "bash" {
 		return false, "⚠️ [READ-ONLY MODE]: Tool 'bash' is disabled in PLANNER mode (read-only architecture mode). Switch to BUILDER (Shift+Tab) to execute commands.", nil
@@ -512,7 +512,7 @@ func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (result s
 	// never pass through GateAction (sub-agents and other non-loop callers).
 	// lsp_fix/lsp_rename mutate files, so they are read-only-blocked too.
 	if r.readOnly && (name == "write_file" || name == "edit_file" || name == "edit_symbol" || name == "delete_file" || name == "lsp_fix" || name == "lsp_rename") {
-		return "", fmt.Errorf("tool '%s' is disabled in read-only mode (PLANNER/MINER): switch to BUILDER to modify code", name)
+		return "", fmt.Errorf("tool '%s' is disabled in read-only mode (PLANNER/MINER): output your plan directly as text in your response and BroCode will save it automatically to .brocode/current_plan.md", name)
 	}
 	if r.readOnlyBash && name == "bash" {
 		return "", fmt.Errorf("tool 'bash' is disabled in PLANNER mode (read-only): switch to BUILDER to execute commands")

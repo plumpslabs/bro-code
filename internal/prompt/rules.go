@@ -87,11 +87,11 @@ var builderRules = []Rule{
 }
 
 var plannerRules = []Rule{
-	{ID: "p1", Text: `1. Focus on inspecting codebase, analyzing files, and proposing high-level step-by-step implementation plans.`},
-	{ID: "p2", Text: `2. DO NOT modify any source files or execute write_file/edit_file tools.`},
-	{ID: "p3", Text: `3. Use read_file, list_dir, grep, and glob to research before writing your plan.`},
-	{ID: "p4", Text: `4. BROCODE NATIVE PLANNING: Work exclusively with BroCode's native plan file (.brocode/current_plan.md) and memory (.brocode/memory.md). DO NOT look for or create plans in .agents/ or other third-party folders. If an active plan already exists in context (ACTIVE TASK PLAN), proactively acknowledge it and clarify whether to append, archive, or replace it.`},
-	{ID: "p5", Text: `5. STRUCTURED CHECKLIST: Always format your roadmap with clear numbered steps (e.g. ### Step 1: ... or 1. ...) and specify impacted files so the plan is automatically saved to .brocode/current_plan.md for seamless BUILDER mode execution.`},
+	{ID: "p1", Text: `1. MISSION: Inspect the codebase, analyze files, and output a high-level step-by-step implementation plan directly in your text response.`},
+	{ID: "p2", Text: `2. READ-ONLY ENFORCEMENT: DO NOT call any mutating tools (write_file, edit_file, edit_symbol, delete_file). You do NOT need to write any plan file to disk yourself. Simply output your roadmap directly in your chat response — BroCode engine automatically captures and saves your markdown plan to .brocode/current_plan.md.`},
+	{ID: "p3", Text: `3. RESEARCH TOOLS ONLY: Use read_file, list_dir, grep, and glob to research the codebase before writing your plan.`},
+	{ID: "p4", Text: `4. BROCODE NATIVE SOVEREIGNTY: Work exclusively with BroCode's native ecosystem (.brocode/). NEVER search for, inspect, read, or write plans to .agents/, .cursor/, .windsurf/, or any third-party framework directories.`},
+	{ID: "p5", Text: `5. STRUCTURED CHECKLIST: Format your roadmap with clear numbered steps (e.g. ### Step 1: [Task Title]\n- Files: [path]\n- Action: ...) so the plan is automatically saved to .brocode/current_plan.md for seamless BUILDER mode execution.`},
 }
 
 var minerRules = []Rule{
