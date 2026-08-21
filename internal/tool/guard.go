@@ -36,7 +36,7 @@ var heavyDirNames = map[string]bool{
 	"Pods": true, "Carthage": true, ".dart_tool": true, ".pub-cache": true, ".pub": true,
 	".gradle": true, ".m2": true, ".ivy2": true, ".sbt": true, ".cxx": true,
 	".bundle": true, "_build": true, ".elixir_ls": true,
-	".brocode": true, ".idea": true, ".vscode": true, ".vs": true, ".settings": true,
+	".idea": true, ".vscode": true, ".vs": true, ".settings": true,
 	".project": true, ".classpath": true, ".history": true,
 	".terraform": true, ".terragrunt-cache": true, ".serverless": true, ".vagrant": true,
 	".pulumi": true, ".docker": true, "tmp": true, "temp": true, ".tmp": true, ".temp": true,
@@ -56,10 +56,11 @@ var sensitiveFileNames = map[string]bool{
 	".git-credentials": true, ".dockerconfigjson": true,
 }
 
-// sensitiveExts are file extensions that hold credentials or keys.
+// sensitiveExts are file extensions that hold credentials, keys, or binary databases.
 var sensitiveExts = []string{
 	".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk",
 	".gpg", ".asc", ".kdbx", ".ovpn", ".mobileprovision",
+	".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm",
 }
 
 // isTemplateEnv reports whether a filename is a safe, documented environment template.
