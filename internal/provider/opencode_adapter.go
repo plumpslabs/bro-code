@@ -47,17 +47,22 @@ func NewOpenCodeAdapter() *OpenCodeAdapter {
 }
 
 func (a *OpenCodeAdapter) Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
-	return a.CompleteWithProgress(ctx, req, nil)
+	return a.StreamComplete(ctx, req, nil)
 }
 
-// CompleteWithProgress forwards the request to the HTTP gateway, streaming
-// content deltas to onProgress exactly like every other provider adapter.
-func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req CompletionRequest, onProgress func(string)) (*CompletionResponse, error) {
+// StreamComplete forwards the request to the HTTP gateway, streaming
+// content deltas to onDelta (the chat streaming handler) token by token.
+func (a *OpenCodeAdapter) StreamComplete(ctx context.Context, req CompletionRequest, onDelta func(string)) (*CompletionResponse, error) {
 	// Gateway model IDs carry no "opencode/"/"lalarasa/" routing prefix over
 	// the HTTP API; strip any stray prefix so the request matches the
 	// gateway's own model catalogue.
 	model := strings.TrimPrefix(req.Model, "opencode/")
 	model = strings.TrimPrefix(model, "lalarasa/")
 	req.Model = model
-	return a.http.StreamComplete(ctx, req, onProgress)
+	return a.http.StreamComplete(ctx, req, onDelta)
+}
+
+// CompleteWithProgress satisfies the ProgressingAdapter interface for compatibility.
+func (a *OpenCodeAdapter) CompleteWithProgress(ctx context.Context, req CompletionRequest, onProgress func(string)) (*CompletionResponse, error) {
+	return a.StreamComplete(ctx, req, onProgress)
 }

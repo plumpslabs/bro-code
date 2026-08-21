@@ -3026,14 +3026,14 @@ func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, r
 	st := e.state
 	var resp *provider.CompletionResponse
 	var err error
-	if pa, ok := a.(provider.ProgressingAdapter); ok && progress != nil {
+	if sa, ok := a.(provider.StreamingAdapter); ok && stream != nil {
+		resp, err = sa.StreamComplete(ctx, req, stream)
+	} else if pa, ok := a.(provider.ProgressingAdapter); ok && progress != nil {
 		resp, err = pa.CompleteWithProgress(ctx, req, func(line string) {
 			if progress != nil {
 				progress(st, line)
 			}
 		})
-	} else if sa, ok := a.(provider.StreamingAdapter); ok && stream != nil {
-		resp, err = sa.StreamComplete(ctx, req, stream)
 	} else {
 		resp, err = a.Complete(ctx, req)
 	}
