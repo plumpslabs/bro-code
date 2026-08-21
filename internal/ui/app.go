@@ -34,6 +34,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/prompt"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/repo"
+	"github.com/plumpslabs/bro-code/internal/report"
 	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/skill"
 	"github.com/plumpslabs/bro-code/internal/store"
@@ -2111,7 +2112,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.appendNote("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/diagnose fix - Scan, then auto-fix all safe warnings/errors via the agent\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
+		m.appendNote("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/report [--json] - View or export privacy-safe benchmark/activity report\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/diagnose fix - Scan, then auto-fix all safe warnings/errors via the agent\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
 
 	case "/miner":
 		// Jump straight into MINER mode so the next prompt is a knowledge
@@ -2342,6 +2343,35 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		} else {
 			m.appendMessages("Usage: /model <provider>/<model> or /model <model_name>")
 		}
+
+	case "/report":
+		if m.context == nil || m.context.Store() == nil {
+			m.appendMessages("⚠️ Session store is not initialized.")
+			return m, nil
+		}
+		r, err := report.Build(m.context.Store(), m.context.SessionID())
+		if err != nil {
+			m.appendMessages(fmt.Sprintf("⚠️ Failed to build session report: %v", err))
+			return m, nil
+		}
+		if len(parts) > 1 && (parts[1] == "--json" || parts[1] == "-j" || parts[1] == "json" || parts[1] == "export") {
+			jsonData, err := r.RenderJSON()
+			if err != nil {
+				m.appendMessages(fmt.Sprintf("⚠️ Failed to format JSON report: %v", err))
+				return m, nil
+			}
+			outPath := "report.json"
+			if len(parts) > 2 {
+				outPath = parts[2]
+			}
+			if err := os.WriteFile(outPath, []byte(jsonData), 0o644); err != nil {
+				m.appendMessages(fmt.Sprintf("⚠️ Failed to write %s: %v", outPath, err))
+			} else {
+				m.appendNote(fmt.Sprintf("📊 Privacy-safe session report exported to `%s` (%d bytes).\nReady to share with community / devs for benchmarking & optimization!", outPath, len(jsonData)))
+			}
+			return m, nil
+		}
+		m.appendNote(r.RenderMarkdown())
 	}
 	return m, nil
 }
