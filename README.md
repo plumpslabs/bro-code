@@ -43,9 +43,16 @@ BroCode is an autonomous AI coding agent designed for precision, reliability, an
 
 Choose the installation method that fits your workflow:
 
-### Method 1: One-Line Installer (macOS & Linux)
+### Method 1: One-Line Installer
+
+**macOS & Linux (Bash/Zsh):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.ps1 | iex
 ```
 
 ### Method 2: Go Install

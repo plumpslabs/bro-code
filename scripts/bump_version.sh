@@ -77,10 +77,14 @@ for doc in docs/ARCHITECTURE.md docs/CLI_REFERENCE.md; do
     fi
 done
 
-# 5. Update fallback tag in scripts/install.sh
+# 5. Update fallback tag in scripts/install.sh and scripts/install.ps1
 if [ -f "scripts/install.sh" ]; then
     sed -i.bak -E "s/LATEST_TAG=\"v[0-9]+\.[0-9]+\.[0-9]+\"/LATEST_TAG=\"$NEW_VER\"/g" scripts/install.sh
     rm -f "scripts/install.sh.bak"
+fi
+if [ -f "scripts/install.ps1" ]; then
+    sed -i.bak -E "s/\\\$DefaultTag = \"v[0-9]+\.[0-9]+\.[0-9]+\"/\\\$DefaultTag = \"$NEW_VER\"/g" scripts/install.ps1
+    rm -f "scripts/install.ps1.bak"
 fi
 
 # 6. Verify full test suite

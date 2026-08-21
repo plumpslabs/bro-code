@@ -1345,7 +1345,8 @@
 
       <div class="tab-container">
         <div class="tab-header">
-          <button class="tab-item active" onclick="switchTab(event, 'tab-curl')">Universal Script</button>
+          <button class="tab-item active" onclick="switchTab(event, 'tab-curl')">macOS / Linux</button>
+          <button class="tab-item" onclick="switchTab(event, 'tab-win')">Windows</button>
           <button class="tab-item" onclick="switchTab(event, 'tab-go')">Go Install</button>
           <button class="tab-item" onclick="switchTab(event, 'tab-brew')">Homebrew</button>
           <button class="tab-item" onclick="switchTab(event, 'tab-source')">Build Source</button>
@@ -1356,6 +1357,17 @@
           <div class="code-snippet">
             <code>curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash</code>
             <button class="btn-copy" onclick="copySnippet('curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash', this)">
+              <i data-lucide="copy" style="width: 12px; height: 12px;"></i>
+              <span>Copy</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="tab-win" class="tab-body">
+          <p style="color: var(--text-secondary); margin-bottom: 0.75rem; font-size: 0.88rem;">Installs pre-compiled binary for Windows (PowerShell):</p>
+          <div class="code-snippet">
+            <code>irm https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.ps1 | iex</code>
+            <button class="btn-copy" onclick="copySnippet('irm https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.ps1 | iex', this)">
               <i data-lucide="copy" style="width: 12px; height: 12px;"></i>
               <span>Copy</span>
             </button>
