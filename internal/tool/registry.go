@@ -1046,12 +1046,43 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	}
 	newContent := content
 
-	// Positional (line-range) edit: replace lines [start_line, end_line) with
-	// `replacement`. This is the surgical path — the model edits by position from
-	// code_locate without having read the whole file, which is the single biggest
-	// token saving on edit-heavy turns.
+	// Edit strategy:
+	// 1. If target text is provided, try multi-tier resilient replacement first (exact → CRLF → indent → line-trimmed → block-anchor → fuzzy).
+	// 2. If target is empty but start_line/end_line are given, fall back to surgical positional replacement.
 	editRange := ""
-	if args.StartLine > 0 || args.EndLine > 0 {
+	if args.Target != "" {
+		res, tier, err := ApplyResilientEdit(content, args.Target, args.Replacement)
+		if err == nil {
+			newContent = res
+			if tier != "exact" {
+				editRange = fmt.Sprintf(" (matched via %s)", tier)
+			}
+		} else if args.StartLine > 0 || args.EndLine > 0 {
+			// Positional fallback if target search failed
+			lines := strings.Split(content, "\n")
+			start := args.StartLine - 1
+			if start < 0 {
+				start = 0
+			}
+			end := args.EndLine
+			if end <= 0 || end > len(lines) {
+				end = len(lines)
+			}
+			if start > len(lines) {
+				return "", fmt.Errorf("start_line %d out of bounds (%d lines)", args.StartLine, len(lines))
+			}
+			span := strings.Split(args.Replacement, "\n")
+			updated := make([]string, 0, len(lines)-end+start+len(span))
+			updated = append(updated, lines[:start]...)
+			updated = append(updated, span...)
+			updated = append(updated, lines[end:]...)
+			newContent = strings.Join(updated, "\n")
+			editRange = fmt.Sprintf(" (lines %d-%d)", args.StartLine, end)
+		} else {
+			return "", fmt.Errorf("target block not found in %s: %w. Tip: use read_file first to see the exact code or use start_line/end_line", args.Path, err)
+		}
+	} else if args.StartLine > 0 || args.EndLine > 0 {
+		// Pure positional edit without target
 		lines := strings.Split(content, "\n")
 		start := args.StartLine - 1
 		if start < 0 {
@@ -1072,15 +1103,7 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		newContent = strings.Join(updated, "\n")
 		editRange = fmt.Sprintf(" (lines %d-%d)", args.StartLine, end)
 	} else {
-		// Multi-tier resilient edit (exact → CRLF-normalized → line-trimmed → indent-aligned → fuzzy)
-		res, tier, err := ApplyResilientEdit(content, args.Target, args.Replacement)
-		if err != nil {
-			return "", fmt.Errorf("target string not found in %s: %w. Use start_line/end_line for a positional edit, or read_file first to copy the exact text", args.Path, err)
-		}
-		newContent = res
-		if tier != "exact" {
-			editRange = fmt.Sprintf(" (matched via %s)", tier)
-		}
+		return "", fmt.Errorf("edit_file requires either 'target' text to replace or 'start_line'/'end_line'")
 	}
 
 	if newContent == content {

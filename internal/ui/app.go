@@ -439,13 +439,17 @@ func (m *Model) appendMessages(msgs ...string) {
 }
 
 // upsertDiffMessage appends a live DIFF entry, or replaces the most recent
-// one for the same path. The engine emits a cumulative diff per file, so
-// repeated edits grow a single entry in the history instead of one entry per
-// edit — while an edit to a NEW file still appends a fresh entry.
+// one for the same path within the current turn. The engine emits a cumulative
+// diff per file for that turn, so repeated edits within a turn grow a single entry,
+// while edits across different turns get separate entries in chronological order.
 func (m *Model) upsertDiffMessage(path, diff string) {
 	m.historyVersion++
 	prefix := "DIFF:\n" + path + "\n"
 	for i := len(m.messages) - 1; i >= 0; i-- {
+		// Stop at the turn boundary — never overwrite diffs from previous user turns
+		if strings.HasPrefix(m.messages[i], "YOU:\n") || strings.HasPrefix(m.messages[i], "👤 ") {
+			break
+		}
 		if strings.HasPrefix(m.messages[i], prefix) {
 			m.messages[i] = prefix + diff
 			return

@@ -7,13 +7,14 @@ import (
 )
 
 // ApplyResilientEdit attempts to replace target in content with replacement
-// using a 5-tier resilience pipeline:
+// using a 6-tier resilience pipeline:
 //
 //  Tier 1: Exact substring match
 //  Tier 2: CRLF and trailing whitespace normalization
-//  Tier 3: Line-trimmed matching (ignoring indentation differences per line)
-//  Tier 4: Relative indentation alignment (preserving base indentation of destination)
-//  Tier 5: Unique fuzzy similarity window (threshold >= 85% match, single candidate)
+//  Tier 3: Relative indentation alignment (preserving base indentation of destination)
+//  Tier 4: Line-trimmed matching (ignoring indentation differences per line)
+//  Tier 5: Block-Anchor matching (anchored by unique first and last lines)
+//  Tier 6: Unique fuzzy similarity window (threshold >= 80% match, single candidate)
 //
 // Returns (newContent, matchTier, error).
 func ApplyResilientEdit(content, target, replacement string) (string, string, error) {
@@ -46,12 +47,17 @@ func ApplyResilientEdit(content, target, replacement string) (string, string, er
 		return res, "line-trimmed", nil
 	}
 
-	// ── Tier 5: Fuzzy Similarity Window ─────────────────────────────────────
+	// ── Tier 5: Block-Anchor Match (Unique first + last line bounding) ──────
+	if res, ok := matchBlockAnchor(normContent, normTarget, normReplacement); ok {
+		return res, "block-anchor", nil
+	}
+
+	// ── Tier 6: Fuzzy Similarity Window ─────────────────────────────────────
 	if res, ok := matchFuzzyWindow(normContent, normTarget, normReplacement); ok {
 		return res, "fuzzy-similarity", nil
 	}
 
-	return "", "", fmt.Errorf("target block not found in file (tried exact, whitespace-normalized, indent-aligned, and fuzzy matching)")
+	return "", "", fmt.Errorf("target block not found in file (tried exact, whitespace-normalized, indent-aligned, block-anchor, and fuzzy matching)")
 }
 
 func normalizeLineEndings(s string) string {
@@ -172,30 +178,84 @@ func matchRelativeIndent(content, target, replacement string) (string, bool) {
 	return "", false
 }
 
+// matchBlockAnchor searches for a block bounded by the target's first and last lines.
+// When first and last lines match uniquely in the file within a plausible span,
+// the enclosed block is safely replaced.
+func matchBlockAnchor(content, target, replacement string) (string, bool) {
+	cLines := strings.Split(content, "\n")
+	tLines := strings.Split(strings.TrimRight(target, "\n"), "\n")
+	if len(tLines) < 2 {
+		return "", false
+	}
+	firstTarget := strings.TrimSpace(tLines[0])
+	lastTarget := strings.TrimSpace(tLines[len(tLines)-1])
+	if len(firstTarget) < 3 || len(lastTarget) < 2 {
+		return "", false
+	}
+
+	type matchPair struct{ start, end int }
+	var matches []matchPair
+
+	for i := 0; i < len(cLines); i++ {
+		if strings.TrimSpace(cLines[i]) == firstTarget {
+			minEnd := i + 1
+			maxEnd := i + len(tLines)*2 + 5
+			if maxEnd > len(cLines) {
+				maxEnd = len(cLines)
+			}
+			for j := minEnd; j < maxEnd; j++ {
+				if strings.TrimSpace(cLines[j]) == lastTarget {
+					matches = append(matches, matchPair{start: i, end: j + 1})
+				}
+			}
+		}
+	}
+
+	if len(matches) == 1 {
+		m := matches[0]
+		rLines := strings.Split(strings.TrimRight(replacement, "\n"), "\n")
+		var out []string
+		out = append(out, cLines[:m.start]...)
+		out = append(out, rLines...)
+		out = append(out, cLines[m.end:]...)
+		return strings.Join(out, "\n"), true
+	}
+	return "", false
+}
+
 // matchFuzzyWindow slides over content with the target length, computing line-by-line
-// similarity. If a single window achieves >= 0.85 similarity while all others are < 0.65,
-// it is safely replaced.
-//
-// Pre-filter: before computing expensive Levenshtein for every window, do a cheap
-// length-ratio check (±50% len difference → skip) and a quick hash-based
-// character-set overlap test. This avoids the O(n×m) comparison on obviously
-// non-matching windows, which is the common case (target is usually 2-10 lines,
-// content is 100-1000 lines — only 1-3 windows will pass the pre-filter).
+// similarity. If a single window achieves >= 0.80 similarity, it is safely replaced.
 func matchFuzzyWindow(content, target, replacement string) (string, bool) {
 	cLines := strings.Split(content, "\n")
 	tLines := strings.Split(strings.TrimRight(target, "\n"), "\n")
 	tLen := len(tLines)
-	if tLen < 2 || len(cLines) < tLen {
+	if tLen == 0 || len(cLines) < tLen {
 		return "", false
 	}
 
-	// Pre-filter: compute target's char set fingerprint (runes that appear).
-	tCharSet := charSet(target)
-	tLenSum := 0
-	for _, l := range tLines {
-		tLenSum += len(strings.TrimSpace(l))
-	}
-	if tLenSum == 0 {
+	// Single line fuzzy match
+	if tLen == 1 {
+		cleanT := strings.TrimSpace(tLines[0])
+		bestIdx := -1
+		bestScore := 0.0
+		matchCount := 0
+		for i, line := range cLines {
+			score := lineSimilarity(strings.TrimSpace(line), cleanT)
+			if score >= 0.80 {
+				matchCount++
+				if score > bestScore {
+					bestScore = score
+					bestIdx = i
+				}
+			}
+		}
+		if matchCount == 1 && bestIdx >= 0 {
+			var out []string
+			out = append(out, cLines[:bestIdx]...)
+			out = append(out, strings.TrimRight(replacement, "\n"))
+			out = append(out, cLines[bestIdx+1:]...)
+			return strings.Join(out, "\n"), true
+		}
 		return "", false
 	}
 
@@ -204,27 +264,6 @@ func matchFuzzyWindow(content, target, replacement string) (string, bool) {
 	secondBestScore := 0.0
 
 	for i := 0; i <= len(cLines)-tLen; i++ {
-		// Pre-filter: skip windows whose average line length is wildly
-		// different (>2x or <0.5x) from the target. These can never reach
-		// 85% similarity and would waste an expensive Levenshtein computation.
-		cLenSum := 0
-		for j := 0; j < tLen; j++ {
-			cLenSum += len(strings.TrimSpace(cLines[i+j]))
-		}
-		if cLenSum == 0 {
-			continue
-		}
-		ratio := float64(cLenSum) / float64(tLenSum)
-		if ratio < 0.3 || ratio > 3.0 {
-			continue
-		}
-		// Loose char-set overlap: if the target's character set shares < 50%
-		// of its runes with the window, they can't possibly be similar enough.
-		cSet := charSet(strings.Join(cLines[i:i+tLen], " "))
-		if overlap := charOverlap(tCharSet, cSet); overlap < 0.5 {
-			continue
-		}
-
 		score := 0.0
 		for j := 0; j < tLen; j++ {
 			score += lineSimilarity(strings.TrimSpace(cLines[i+j]), strings.TrimSpace(tLines[j]))
@@ -239,8 +278,8 @@ func matchFuzzyWindow(content, target, replacement string) (string, bool) {
 		}
 	}
 
-	// Safety threshold: best match must be >= 85% similar and distinctly better than runner-up
-	if bestScore >= 0.85 && (bestScore-secondBestScore >= 0.20 || secondBestScore < 0.60) && bestIdx >= 0 {
+	// Safety threshold: best match must be >= 80% similar
+	if bestScore >= 0.80 && (bestScore-secondBestScore >= 0.15 || secondBestScore < 0.65) && bestIdx >= 0 {
 		rLines := strings.Split(strings.TrimRight(replacement, "\n"), "\n")
 		var out []string
 		out = append(out, cLines[:bestIdx]...)

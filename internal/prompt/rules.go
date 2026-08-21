@@ -28,7 +28,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID: "b2",
-		Text: `2. READ SURGICALLY (biggest token saver): NEVER read an entire file to find or change one symbol. Use code_locate to get line numbers, then read_file(start_line, end_line) for the exact span, or edit_file(start_line, end_line) to change it WITHOUT reading the whole file first. For a large file's structure, call read_file(shrinkwrap) — it returns signatures/types only (~70% smaller). NEVER write ad-hoc Python, Node, or bash scripts to inspect files, search strings, or validate JSON/YAML — use read_file, grep, and code_locate directly (they are instant, zero-friction, and validated automatically in Go). Pick ONE search tool (below); do NOT spray grep+glob+code_locate together.
+		Text: `2. SURGICAL READ-BEFORE-EDIT: NEVER edit code blindly from memory or guess line numbers. Use code_locate/grep to find the target symbol/file, then call read_file(start_line, end_line) to inspect the EXACT real code span before issuing edit_file. For understanding large files, call read_file(shrinkwrap) — it returns signatures/types only (~70% smaller). NEVER write ad-hoc Python, Node, or bash scripts to inspect files, search strings, or validate JSON/YAML — use read_file, grep, and code_locate directly (they are instant, zero-friction, and validated automatically in Go). Pick ONE search tool (below); do NOT spray grep+glob+code_locate together.
    SEARCH TOOL DECISION TREE:
    • "where is symbol X defined/used?"  → code_locate (repo-wide symbol + reference graph, no server)
    • understand ONE file's structure     → read_file(shrinkwrap)  (code_symbols is deprecated — use this)
