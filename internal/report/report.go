@@ -18,6 +18,7 @@ import (
 // internal/tokens/ratio.go and docs/PHILOSOPHY.md).
 var MutatingTools = map[string]bool{
 	"edit_file":   true,
+	"edit_symbol": true,
 	"write_file":  true,
 	"create_file": true,
 	"delete_file": true,
@@ -230,7 +231,7 @@ func classifyToolPhase(name string) string {
 	switch name {
 	case "read_file", "list_dir", "grep", "glob", "search_code", "code_locate", "fetch_url", "web_search":
 		return "discovery"
-	case "edit_file", "write_file", "create_file", "delete_file", "bash", "git", "undo":
+	case "edit_file", "edit_symbol", "write_file", "create_file", "delete_file", "bash", "git", "undo":
 		return "execution"
 	case "run_tests", "diagnose", "lsp", "lsp_diagnostics", "lsp_symbols", "lsp_hover", "lsp_references", "lsp_definition", "review_changes", "lsp_auto_fix":
 		return "verification"

@@ -272,6 +272,7 @@ func main() {
 	// Registered on the main registry so the model can delegate work to them.
 	subRunner := &subagent.Runner{Adapter: adapter, Model: activeModel, Tools: tools}
 	tools.Register(&subagent.Tool{Runner: subRunner})
+	tools.Register(&subagent.SwarmTool{Runner: subRunner})
 
 	// 7d. Scout: background research tasks that run WHILE the main turn keeps
 	// executing. The scout tool returns a receipt immediately; the engine

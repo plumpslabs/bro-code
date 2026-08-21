@@ -36,12 +36,13 @@ import (
 // Streamable HTTP / SSE endpoint (URL set). Environment overrides apply to
 // stdio servers; Headers apply to HTTP/SSE servers.
 type ServerConfig struct {
-	Type    string            `json:"type,omitempty"`    // "stdio" (default), "http"/"streamable-http", "sse"
+	Type    string            `json:"type,omitempty"`    // "stdio" (default), "http"/"streamable-http", "sse", "local"
 	Command string            `json:"command,omitempty"` // stdio: executable to spawn
 	Args    []string          `json:"args,omitempty"`    // stdio: command arguments
 	URL     string            `json:"url,omitempty"`     // http/sse: endpoint
 	Env     map[string]string `json:"env,omitempty"`     // stdio: extra env vars
 	Headers map[string]string `json:"headers,omitempty"` // http/sse: static request headers
+	Enabled *bool             `json:"enabled,omitempty"` // optional boolean to enable/disable
 }
 
 // Transport returns the wire transport for this server config.
@@ -285,37 +286,19 @@ type mcpServersFile struct {
 	Servers map[string]ServerConfig `json:"mcpServers"`
 }
 
-// opencodeConfig mirrors the "mcp" block of opencode.jsonc, whose command is
-// an array (["npx", "-y", "pkg"]) and env key is "environment". Remote servers
-// use "type":"http"/"sse" with a "url".
-type opencodeConfig struct {
-	MCP map[string]struct {
-		Type        string            `json:"type"`
-		Command     json.RawMessage   `json:"command"`
-		URL         string            `json:"url,omitempty"`
-		Headers     map[string]string `json:"headers,omitempty"`
-		Environment map[string]string `json:"environment,omitempty"`
-		Env         map[string]string `json:"env,omitempty"`
-	} `json:"mcp"`
-}
-
-// LoadDefaults reads MCP servers from all standard locations. Precedence
-// (highest wins): project BroCode → project .mcp.json → global BroCode →
-// opencode.jsonc. BroCode's own configs are authoritative; the opencode block
-// only contributes servers BroCode knows nothing about (and is skipped when
-// BROCODE_NO_OPENCODE=1 for fully standalone operation). It never errors —
-// missing files simply contribute nothing.
+// LoadDefaults reads MCP servers from standard BroCode locations only:
+// 1. Global BroCode config: ~/.config/brocode/mcp.json
+// 2. Project .mcp.json (standard MCP convention)
+// 3. Project BroCode config: .brocode/mcp.json (highest priority)
+//
+// BroCode operates standalone for MCP servers. It does NOT auto-import
+// third-party MCP servers from other tools/frameworks.
 func (m *Manager) LoadDefaults() {
-	// 1. opencode.jsonc "mcp" block FIRST so BroCode's own configs below
-	// override it — BroCode is authoritative.
-	if provider.OpenCodeImportEnabled() {
-		m.loadOpenCodeConfig()
-	}
-	// 2. Global BroCode config.
+	// 1. Global BroCode config.
 	m.loadFile(mcpGlobalPath())
-	// 3. Project .mcp.json (standard MCP convention).
+	// 2. Project .mcp.json (standard MCP convention).
 	m.loadFile(".mcp.json")
-	// 4. Project BroCode config — highest priority.
+	// 3. Project BroCode config — highest priority.
 	m.loadFile(filepath.Join(".brocode", "mcp.json"))
 }
 
@@ -335,46 +318,15 @@ func (m *Manager) loadFile(path string) {
 		return
 	}
 	for name, cfg := range f.Servers {
+		if cfg.Enabled != nil && !*cfg.Enabled {
+			continue
+		}
 		// Accept either a stdio server (command) or a remote HTTP/SSE server
 		// (url). Skip only when neither is configured.
 		if strings.TrimSpace(cfg.Command) == "" && strings.TrimSpace(cfg.URL) == "" {
 			continue
 		}
 		m.AddServer(name, cfg)
-	}
-}
-
-// loadOpenCodeConfig reads the "mcp" block from ~/.config/opencode/opencode.jsonc.
-func (m *Manager) loadOpenCodeConfig() {
-	home, _ := os.UserHomeDir()
-	data, err := os.ReadFile(filepath.Join(home, ".config", "opencode", "opencode.jsonc"))
-	if err != nil {
-		return
-	}
-	var cfg opencodeConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return
-	}
-	for name, s := range cfg.MCP {
-		switch s.Type {
-		case "", "stdio":
-			cmd, args := parseCommand(s.Command)
-			if cmd == "" {
-				continue
-			}
-			env := s.Environment
-			if env == nil {
-				env = s.Env
-			}
-			m.AddServer(name, ServerConfig{Command: cmd, Args: args, Env: env})
-		case "http", "streamable-http", "sse":
-			if s.URL == "" {
-				continue
-			}
-			m.AddServer(name, ServerConfig{Type: s.Type, URL: s.URL, Headers: s.Headers})
-		default:
-			// Unknown transport: skip gracefully.
-		}
 	}
 }
 

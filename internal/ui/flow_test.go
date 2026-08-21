@@ -969,6 +969,7 @@ func longAnswer(n int) string {
 // text note), lists servers with status, the a-wizard adds a server to
 // .mcp.json (merging), and d+y removes it with an explicit confirm.
 func TestMCPModalFlow(t *testing.T) {
+	t.Setenv("BROCODE_NO_OPENCODE", "1")
 	tmp := t.TempDir() // .mcp.json lands in a temp dir, not the repo
 	if err := os.WriteFile(filepath.Join(tmp, ".mcp.json"), []byte(`{"mcpServers": {"github": {"command": "npx", "args": ["-y", "pkg"]}}}`), 0o644); err != nil {
 		t.Fatal(err)

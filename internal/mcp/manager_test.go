@@ -57,58 +57,10 @@ func TestLoadFileStandardShape(t *testing.T) {
 	}
 }
 
-func TestLoadOpenCodeConfigShape(t *testing.T) {
+// TestLoadDefaultsBroCodeOnly proves BroCode loads its own configs and ignores external files.
+func TestLoadDefaultsBroCodeOnly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".config", "opencode")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	data := `{
-		"mcp": {
-			"git": {
-				"type": "stdio",
-				"command": ["npx", "-y", "@modelcontextprotocol/server-git"],
-				"environment": {"TOKEN": "abc"}
-			},
-			"http-only": {"type": "sse", "url": "https://example.com"}
-		}
-	}`
-	if err := os.WriteFile(filepath.Join(dir, "opencode.jsonc"), []byte(data), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	m := NewManager()
-	m.loadOpenCodeConfig()
-	names := m.ServerNames()
-	if len(names) != 2 {
-		t.Fatalf("expected both stdio 'git' and sse 'http-only' servers, got %v", names)
-	}
-	cfg := m.configs["git"]
-	if cfg.Command != "npx" || len(cfg.Args) != 2 || cfg.Env["TOKEN"] != "abc" {
-		t.Fatalf("opencode config not parsed correctly: %+v", cfg)
-	}
-	sse := m.configs["http-only"]
-	if sse.Transport() != "sse" || sse.URL != "https://example.com" {
-		t.Fatalf("sse server not parsed correctly: %+v", sse)
-	}
-}
-
-// TestLoadDefaultsBroCodeOverridesOpenCode proves BroCode's own MCP config is
-// authoritative: a server with the same name defined in opencode.jsonc is
-// overridden by ~/.config/brocode/mcp.json.
-func TestLoadDefaultsBroCodeOverridesOpenCode(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	ocDir := filepath.Join(home, ".config", "opencode")
-	if err := os.MkdirAll(ocDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	ocJSON := `{"mcp": {"git": {"type": "stdio", "command": ["opencode-cmd"]}}}`
-	if err := os.WriteFile(filepath.Join(ocDir, "opencode.jsonc"), []byte(ocJSON), 0644); err != nil {
-		t.Fatal(err)
-	}
 
 	bcDir := filepath.Join(home, ".config", "brocode")
 	if err := os.MkdirAll(bcDir, 0755); err != nil {
@@ -126,32 +78,7 @@ func TestLoadDefaultsBroCodeOverridesOpenCode(t *testing.T) {
 		t.Fatalf("expected git server loaded, got %v", m.ServerNames())
 	}
 	if cfg.Command != "brocode-cmd" {
-		t.Errorf("BroCode MCP config must override opencode.jsonc, got command %q", cfg.Command)
-	}
-}
-
-// TestLoadDefaultsNoOpenCode proves BROCODE_NO_OPENCODE=1 skips the
-// opencode.jsonc MCP block entirely.
-func TestLoadDefaultsNoOpenCode(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BROCODE_NO_OPENCODE", "1")
-
-	ocDir := filepath.Join(home, ".config", "opencode")
-	if err := os.MkdirAll(ocDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	ocJSON := `{"mcp": {"git": {"type": "stdio", "command": ["npx", "-y", "pkg"]}}}`
-	if err := os.WriteFile(filepath.Join(ocDir, "opencode.jsonc"), []byte(ocJSON), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	m := NewManager()
-	m.LoadDefaults()
-	for _, n := range m.ServerNames() {
-		if n == "git" {
-			t.Errorf("opencode MCP block must be skipped when BROCODE_NO_OPENCODE=1")
-		}
+		t.Errorf("expected command brocode-cmd, got %q", cfg.Command)
 	}
 }
 

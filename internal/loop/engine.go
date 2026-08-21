@@ -378,6 +378,9 @@ type Engine struct {
 	// lastVerifyErr remembers the last verification error text so a lesson can
 	// be distilled once the repair succeeds.
 	lastVerifyErr string
+	// hasPassedVerification records whether verification passed earlier in this session
+	// to enforce the Regression Obligation Contract (LoopsBench).
+	hasPassedVerification bool
 	// repairSucceeded is set when a verification that previously failed passes
 	// after the model repaired the code — the trigger for lesson extraction.
 	repairSucceeded bool
@@ -1945,12 +1948,19 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					e.toolReminderSent = false
 					e.toolReminder2Sent = false
 					e.exploredStalls = 0
-					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" {
+					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" || pending[i].tc.Name == "edit_symbol" {
 						if p := extractToolPath(pending[i].tc.Arguments); p != "" {
 							e.editedFiles = append(e.editedFiles, p)
 							// Keep the session symbol index current after real edits.
 							if e.onFileEdited != nil && err == nil {
 								e.onFileEdited(p)
+							}
+							// Real-time post-edit LSP diagnostic hook (Gap 5)
+							if e.diagFn != nil && err == nil {
+								if lspDiag := e.diagFn(p); lspDiag != "" && !strings.HasPrefix(lspDiag, "No diagnostics") {
+									out += "\n\n⚡ [REAL-TIME LSP DIAGNOSTIC]:\n" + lspDiag
+									pending[i].output = out
+								}
 							}
 						}
 					}
@@ -2062,6 +2072,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					return msg, nil
 				}
 				msg := "Level 1 verification check failed:\n" + vetErr + "\nPlease fix the issues."
+				if e.hasPassedVerification {
+					msg += "\n\n🚨 [REGRESSION OBLIGATION VIOLATION]: The verification suite previously passed in this session, but your latest changes broke it. You must resolve this regression before finishing."
+				}
 				if e.verifyErrorStreak >= 2 {
 					msg += "\n\n⚠️ [STRATEGY INVALIDATION]: This error has persisted across multiple attempts. Your initial hypothesis or syntax tweak is invalid. Step back, re-read the context, and pivot your strategy rather than repeating the same fix."
 				}
@@ -2071,6 +2084,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				_ = e.context.AppendUserMessage(msg)
 				continue
 			}
+			// Verification passed: record that verification is green
+			e.hasPassedVerification = true
+
 			// Verification passed after a previous failure: the repair
 			// succeeded — record it so a durable lesson can be distilled.
 			if e.tsrAttempts > 0 {

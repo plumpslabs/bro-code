@@ -1,6 +1,9 @@
 package tool
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+)
 
 // maxCommandOutputChars caps how many characters of a single command's
 // output are returned. Even after line-filtering, one huge line (a minified
@@ -11,16 +14,28 @@ import "fmt"
 // burned by one call.
 const maxCommandOutputChars = 40_000
 
-// CapOutput truncates tool output to maxCommandOutputChars, keeping a visible
-// marker so the model knows more output exists beyond the cap. The marker
-// names the way out (narrow the query / smaller range) because a model that
-// sees a bare "truncated" notice tends to retry the same read or fight it
-// with bash sed/head/tail loops instead of adapting — which burns rounds.
-//
-// The slice is rune-safe: cutting at a byte boundary could split a multi-byte
-// UTF-8 rune (CJK comments, emoji) and leave an invalid tail in the model's
-// context — so the cap lands on a rune boundary via a clipped []rune slice.
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(?:sk-[a-zA-Z0-9]{20,})`),
+	regexp.MustCompile(`(?i)(?:ghp_[a-zA-Z0-9]{20,})`),
+	regexp.MustCompile(`(?i)(?:gho_[a-zA-Z0-9]{20,})`),
+	regexp.MustCompile(`(?i)(?:AKIA[0-9A-Z]{16})`),
+	regexp.MustCompile(`(?i)(Bearer\s+)[a-zA-Z0-9_\-\.]{25,}`),
+}
+
+// MaskSecrets scrubs raw API keys and auth tokens from tool outputs so secrets
+// never leak into the model's context window.
+func MaskSecrets(s string) string {
+	for _, pat := range secretPatterns {
+		s = pat.ReplaceAllString(s, "[REDACTED_SECRET]")
+	}
+	return s
+}
+
+// CapOutput truncates tool output to maxCommandOutputChars and redacts any
+// accidental secrets, keeping a visible marker so the model knows more output
+// exists beyond the cap.
 func CapOutput(s string) string {
+	s = MaskSecrets(s)
 	r := []rune(s)
 	if len(r) <= maxCommandOutputChars {
 		return s

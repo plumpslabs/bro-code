@@ -152,6 +152,7 @@ func NewRegistry() *Registry {
 	r.Register(&ReadFileTool{})
 	r.Register(&WriteFileTool{})
 	r.Register(&EditFileTool{})
+	r.Register(&EditSymbolTool{})
 	r.Register(&DeleteFileTool{})
 	r.Register(&ListDirTool{})
 	r.Register(&GrepTool{})
@@ -258,7 +259,7 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 	// engine-loop guards so even a path that bypasses them cannot mutate.
 	// lsp_fix/lsp_rename write to disk through the LSP client, so they are
 	// blocked here too — read-only mode must be airtight.
-	if r.readOnly && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" || tc.Name == "lsp_fix" || tc.Name == "lsp_rename") {
+	if r.readOnly && (tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "edit_symbol" || tc.Name == "delete_file" || tc.Name == "lsp_fix" || tc.Name == "lsp_rename") {
 		return false, fmt.Sprintf("⚠️ [READ-ONLY MODE]: Tool '%s' is disabled in read-only mode (PLANNER/MINER). Switch to BUILDER (Shift+Tab) to modify code.", tc.Name), nil
 	}
 	if r.readOnlyBash && tc.Name == "bash" {
@@ -510,7 +511,7 @@ func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (result s
 	// Executor-level read-only enforcement: catches direct Execute calls that
 	// never pass through GateAction (sub-agents and other non-loop callers).
 	// lsp_fix/lsp_rename mutate files, so they are read-only-blocked too.
-	if r.readOnly && (name == "write_file" || name == "edit_file" || name == "delete_file" || name == "lsp_fix" || name == "lsp_rename") {
+	if r.readOnly && (name == "write_file" || name == "edit_file" || name == "edit_symbol" || name == "delete_file" || name == "lsp_fix" || name == "lsp_rename") {
 		return "", fmt.Errorf("tool '%s' is disabled in read-only mode (PLANNER/MINER): switch to BUILDER to modify code", name)
 	}
 	if r.readOnlyBash && name == "bash" {
@@ -538,7 +539,7 @@ func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (result s
 	// - EVERY tool: record a provenance note for future self-retrieval.
 	if r.knowledgeStore != nil && name != "" {
 		switch name {
-		case "edit_file", "write_file", "delete_file", "lsp_fix", "lsp_rename", "lsp_autofix":
+		case "edit_file", "edit_symbol", "write_file", "delete_file", "lsp_fix", "lsp_rename", "lsp_autofix":
 			if path := extractPathFromArgs(argsJSON); path != "" {
 				resolved := resolvePath(path)
 				_ = r.knowledgeStore.InvalidateKnowledge("file:" + resolved)
@@ -667,7 +668,7 @@ func extractQueryFromArgs(argsJSON string) string {
 // isFileTool reports whether a tool acts on a file path (vs a search/command).
 func isFileTool(name string) bool {
 	switch name {
-	case "read_file", "write_file", "edit_file", "delete_file",
+	case "read_file", "write_file", "edit_file", "edit_symbol", "delete_file",
 		"lsp_fix", "lsp_rename", "lsp_autofix", "lsp_scan", "undo":
 		return true
 	}

@@ -408,6 +408,14 @@ func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 	}
 	highComplexity := changedLines > smallEditLines
 
+	// Supervisory Blast-Radius Check: detect unconstrained spread across files
+	if len(e.editedFiles) > 4 && changedLines > 250 {
+		issues = append(issues, conventionIssue{
+			Kind:    "blast-radius",
+			Message: fmt.Sprintf("⚠️ [BLAST RADIUS WARNING]: Your changes have touched %d files with %d modified lines. For targeted tasks, do not refactor out-of-scope code or rewrite distant files.", len(e.editedFiles), changedLines),
+		})
+	}
+
 	// Native type errors via LSP (when wired) — catches what regex can't.
 	if e.diagFn != nil {
 		for _, p := range e.editedFiles {

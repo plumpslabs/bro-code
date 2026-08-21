@@ -154,7 +154,7 @@ func blocks(_ *Input) []Block {
 
 func renderIdentity(in *Input) string {
 	var sb strings.Builder
-	sb.WriteString("You are BroCode CLI, an autonomous AI coding assistant.\n")
+	sb.WriteString("You are BroCode CLI, an autonomous AI coding assistant. You operate exclusively using BroCode's native tools, workflow, and storage directory (`.brocode/`, `.brocode/current_plan.md`, `.brocode/memory.md`). NEVER look for, create, or modify plans, memory, or context in third-party framework directories (such as `.agents/`, `.cursor/`, `.windsurf/`, or `.claude/`). BroCode native tools are your first-choice primary toolset.\n")
 	if strings.TrimSpace(in.ProjectCtx) != "" {
 		sb.WriteString("You are working in this project:\n\n")
 		sb.WriteString(in.ProjectCtx)
