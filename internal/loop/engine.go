@@ -239,6 +239,9 @@ type Engine struct {
 	// lastToolCall. Persisted across loop iterations (not reset each turn
 	// iteration) so a model stuck re-issuing the same call is caught.
 	lastToolCallRepeats int
+	// turnToolCallCounts tracks per-turn invocation counts of normalized tool calls
+	// to detect multi-tool cycles (e.g. A -> B -> C -> A -> B -> C).
+	turnToolCallCounts map[string]int
 	// toolOnlyRounds counts consecutive loop iterations where the model only
 	// called tools and never produced an answer. Once it exceeds
 	// maxToolOnlyRounds the loop stops so a tool-happy model cannot burn all
@@ -1074,6 +1077,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.lastBashFamily = ""
 	e.bashFamilyStreak = 0
 	e.iterBashFamily = ""
+	e.turnToolCallCounts = make(map[string]int)
 	if !e.autoExtendSession {
 		if e.baseMaxIterations > 0 {
 			e.maxIterations = e.baseMaxIterations
@@ -1728,35 +1732,55 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 				}
 
-				// Same-call repetition detection: identical consecutive calls
-				// (same tool + same arguments) indicate the model is stuck.
-				// The repeat counter lives on the engine (not per iteration) so
-				// re-issuing the same call across loop iterations is caught.
+				// 1. Native Sovereignty Gate: block reading/writing 3rd party agent framework paths
+				if tc.Name == "read_file" || tc.Name == "edit_file" || tc.Name == "write_file" {
+					var args struct {
+						Path string `json:"path"`
+					}
+					if json.Unmarshal([]byte(tc.Arguments), &args) == nil && args.Path != "" {
+						cleanPath := filepath.ToSlash(args.Path)
+						if strings.HasPrefix(cleanPath, ".agents/plan") || strings.HasPrefix(cleanPath, ".agents/rules") ||
+							strings.HasPrefix(cleanPath, ".cursor/") || strings.HasPrefix(cleanPath, ".windsurf/") {
+							guardMsg := fmt.Sprintf("⚠️ [NATIVE SOVEREIGNTY]: '%s' is a third-party framework directory. BroCode operates exclusively using native tools and storage (.brocode/current_plan.md). Do not search for or read plans there.", args.Path)
+							pending[i] = pendingTool{tc: tc, output: guardMsg}
+							continue
+						}
+					}
+				}
+
+				// 2. Multi-tool cycle and consecutive repetition detection:
+				key := normalizedToolCallKey(tc)
+				if e.turnToolCallCounts == nil {
+					e.turnToolCallCounts = make(map[string]int)
+				}
+				e.turnToolCallCounts[key]++
+				callCount := e.turnToolCallCounts[key]
+
 				if isRepeatToolCall(tc, e.lastToolCall) {
 					e.lastToolCallRepeats++
-					if e.lastToolCallRepeats >= 4 {
+				} else {
+					e.lastToolCallRepeats = 0
+				}
+				e.lastToolCall = tc
+
+				if callCount >= 2 || e.lastToolCallRepeats >= 2 {
+					if callCount >= 4 || e.lastToolCallRepeats >= 4 {
 						// The model ignored the guard warning and is still
-						// spinning — abort the whole turn instead of burning the
-						// remaining iterations on a loop that will never finish.
+						// spinning — abort the whole turn instead of burning iterations.
 						e.state = StateBlocked
-						msg := fmt.Sprintf("Turn aborted: the model kept repeating tool call '%s' with identical arguments after being told to stop. Please rephrase your request or ask for a more specific task.", tc.Name)
+						msg := fmt.Sprintf("Turn aborted: the model kept repeating tool call '%s' with identical arguments (%d times) after being told to stop. Context already contains the requested information. Please rephrase your request or ask for a more specific task.", tc.Name, callCount)
 						if onUpdate != nil {
 							onUpdate(e.state, msg)
 						}
 						return msg, nil
 					}
-					if e.lastToolCallRepeats >= 2 {
-						guardMsg := fmt.Sprintf("⚠️ [LOOP GUARD]: You are repeating tool call '%s' with identical arguments — stop and answer directly using the information you already gathered. Do NOT call the same tool again.", tc.Name)
-						if onUpdate != nil {
-							onUpdate(e.state, "⚠️ Loop detected — instructing model to answer directly")
-						}
-						pending[i] = pendingTool{tc: tc, output: guardMsg}
-						continue
+					guardMsg := fmt.Sprintf("⚠️ [LOOP GUARD]: You already called '%s' with these exact arguments earlier in this turn (call #%d). The result is ALREADY in your conversation context above. Do NOT re-run the same tool call — synthesize what you already gathered or proceed with next steps.", tc.Name, callCount)
+					if onUpdate != nil {
+						onUpdate(e.state, fmt.Sprintf("⚠️ Loop detected: '%s' repeated %d× — blocking redundant call", tc.Name, callCount))
 					}
-				} else {
-					e.lastToolCallRepeats = 0
+					pending[i] = pendingTool{tc: tc, output: guardMsg}
+					continue
 				}
-				e.lastToolCall = tc
 
 				// Fuzzy loop-break: exact repeats are caught above, but a model
 				// can spin by re-issuing the SAME command family with different
@@ -2874,6 +2898,16 @@ func isRepeatToolCall(tc, prev provider.ToolCall) bool {
 		return string(ja) == string(jb)
 	}
 	return false
+}
+
+func normalizedToolCallKey(tc provider.ToolCall) string {
+	a := strings.TrimSpace(tc.Arguments)
+	var m map[string]any
+	if json.Unmarshal([]byte(a), &m) == nil {
+		b, _ := json.Marshal(m)
+		return tc.Name + ":" + string(b)
+	}
+	return tc.Name + ":" + a
 }
 
 // bashFamily returns the leading command word of a bash tool call (e.g.
