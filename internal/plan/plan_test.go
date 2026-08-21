@@ -142,3 +142,23 @@ Tambahkan UserIcon dan Phone.
 		t.Errorf("expected 2 files, got %d", len(p2.Files))
 	}
 }
+
+func TestParseMarkdownPlan_GenericHeadingAndCleanFallback(t *testing.T) {
+	// Scenario: Plan with generic heading "## Tasks" and raw symptom step
+	md := `## Tasks
+- [ ] **Nama kontak**: text-blue-900 dark:text-blue-100 - blue-100 di mode gelap terlalu terang
+- [ ] **Ikon UserIcon**: opacity 70% terlalu pudar
+- [ ] **Verifikasi**: Jalankan typecheck via tsc --noEmit
+`
+	p := ParseMarkdownPlan(md)
+	// Should NOT use generic "Tasks" as Goal, and fallback to step 0 should be cleaned
+	if p.Goal == "Tasks" {
+		t.Errorf("expected goal to not be generic 'Tasks', got '%s'", p.Goal)
+	}
+	if p.Goal != "Nama kontak" {
+		t.Errorf("expected clean fallback goal 'Nama kontak', got '%s'", p.Goal)
+	}
+	if len(p.Steps) != 3 {
+		t.Fatalf("expected 3 steps, got %d", len(p.Steps))
+	}
+}

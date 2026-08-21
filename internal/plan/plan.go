@@ -212,8 +212,13 @@ func ParseMarkdownPlan(md string) *Plan {
 			goal := strings.TrimLeft(trimmed, "# \t")
 			goal = strings.TrimPrefix(goal, "🎯 ")
 			goal = strings.TrimPrefix(goal, "Plan: ")
-			p.Goal = strings.TrimSpace(goal)
-			continue
+			goal = strings.TrimPrefix(goal, "Plan - ")
+			// If the heading is just generic "Tasks", "Steps", "Plan", skip it
+			lower := strings.ToLower(strings.TrimSpace(goal))
+			if lower != "tasks" && lower != "steps" && lower != "plan" && lower != "rencana" && lower != "daftar tugas" && lower != "roadmap" && lower != "checklist" && lower != "action items" {
+				p.Goal = strings.TrimSpace(goal)
+				continue
+			}
 		}
 
 		if strings.HasPrefix(trimmed, "**Status:**") {
@@ -273,7 +278,16 @@ func ParseMarkdownPlan(md string) *Plan {
 	}
 
 	if p.Goal == "" && len(p.Steps) > 0 {
-		p.Goal = p.Steps[0].Description
+		first := p.Steps[0].Description
+		first = strings.ReplaceAll(first, "**", "")
+		first = strings.ReplaceAll(first, "__", "")
+		first = strings.ReplaceAll(first, "`", "")
+		if colon := strings.Index(first, ":"); colon > 0 && colon < 45 {
+			first = strings.TrimSpace(first[:colon])
+		} else if len(first) > 60 {
+			first = strings.TrimSpace(first[:60]) + "…"
+		}
+		p.Goal = first
 	}
 	return p
 }

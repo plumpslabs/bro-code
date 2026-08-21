@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
+	"github.com/plumpslabs/bro-code/internal/loop"
 	"github.com/plumpslabs/bro-code/internal/mcp"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/store"
@@ -362,7 +363,7 @@ func TestTurnQueueOneAtATime(t *testing.T) {
 	// Second prompt while the turn is in flight must be queued, not run.
 	m.promptInput.SetValue("second")
 	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if len(m.pendingQueue) != 1 || m.pendingQueue[0] != "second" {
+	if len(m.pendingQueue) != 1 || m.pendingQueue[0].Text != "second" {
 		t.Fatalf("expected 'second' queued, got %v", m.pendingQueue)
 	}
 	if m.status != "Queued..." {
@@ -853,8 +854,8 @@ func TestQueueDoesNotPolluteHistory(t *testing.T) {
 	if len(m.pendingQueue) != 1 {
 		t.Fatalf("expected 1 queued prompt, got %d", len(m.pendingQueue))
 	}
-	if m.pendingQueue[0] != "prompt kedua saat turn jalan" {
-		t.Fatalf("queued prompt mismatch: %q", m.pendingQueue[0])
+	if m.pendingQueue[0].Text != "prompt kedua saat turn jalan" {
+		t.Fatalf("queued prompt mismatch: %q", m.pendingQueue[0].Text)
 	}
 	if len(m.messages) != before {
 		t.Fatalf("queue must not add history rows: before=%d after=%d", before, len(m.messages))
@@ -867,13 +868,16 @@ func TestQueueDoesNotPolluteHistory(t *testing.T) {
 }
 
 // TestQueueBlockRendersAboveInput verifies queued prompts render live in the
-// chrome above the input (not in the chat log) with a count and one row each.
+// chrome above the input (not in the chat log) with a count, mode badge, and one row each.
 func TestQueueBlockRendersAboveInput(t *testing.T) {
 	m := newTestApp()
 	m.width = 120
 	m.height = 36
 	m.turnRunning = true
-	m.pendingQueue = []string{"prompt satu", "prompt dua panjang dengan banyak kata sehingga harus dirapikan ke satu baris preview"}
+	m.pendingQueue = []QueuedPrompt{
+		{Text: "prompt satu", Mode: "BUILDER"},
+		{Text: "prompt dua panjang dengan banyak kata sehingga harus dirapikan ke satu baris preview", Mode: "PLANNER"},
+	}
 	m.status = "Queued..."
 	if _, err := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36}); err != nil {
 		t.Fatalf("window size update failed: %v", err)
@@ -886,35 +890,69 @@ func TestQueueBlockRendersAboveInput(t *testing.T) {
 	if !contains(visible, "prompt satu") {
 		t.Fatal("first queued row missing from View()")
 	}
+	if !contains(visible, "BUILD") || !contains(visible, "PLAN") {
+		t.Fatal("mode badges missing from queued prompt rows in View()")
+	}
 	// Long prompt flattened to one line (no newline in the row).
 	if contains(visible, "banyak kata sehingga harus\n") {
 		t.Fatal("queued prompt preview must be a single line")
 	}
 }
 
-// TestQueueManageAltK verifies Alt+K enters queue management and e/d edit or
-// delete the selected queued prompt, Esc/Alt+K exit.
-func TestQueueManageAltK(t *testing.T) {
+// TestQueueManageCtrlKAndAltK verifies Ctrl+K and Alt+K enter queue management,
+// e/d/m edit, delete, or change mode, K/J reorder, and Esc exits.
+func TestQueueManageCtrlKAndAltK(t *testing.T) {
 	m := newTestApp()
 	m.width = 120
 	m.height = 36
 	m.turnRunning = true
-	m.pendingQueue = []string{"satu", "dua", "tiga"}
+	m.pendingQueue = []QueuedPrompt{
+		{Text: "satu", Mode: "BUILDER"},
+		{Text: "dua", Mode: "PLANNER"},
+		{Text: "tiga", Mode: "MINER"},
+	}
 
-	altK := func() {
-		if _, err := m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModAlt}); err != nil {
-			t.Fatalf("alt+k failed: %v", err)
+	ctrlK := func() {
+		if _, err := m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl}); err != nil {
+			t.Fatalf("ctrl+k failed: %v", err)
 		}
 	}
-	altK()
+	ctrlK()
 	if !m.queueMode {
-		t.Fatal("alt+k did not enter queue mode")
+		t.Fatal("ctrl+k did not enter queue mode")
 	}
 	if m.queueSel != 0 {
 		t.Fatalf("expected selection at 0, got %d", m.queueSel)
 	}
 
-	// ↓ moves the selection.
+	// m cycles mode of the selected prompt (BUILDER -> PLANNER -> MINER)
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"}); err != nil {
+		t.Fatalf("m key failed: %v", err)
+	}
+	if m.pendingQueue[0].Mode != "PLANNER" {
+		t.Fatalf("expected mode cycled to PLANNER, got %q", m.pendingQueue[0].Mode)
+	}
+
+	// J moves selected prompt DOWN (swapping satu and dua)
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'J', Text: "J"}); err != nil {
+		t.Fatalf("J key failed: %v", err)
+	}
+	if m.pendingQueue[0].Text != "dua" || m.pendingQueue[1].Text != "satu" {
+		t.Fatalf("J failed to swap queue items: %v", m.pendingQueue)
+	}
+	if m.queueSel != 1 {
+		t.Fatalf("expected selection at 1 after moving down, got %d", m.queueSel)
+	}
+
+	// K moves selected prompt UP (swapping back)
+	if _, err := m.Update(tea.KeyPressMsg{Code: 'K', Text: "K"}); err != nil {
+		t.Fatalf("K key failed: %v", err)
+	}
+	if m.pendingQueue[0].Text != "satu" || m.pendingQueue[1].Text != "dua" {
+		t.Fatalf("K failed to swap queue items: %v", m.pendingQueue)
+	}
+
+	// ↓ moves selection to 1 ("dua")
 	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyDown}); err != nil {
 		t.Fatalf("down failed: %v", err)
 	}
@@ -926,7 +964,7 @@ func TestQueueManageAltK(t *testing.T) {
 	if _, err := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"}); err != nil {
 		t.Fatalf("d failed: %v", err)
 	}
-	if len(m.pendingQueue) != 2 || m.pendingQueue[0] != "satu" || m.pendingQueue[1] != "tiga" {
+	if len(m.pendingQueue) != 2 || m.pendingQueue[0].Text != "satu" || m.pendingQueue[1].Text != "tiga" {
 		t.Fatalf("d must delete the selected item, got %v", m.pendingQueue)
 	}
 	if !m.queueMode {
@@ -938,7 +976,7 @@ func TestQueueManageAltK(t *testing.T) {
 	if _, err := m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"}); err != nil {
 		t.Fatalf("e failed: %v", err)
 	}
-	if len(m.pendingQueue) != 1 || m.pendingQueue[0] != "tiga" {
+	if len(m.pendingQueue) != 1 || m.pendingQueue[0].Text != "tiga" {
 		t.Fatalf("e must remove the edited item, got %v", m.pendingQueue)
 	}
 	if m.promptInput.Value() != "satu" {
@@ -948,8 +986,8 @@ func TestQueueManageAltK(t *testing.T) {
 		t.Fatal("e must exit queue mode so the prompt can be edited")
 	}
 
-	// Alt+K again, then Esc exits.
-	altK()
+	// Ctrl+K again, then Esc exits.
+	ctrlK()
 	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc}); err != nil {
 		t.Fatalf("esc failed: %v", err)
 	}
@@ -958,7 +996,7 @@ func TestQueueManageAltK(t *testing.T) {
 	}
 
 	// Deleting the last item auto-exits queue mode.
-	altK()
+	ctrlK()
 	if _, err := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"}); err != nil {
 		t.Fatalf("d failed: %v", err)
 	}
@@ -976,14 +1014,17 @@ func TestQueueDrainStartsNextTurn(t *testing.T) {
 	m := newTestApp()
 	m.width = 120
 	m.height = 36
-	m.pendingQueue = []string{"q1", "q2"}
+	m.pendingQueue = []QueuedPrompt{
+		{Text: "q1", Mode: "BUILDER"},
+		{Text: "q2", Mode: "PLANNER"},
+	}
 	m.queueSel = 1
 	before := len(m.messages)
 
 	// The returned Cmd is the next turn's runner (not an error) — startTurn
 	// fires the drained prompt, so Update returns a real tea.Cmd here.
 	m.Update(turnResultMsg{content: "answer"})
-	if len(m.pendingQueue) != 1 || m.pendingQueue[0] != "q2" {
+	if len(m.pendingQueue) != 1 || m.pendingQueue[0].Text != "q2" {
 		t.Fatalf("queue must drain the first item, got %v", m.pendingQueue)
 	}
 	if m.queueSel != 0 {
@@ -1297,3 +1338,139 @@ func TestMultiRoundStreamingWithLiveDiffEmission(t *testing.T) {
 		t.Fatalf("expected status Ready after turn result, got %s", m.status)
 	}
 }
+
+// TestQueuePerPromptModeSwitching verifies that user can switch modes mid-turn
+// via Shift+Tab and queue subsequent prompts with their dedicated target mode.
+func TestQueuePerPromptModeSwitching(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 36
+
+	// Turn 1 starts under BUILDER
+	m.mode = "BUILDER"
+	m.promptInput.SetValue("turn 1 in builder")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.turnRunning {
+		t.Fatal("turn 1 should be running")
+	}
+
+	// While Turn 1 is running, user hits Shift+Tab to switch mode to PLANNER
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.mode != "PLANNER" {
+		t.Fatalf("expected mode switched to PLANNER while turn running, got %s", m.mode)
+	}
+
+	// User types prompt 2 and hits Enter -> queued with PLANNER mode
+	m.promptInput.SetValue("turn 2 in planner")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if len(m.pendingQueue) != 1 {
+		t.Fatalf("expected 1 item queued, got %d", len(m.pendingQueue))
+	}
+	if m.pendingQueue[0].Text != "turn 2 in planner" || m.pendingQueue[0].Mode != "PLANNER" {
+		t.Fatalf("expected prompt 2 queued with PLANNER mode, got %+v", m.pendingQueue[0])
+	}
+
+	// User hits Shift+Tab again -> switches to MINER
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.mode != "MINER" {
+		t.Fatalf("expected mode switched to MINER, got %s", m.mode)
+	}
+
+	// User types prompt 3 and hits Enter -> queued with MINER mode
+	m.promptInput.SetValue("turn 3 in miner")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if len(m.pendingQueue) != 2 {
+		t.Fatalf("expected 2 items queued, got %d", len(m.pendingQueue))
+	}
+	if m.pendingQueue[1].Text != "turn 3 in miner" || m.pendingQueue[1].Mode != "MINER" {
+		t.Fatalf("expected prompt 3 queued with MINER mode, got %+v", m.pendingQueue[1])
+	}
+
+	// Turn 1 finishes -> Turn 2 auto starts in PLANNER mode
+	m.Update(turnResultMsg{content: "done turn 1", mode: "BUILDER"})
+	if m.mode != "PLANNER" {
+		t.Fatalf("expected active mode updated to PLANNER on turn 2 drain, got %s", m.mode)
+	}
+	if len(m.pendingQueue) != 1 {
+		t.Fatalf("expected 1 item left in queue, got %d", len(m.pendingQueue))
+	}
+
+	// Turn 2 finishes -> Turn 3 auto starts in MINER mode
+	m.Update(turnResultMsg{content: "done turn 2", mode: "PLANNER"})
+	if m.mode != "MINER" {
+		t.Fatalf("expected active mode updated to MINER on turn 3 drain, got %s", m.mode)
+	}
+	if len(m.pendingQueue) != 0 {
+		t.Fatalf("expected queue completely drained, got %d items", len(m.pendingQueue))
+	}
+}
+
+// TestTurnModeIsolationDuringMidTurnShiftTab verifies that switching mode mid-turn
+// does NOT alter the mode badge of intermediate reasoning steps or the final response
+// of the currently executing turn.
+func TestTurnModeIsolationDuringMidTurnShiftTab(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 36
+
+	// Turn starts under BUILDER
+	m.mode = "BUILDER"
+	m.promptInput.SetValue("perbaiki bug kontras warna")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.turnRunning {
+		t.Fatal("turn should be running")
+	}
+	if m.turnMode != "BUILDER" {
+		t.Fatalf("expected turnMode to be BUILDER, got %s", m.turnMode)
+	}
+
+	// Iteration 1 streams some reasoning and executes a tool
+	m.streaming = true
+	m.pendingStream = "Saya akan memeriksa file MessageBubble.tsx"
+	m.Update(stepProgressMsg{state: loop.StateActing, info: "📖 read_file MessageBubble.tsx"})
+
+	// Verify iteration 1 assistant block was stamped with BUILDER
+	foundBuilder := false
+	for _, msg := range m.messages {
+		if strings.HasPrefix(msg, "BROCODE:BUILDER:") {
+			foundBuilder = true
+			break
+		}
+	}
+	if !foundBuilder {
+		t.Fatalf("expected iteration 1 to be stamped with BROCODE:BUILDER, messages: %v", m.messages)
+	}
+
+	// Mid-turn: User hits Shift+Tab twice to switch mode to MINER for their NEXT prompt
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.mode != "MINER" {
+		t.Fatalf("expected pending UI mode to be MINER, got %s", m.mode)
+	}
+	// But in-flight turnMode MUST STILL BE BUILDER!
+	if m.turnMode != "BUILDER" {
+		t.Fatalf("in-flight turnMode must remain BUILDER, got %s", m.turnMode)
+	}
+
+	// Iteration 2 streams more reasoning and executes another tool
+	m.streaming = true
+	m.pendingStream = "Sekarang saya akan mengedit warnanya"
+	m.Update(stepProgressMsg{state: loop.StateActing, info: "✍️ edit_file MessageBubble.tsx"})
+
+	// Check messages: Iteration 2 must STILL be stamped with BUILDER, NEVER MINER!
+	for _, msg := range m.messages {
+		if strings.HasPrefix(msg, "BROCODE:MINER:") {
+			t.Fatalf("CRITICAL BUG: mid-turn Shift+Tab leaked into in-flight turn step: %v", msg)
+		}
+	}
+
+	// Turn completes
+	m.Update(turnResultMsg{content: "Semua warna berhasil diperbaiki.", mode: m.turnMode})
+	for _, msg := range m.messages {
+		if strings.HasPrefix(msg, "BROCODE:MINER:") {
+			t.Fatalf("CRITICAL BUG: final turnResultMsg got stamped with MINER: %v", msg)
+		}
+	}
+}
+
+

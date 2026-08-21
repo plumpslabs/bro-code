@@ -1645,12 +1645,12 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		if bashPath, err := exec.LookPath("bash"); err == nil {
-			cmd = exec.CommandContext(tctx, bashPath, "-c", cmdStr)
+			cmd = SafeCommandContext(tctx, bashPath, "-c", cmdStr)
 		} else {
-			cmd = exec.CommandContext(tctx, "cmd.exe", "/c", cmdStr)
+			cmd = SafeCommandContext(tctx, "cmd.exe", "/c", cmdStr)
 		}
 	} else {
-		cmd = exec.CommandContext(tctx, "sh", "-c", cmdStr)
+		cmd = SafeCommandContext(tctx, "sh", "-c", cmdStr)
 	}
 	out, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(out))

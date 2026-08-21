@@ -2,10 +2,11 @@ package loop
 
 import (
 	"context"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
 // SelfHealLadder executes deterministic local formatters/fixers on edited files.
@@ -22,37 +23,37 @@ func SelfHealLadder(ctx context.Context, filePath string) (string, bool) {
 
 	switch ext {
 	case ".go":
-		cmd := exec.CommandContext(ctx, "gofmt", "-w", filePath)
+		cmd := tool.SafeCommandContext(ctx, "gofmt", "-w", filePath)
 		if err := cmd.Run(); err == nil {
 			return "✅ Applied gofmt self-healing format fix", true
 		}
 	case ".js", ".ts", ".jsx", ".tsx", ".json", ".css", ".html", ".md", ".yaml", ".yml":
-		cmd := exec.CommandContext(ctx, "npx", "prettier", "--write", filePath)
+		cmd := tool.SafeCommandContext(ctx, "npx", "--no-install", "prettier", "--write", filePath)
 		if err := cmd.Run(); err == nil {
 			return "✅ Applied prettier self-healing format fix", true
 		}
 	case ".py":
-		cmd := exec.CommandContext(ctx, "black", "-q", filePath)
+		cmd := tool.SafeCommandContext(ctx, "black", "-q", filePath)
 		if err := cmd.Run(); err == nil {
 			return "✅ Applied black self-healing format fix", true
 		}
 	case ".rs":
-		cmd := exec.CommandContext(ctx, "rustfmt", filePath)
+		cmd := tool.SafeCommandContext(ctx, "rustfmt", filePath)
 		if err := cmd.Run(); err == nil {
 			return "✅ Applied rustfmt self-healing format fix", true
 		}
 	case ".c", ".cpp", ".h", ".hpp":
-		cmd := exec.CommandContext(ctx, "clang-format", "-i", filePath)
+		cmd := tool.SafeCommandContext(ctx, "clang-format", "-i", filePath)
 		if err := cmd.Run(); err == nil {
 			return "✅ Applied clang-format self-healing format fix", true
 		}
 	case ".php":
-		cmd := exec.CommandContext(ctx, "php-cs-fixer", "fix", filePath)
+		cmd := tool.SafeCommandContext(ctx, "php-cs-fixer", "fix", filePath)
 		if err := cmd.Run(); err == nil {
 			return "✅ Applied php-cs-fixer self-healing format fix", true
 		}
 	case ".rb":
-		cmd := exec.CommandContext(ctx, "rubocop", "-a", filePath)
+		cmd := tool.SafeCommandContext(ctx, "rubocop", "-a", filePath)
 		if err := cmd.Run(); err == nil {
 			return "✅ Applied rubocop self-healing format fix", true
 		}

@@ -102,12 +102,12 @@ func runTestCommand(ctx context.Context, cmd string) testResult {
 	var sh *exec.Cmd
 	if runtime.GOOS == "windows" {
 		if bashPath, err := exec.LookPath("bash"); err == nil {
-			sh = exec.CommandContext(tctx, bashPath, "-c", cmd)
+			sh = SafeCommandContext(tctx, bashPath, "-c", cmd)
 		} else {
-			sh = exec.CommandContext(tctx, "cmd.exe", "/c", cmd)
+			sh = SafeCommandContext(tctx, "cmd.exe", "/c", cmd)
 		}
 	} else {
-		sh = exec.CommandContext(tctx, "sh", "-c", cmd)
+		sh = SafeCommandContext(tctx, "sh", "-c", cmd)
 	}
 	out, err := sh.CombinedOutput()
 	tr.raw = string(out)

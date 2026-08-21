@@ -220,6 +220,7 @@ type Model struct {
 	// at a time, because concurrent RunTurn calls clobber the engine's shared
 	// per-turn state and can crash the CLI progress goroutine (nil handler).
 	turnRunning  bool
+	turnMode     string
 	// turnGen is an monotonically-increasing counter, incremented each time a
 	// new turn starts. turnResultMsg carries the gen value at dispatch time —
 	// if the message arrives with a stale gen (the turn was interrupted and a
@@ -227,12 +228,12 @@ type Model struct {
 	// new turn's live state. This prevents the "ESC → Enter → new turn starts
 	// → old goroutine finishes → turnRunning=false prematurely" race.
 	turnGen      int
-	pendingQueue []string
+	pendingQueue []QueuedPrompt
 
 	// queueSel is the highlighted index into pendingQueue while queueMode is
-	// active (Alt+K): the queued prompts are shown in the activity slot above
-	// the input — never in the conversation history — and e/d edit or delete
-	// the selected one.
+	// active (Ctrl+K / Alt+K): the queued prompts are shown in the activity slot above
+	// the input — never in the conversation history — and e/d/m edit, delete, or
+	// change mode of the selected one.
 	queueMode bool
 	queueSel  int
 
@@ -408,6 +409,13 @@ type Model struct {
 	mcpSummary string
 }
 
+// QueuedPrompt holds a user prompt waiting to run, along with the engine mode
+// (BUILDER/PLANNER/MINER) under which it should be executed when drained.
+type QueuedPrompt struct {
+	Text string `json:"text"`
+	Mode string `json:"mode"`
+}
+
 type turnResultMsg struct {
 	content string
 	err     error
@@ -487,7 +495,9 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 	// never leak stale entries into the next turn's summary.
 	tool.ResetChanges()
 	m.filesExpanded = false
-	m.engine.SetMode(m.mode)
+	m.turnMode = m.mode
+	thisMode := m.turnMode
+	m.engine.SetMode(thisMode)
 	m.appendMessages("YOU:\n" + userQuery)
 	m.status = "Thinking..."
 	m.turnStart = time.Now()
@@ -532,7 +542,7 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 		if m.quitting {
 			return nil
 		}
-		return turnResultMsg{content: res, err: err, mode: m.mode, gen: thisGen}
+		return turnResultMsg{content: res, err: err, mode: thisMode, gen: thisGen}
 	}
 
 	return m, tea.Batch(runTurnCmd, tickCmd())
@@ -1109,7 +1119,7 @@ func skillEntries(workspaceDir string) []prompt.SkillEntry {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.promptInput.Focus(), tickCmd())
+	return m.promptInput.Focus()
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1119,9 +1129,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.renderedKey = ""
+		m.renderedLog = ""
+		m.historyKey = ""
+		m.renderedHistory = ""
 		if m.width > 0 {
-			// Reserve room for the "❯ " prompt and a small right margin so
-			// the input soft-wraps inside the terminal instead of overflowing.
 			m.promptInput.SetWidth(m.width - 4)
 			m.logViewport.SetWidth(m.width)
 			m.askViewport.SetWidth(m.width - 8)
@@ -1144,14 +1156,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case spinnerTickMsg:
+		// When idle (no turn running, not busy), stop the ticker immediately
+		// so BroCode consumes 0.0% CPU and zero battery while waiting for input.
+		if !m.turnRunning && (m.status == "Ready" || m.status == "Failed") {
+			return m, nil
+		}
 		// While any modal is open the content is static — keep ticker alive without advancing frames.
 		if m.showAsk || m.showModels || m.showConnect || m.showDebug || m.showSessions || m.showMCP {
 			return m, tickCmd()
 		}
-		// Keep the ticker ALIVE for the whole session.
-		if m.turnRunning || (m.status != "Ready" && m.status != "Failed") {
-			m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
-		}
+		m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
 		return m, tickCmd()
 
 	case stepProgressMsg:
@@ -1186,7 +1200,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// When transitioning to tool execution (StateActing), commit the streamed
 		// assistant text for this iteration as its own distinct block with vertical line border.
 		if msg.state == loop.StateActing && m.streaming && strings.TrimSpace(m.pendingStream) != "" {
-			stamp := "BROCODE:" + m.mode + ":" + m.activeModel + "\n" + strings.TrimSpace(m.pendingStream)
+			useMode := m.turnMode
+			if useMode == "" {
+				useMode = m.mode
+			}
+			stamp := "BROCODE:" + useMode + ":" + m.activeModel + "\n" + strings.TrimSpace(m.pendingStream)
 			m.appendMessages(stamp)
 			m.pendingStream = ""
 			m.streaming = false
@@ -1329,7 +1347,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.queueMode = false
 				m.queueSel = 0
 			}
-			return m.startTurn(next)
+			if next.Mode != "" {
+				m.mode = next.Mode
+				m.engine.SetMode(m.mode)
+				m.persistMode()
+			}
+			return m.startTurn(next.Text)
 		}
 		// Queue fully drained — leave queue management mode if the last item
 		// was deleted by the user rather than drained.
@@ -1492,40 +1515,74 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Queue management mode (Alt+K): while active, keys manage the queued
-		// prompts instead of typing into the input. ↑/↓ move the selection,
-		// e loads the selected prompt into the input for editing (removing it
-		// from the queue), d deletes it, Esc/Alt+K exit.
+		// Queue management mode (Ctrl+K / Alt+K): while active, keys manage the queued
+		// prompts instead of typing into the input. ↑/↓ move selection,
+		// K/J (or Shift+↑/↓) reorder queue positions, m/Tab cycles mode,
+		// e edits prompt + sets mode in input, d deletes it, Esc/Ctrl+K/Alt+K exit.
 		if m.queueMode {
 			if len(m.pendingQueue) == 0 {
 				m.queueMode = false
 				m.queueSel = 0
 			} else {
 				switch keyStr {
-				case "esc", "alt+k":
+				case "esc", "alt+k", "ctrl+k", "alt+K", "ctrl+K":
 					m.queueMode = false
 					return m, nil
 				case "enter":
 					// Swallow Enter while managing the queue so the input can't
-					// accidentally send mid-management; Esc/Alt+K exit instead.
+					// accidentally send mid-management; Esc/Ctrl+K exit instead.
 					return m, nil
-				case "up":
+				case "up", "k":
 					if m.queueSel > 0 {
 						m.queueSel--
 					}
 					return m, nil
-				case "down":
+				case "down", "j":
 					if m.queueSel < len(m.pendingQueue)-1 {
 						m.queueSel++
+					}
+					return m, nil
+				case "K", "shift+up":
+					// Move selected queued item UP in execution order
+					if m.queueSel > 0 {
+						m.pendingQueue[m.queueSel], m.pendingQueue[m.queueSel-1] = m.pendingQueue[m.queueSel-1], m.pendingQueue[m.queueSel]
+						m.queueSel--
+					}
+					return m, nil
+				case "J", "shift+down":
+					// Move selected queued item DOWN in execution order
+					if m.queueSel < len(m.pendingQueue)-1 {
+						m.pendingQueue[m.queueSel], m.pendingQueue[m.queueSel+1] = m.pendingQueue[m.queueSel+1], m.pendingQueue[m.queueSel]
+						m.queueSel++
+					}
+					return m, nil
+				case "m", "M", "tab", "shift+tab":
+					// Cycle the target engine mode for the selected queued item
+					if m.queueSel >= 0 && m.queueSel < len(m.pendingQueue) {
+						cur := m.pendingQueue[m.queueSel].Mode
+						if cur == "" {
+							cur = "BUILDER"
+						}
+						switch cur {
+						case "BUILDER":
+							m.pendingQueue[m.queueSel].Mode = "PLANNER"
+						case "PLANNER":
+							m.pendingQueue[m.queueSel].Mode = "MINER"
+						default:
+							m.pendingQueue[m.queueSel].Mode = "BUILDER"
+						}
 					}
 					return m, nil
 				case "e":
 					// Edit the selected queued prompt: load it into the input
 					// (replacing whatever was typed) and drop it from the queue
-					// so it can't auto-send mid-edit. The user presses Enter
-					// when done — it re-queues or runs then.
+					// so it can't auto-send mid-edit.
 					if m.queueSel >= 0 && m.queueSel < len(m.pendingQueue) {
-						m.promptInput.SetValue(m.pendingQueue[m.queueSel])
+						item := m.pendingQueue[m.queueSel]
+						m.promptInput.SetValue(item.Text)
+						if item.Mode != "" {
+							m.mode = item.Mode
+						}
 						m.pendingQueue = append(m.pendingQueue[:m.queueSel], m.pendingQueue[m.queueSel+1:]...)
 					}
 					m.queueMode = false
@@ -1543,8 +1600,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+			}
 		}
-	}
 
 		// Mode-switch confirmation: while confirm is pending, only y/Enter
 		// (apply) or n/Esc (cancel) are handled; everything else is ignored.
@@ -1617,7 +1674,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case "alt+k":
+		case "alt+k", "ctrl+k", "alt+K", "ctrl+K":
 			// Toggle queue management mode (see the intercept above for the
 			// keys it handles). Only useful while prompts are queued.
 			if !m.showFileConfirm && !m.showAsk && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug && !m.showMCP && len(m.pendingQueue) > 0 {
@@ -1671,11 +1728,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// mode (it's reserved for in-modal navigation), so it is a no-op
 			// here — and the key is still consumed so it can't bubble elsewhere.
 			if keyStr == "shift+tab" && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
-				// While a turn is actively running, ignore mode switching so it never
-				// disrupts the in-flight agent execution.
-				if m.turnRunning {
-					return m, nil
-				}
 				next := m.mode
 				switch m.mode {
 				case "BUILDER":
@@ -1686,8 +1738,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					next = "BUILDER"
 				}
 				m.mode = next
-				m.engine.SetMode(m.mode)
-				m.persistMode()
+				// If no turn is running, update engine mode immediately.
+				// If a turn is running, the in-flight turn keeps its running mode,
+				// and m.mode applies to any new prompt typed and queued.
+				if !m.turnRunning {
+					m.engine.SetMode(m.mode)
+					m.persistMode()
+				}
 			}
 			return m, nil
 
@@ -1783,7 +1840,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.queueMode = false
 						m.queueSel = 0
 					}
-					return m.startTurn(next)
+					if next.Mode != "" {
+						m.mode = next.Mode
+						m.engine.SetMode(m.mode)
+						m.persistMode()
+					}
+					return m.startTurn(next.Text)
 				}
 				m.queueMode = false
 				m.queueSel = 0
@@ -1871,7 +1933,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// turns would clobber the engine's shared per-turn state and could
 			// crash the CLI progress goroutine (nil-handler panic).
 			if m.turnRunning {
-				m.pendingQueue = append(m.pendingQueue, userQuery)
+				m.pendingQueue = append(m.pendingQueue, QueuedPrompt{
+					Text: userQuery,
+					Mode: m.mode,
+				})
 				// The queue is rendered live in the activity slot above the
 				// input (see buildLogChrome) — never as a history row, so a
 				// queued prompt can't pollute the conversation below the first
@@ -3394,9 +3459,13 @@ func (m *Model) buildLog(contentWidth int) string {
 	out.WriteString(m.renderedHistory)
 	if m.streaming && m.pendingStream != "" {
 		label := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("BROCODE")
-		if m.mode != "" {
+		streamMode := m.turnMode
+		if streamMode == "" {
+			streamMode = m.mode
+		}
+		if streamMode != "" {
 			badgeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("232")).Bold(true).Padding(0, 1)
-			switch m.mode {
+			switch streamMode {
 			case "PLANNER":
 				badgeStyle = badgeStyle.Background(lipgloss.Color("141"))
 			case "MINER":
@@ -3404,7 +3473,7 @@ func (m *Model) buildLog(contentWidth int) string {
 			default:
 				badgeStyle = badgeStyle.Background(lipgloss.Color("205"))
 			}
-			label += "  " + badgeStyle.Render(m.mode)
+			label += "  " + badgeStyle.Render(streamMode)
 		}
 		if m.activeModel != "" {
 			modelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
@@ -3598,18 +3667,19 @@ func (m *Model) buildLogChrome() (string, int) {
 	}
 
 	// Queued prompts: shown live above the input, never as history rows. In
-	// queue mode (Alt+K) the selected row is highlighted and a hint names the
-	// management keys (e edit · d delete · ↑/↓ select · Esc exit).
+	// queue mode (Ctrl+K / Alt+K) the selected row is highlighted and a hint names the
+	// management keys (e edit · d delete · m mode · ↑/↓ select · Shift+↑/↓ reorder · Esc exit).
 	if len(m.pendingQueue) > 0 {
 		qHead := lipgloss.NewStyle().Foreground(lipgloss.Color("178")).Bold(true).Render(fmt.Sprintf("⏳ PROMPT QUEUE (%d)", len(m.pendingQueue)))
 		if m.queueMode {
-			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · e edit · d delete · ↑/↓ select · Esc exit")
+			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · e edit · d delete · m mode · ↑/↓ select · Shift+↑/↓ reorder · Esc exit")
 		} else {
-			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · Alt+K manage")
+			qHead += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("  · Ctrl+K / Alt+K manage")
 		}
 		sb.WriteString(qHead + "\n")
 		for i, q := range m.pendingQueue {
-			row := "  " + fmt.Sprintf("%d", i+1) + " · " + truncatePrompt(q)
+			badge := modeBadgeMini(q.Mode)
+			row := fmt.Sprintf("  %d · %s %s", i+1, badge, truncatePrompt(q.Text))
 			if m.queueMode && i == m.queueSel {
 				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true).Render("▸ "+row) + "\n")
 			} else {
@@ -3691,8 +3761,14 @@ func (m *Model) buildLogChrome() (string, int) {
 		}
 	}
 
-	footerBanner := fmt.Sprintf("🔥 %s · P:%s · M:%s · S:%s · %s%s",
-		modeBadgeStyle.Render(m.mode), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
+	// Lead icon: dynamic animated loader while busy/running, fire emoji when ready
+	leadIcon := "🔥"
+	if m.turnRunning || (m.status != "Ready" && m.status != "Failed") {
+		leadIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true).Render(spinnerFrames[m.spinnerIdx%len(spinnerFrames)])
+	}
+
+	footerBanner := fmt.Sprintf("%s %s · P:%s · M:%s · S:%s · %s%s",
+		leadIcon, modeBadgeStyle.Render(m.mode), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
 
 	helpStr := " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+P pager · Ctrl+Y copy · Ctrl+M mouse · /help "
 	if m.width >= 120 {
@@ -3700,11 +3776,9 @@ func (m *Model) buildLogChrome() (string, int) {
 	} else if m.width >= 90 {
 		helpStr = " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · Ctrl+P pager · Ctrl+Y copy · Ctrl+M mouse · /sessions · /models · /help "
 	}
-	// When prompts are queued, advertise the queue-management key. Only on wide
-	// terminals so the hint never pushes the help bar onto two wrapped lines;
-	// the queue block itself already shows "Alt+K manage" on narrow screens.
+	// When prompts are queued, advertise the queue-management key.
 	if len(m.pendingQueue) > 0 && m.width >= 120 {
-		helpStr += " · Alt+K queue "
+		helpStr += " · Ctrl+K / Alt+K queue "
 	}
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	if m.width > 0 {
@@ -3714,11 +3788,19 @@ func (m *Model) buildLogChrome() (string, int) {
 	sb.WriteString(bannerStyle.Render(footerBanner) + "\n")
 	sb.WriteString(helpStyle.Render(helpStr))
 
-	// The chrome is appended AFTER the viewport output (which renders exactly
-	// its height and ends WITHOUT a trailing newline), so the extra terminal
-	// rows it occupies equal its newline count — not count+1.
 	s := sb.String()
 	return s, strings.Count(s, "\n")
+}
+
+func modeBadgeMini(mode string) string {
+	switch mode {
+	case "PLANNER":
+		return lipgloss.NewStyle().Background(lipgloss.Color("141")).Foreground(lipgloss.Color("0")).Bold(true).Render(" PLAN ")
+	case "MINER":
+		return lipgloss.NewStyle().Background(lipgloss.Color("42")).Foreground(lipgloss.Color("0")).Bold(true).Render(" MINE ")
+	default:
+		return lipgloss.NewStyle().Background(lipgloss.Color("205")).Foreground(lipgloss.Color("0")).Bold(true).Render(" BUILD ")
+	}
 }
 
 // updateLogHeight sizes the log viewport to the terminal height below the

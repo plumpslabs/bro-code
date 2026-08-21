@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
+	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
 // checkCmd is one verification command (binary + args). dir overrides the
@@ -414,7 +414,7 @@ func runCheck(ctx context.Context, c checkCmd) string {
 	checkCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(checkCtx, c.name, c.args...)
+	cmd := tool.SafeCommandContext(checkCtx, c.name, c.args...)
 	if c.dir != "" {
 		cmd.Dir = c.dir
 	}
