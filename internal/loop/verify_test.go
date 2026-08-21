@@ -59,7 +59,7 @@ func TestPlanVerificationJS(t *testing.T) {
 		t.Errorf("unexpected lint cmd: %+v", cmds[1])
 	}
 
-	// bun project with tsconfig and local tsc → bunx tsc --noEmit.
+	// bun project with tsconfig and local tsc → bunx tsc --noEmit --skipLibCheck.
 	writeFixture(t, map[string]string{
 		"bun.lock":              "",
 		"tsconfig.json":         "{}",
@@ -70,7 +70,7 @@ func TestPlanVerificationJS(t *testing.T) {
 	if len(cmds) != 1 {
 		t.Fatalf("expected single tsc fallback for bun, got %v", cmds)
 	}
-	if cmds[0].name != "bunx" || strings.Join(cmds[0].args, " ") != "tsc --noEmit" {
+	if cmds[0].name != "bunx" || strings.Join(cmds[0].args, " ") != "tsc --noEmit --skipLibCheck" {
 		t.Errorf("unexpected bun tsc cmd: %+v", cmds[0])
 	}
 

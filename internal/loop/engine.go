@@ -1148,7 +1148,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			return
 		}
 		if len(e.loadedSkills) == 0 {
-			onUpdate(e.state, fmt.Sprintf("📚 No skills loaded this turn — %d skills in the catalog (list .agents/skills and .brocode/skills)", len(e.skillsEntries)))
+			onUpdate(e.state, fmt.Sprintf("📚 No skills loaded this turn — %d skills in the catalog (list .brocode/skills)", len(e.skillsEntries)))
 			return
 		}
 		names := make([]string, 0, len(e.loadedSkills))
@@ -2176,22 +2176,13 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		}
 
 		// PLANNER mode (or any turn producing a structured execution plan):
-		// Automatically parse and save to .brocode/current_plan.md and project memory
+		// Automatically parse and save to .brocode/current_plan.md
 		// so BUILDER mode immediately inherits the active plan without language bias!
 		parsedPlan := plan.ParseMarkdownPlan(resp.Content)
 		if parsedPlan != nil && len(parsedPlan.Steps) >= 1 && (e.Mode() == "PLANNER" || len(parsedPlan.Steps) >= 2) {
 			_ = plan.SaveCurrentPlan(e.repoRoot, parsedPlan)
 			if onUpdate != nil {
 				onUpdate(e.state, fmt.Sprintf("📋 Active plan saved with %d step(s) to .brocode/current_plan.md", len(parsedPlan.Steps)))
-			}
-			if e.mem != nil {
-				for _, step := range parsedPlan.Steps {
-					clean := step.Description
-					if len(clean) > 150 {
-						clean = clean[:150] + "…"
-					}
-					_, _ = e.mem.Retain("Active Plan", clean)
-				}
 			}
 		}
 
@@ -2206,9 +2197,6 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				if archived, archPath, _ := plan.AutoArchiveIfDone(e.repoRoot); archived {
 					if onUpdate != nil {
 						onUpdate(e.state, fmt.Sprintf("📦 All plan tasks completed — archived to %s", filepath.Base(archPath)))
-					}
-					if e.mem != nil {
-						_, _ = e.mem.Retain("Active Plan", fmt.Sprintf("[Completed] Plan finished & archived to %s", filepath.Base(archPath)))
 					}
 				}
 			}

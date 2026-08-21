@@ -10,7 +10,7 @@ import (
 
 func writeSkill(t *testing.T, root, name, frontmatter, body string) {
 	t.Helper()
-	dir := filepath.Join(root, ".agents", "skills", name)
+	dir := filepath.Join(root, ".brocode", "skills", name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -742,21 +742,13 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 				lastGoal = c
 			}
 		case "assistant_msg":
-			// If the assistant output an execution plan, capture to current_plan.md & memory.md
+			// If the assistant output an execution plan, ensure it is saved to .brocode/current_plan.md.
+			// Active plans live in current_plan.md as the single source of truth (not duplicated into memory.md).
 			parsed := plan.ParseMarkdownPlan(msg.Content)
 			if parsed != nil && len(parsed.Steps) >= 1 && (msg.Mode == "PLANNER" || len(parsed.Steps) >= 2) {
 				if s.path != "" {
 					wsDir := filepath.Dir(filepath.Dir(s.path))
 					_ = plan.SaveCurrentPlan(wsDir, parsed)
-				}
-				for _, step := range parsed.Steps {
-					clean := step.Description
-					if len(clean) > 150 {
-						clean = clean[:150] + "…"
-					}
-					if ok, err := s.retainWithTimestamp("Active Plan", clean); err == nil && ok {
-						changed = true
-					}
 				}
 			}
 			for _, tc := range msg.ToolCalls {

@@ -220,6 +220,13 @@ type Model struct {
 	// at a time, because concurrent RunTurn calls clobber the engine's shared
 	// per-turn state and can crash the CLI progress goroutine (nil handler).
 	turnRunning  bool
+	// turnGen is an monotonically-increasing counter, incremented each time a
+	// new turn starts. turnResultMsg carries the gen value at dispatch time —
+	// if the message arrives with a stale gen (the turn was interrupted and a
+	// new one has already started), it is discarded instead of overwriting the
+	// new turn's live state. This prevents the "ESC → Enter → new turn starts
+	// → old goroutine finishes → turnRunning=false prematurely" race.
+	turnGen      int
 	pendingQueue []string
 
 	// queueSel is the highlighted index into pendingQueue while queueMode is
@@ -250,10 +257,6 @@ type Model struct {
 	// appended to the conversation history.
 	activity []string
 
-	// interrupted is set when the user presses ESC to cancel a running turn.
-	// The in-flight RunTurn then returns a "context canceled" error which must
-	// NOT be shown as an ERROR row (the user already knows they cancelled).
-	interrupted bool
 
 	// Log viewport: the conversation scrolls inside a fixed-height window so
 	// the terminal never repaints the whole history (flicker fix) and the
@@ -412,6 +415,11 @@ type turnResultMsg struct {
 	// captured at send time so the answer can be stamped with a mode badge
 	// even if the user toggles mode while the turn is in flight.
 	mode string
+	// gen is the turn-generation counter at the time this turn was started.
+	// When a stale turnResultMsg arrives (from a goroutine whose turn was
+	// interrupted and a new turn already started), it is silently discarded
+	// rather than clobbering the new turn's turnRunning/streaming state.
+	gen int
 }
 
 // maxChatMessages is a SAFETY CEILING, not a display window: the chat log
@@ -488,6 +496,11 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 	m.pendingStream = ""
 	m.activity = nil
 	m.turnRunning = true
+	// Bump the generation counter so any in-flight goroutine from the previous
+	// (interrupted) turn can detect that its turnResultMsg is stale and
+	// discard it — preventing premature turnRunning=false on the new turn.
+	m.turnGen++
+	thisGen := m.turnGen
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelTurn = cancel
@@ -519,7 +532,7 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 		if m.quitting {
 			return nil
 		}
-		return turnResultMsg{content: res, err: err, mode: m.mode}
+		return turnResultMsg{content: res, err: err, mode: m.mode, gen: thisGen}
 	}
 
 	return m, tea.Batch(runTurnCmd, tickCmd())
@@ -1078,7 +1091,7 @@ func embedderFor(p provider.DetectedProvider) *search.Embedder {
 }
 
 // skillEntries converts the installed skills (embedded defaults installed into
-// .brocode/skills, plus user/project .agents/skills and the global
+// .brocode/skills, plus user/project .brocode/skills and the global
 // ~/.config/brocode/skills) into catalog entries for the engine's prompt
 // builder. Only name + description enter the prompt (progressive disclosure
 // level 1); the model loads each SKILL.md itself via read_file when relevant.
@@ -1197,6 +1210,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case turnResultMsg:
+		// Stale-generation guard: if this result is from a previously-cancelled
+		// turn (ESC was pressed and/or a new turn has already started), discard it
+		// silently. The new turn owns turnRunning and its own streaming state.
+		if msg.gen > 0 && msg.gen != m.turnGen {
+			return m, nil
+		}
 		// Snapshot the partial stream BEFORE clearing it: an interrupted turn
 		// must leave a trace in history instead of vanishing (the user saw the
 		// text appear, so it must not silently disappear — that was a big
@@ -1211,14 +1230,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A user-initiated interrupt (ESC) aborts the context, which the
 			// adapter reports as "context canceled". That is not an error —
 			// the interruption notice was already shown when ESC was pressed.
-			// Keep whatever the model had already streamed so the conversation
-			// stays connected (labeled as partial, never confused with a
-			// complete answer).
-			if m.interrupted {
-				m.interrupted = false
-				if partial != "" {
-					m.appendMessages("BROCODE:\n💭 (interrupted — partial response)\n\n" + partial)
-				}
+			if strings.Contains(strings.ToLower(msg.err.Error()), "context canceled") {
+				m.status = "Ready"
 			} else {
 				m.appendMessages("ERROR: " + msg.err.Error())
 				m.status = "Failed"
@@ -1289,6 +1302,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if payload, err := json.Marshal(ch); err == nil {
 					_, _ = st.AppendEvent(m.context.SessionID(), "file_changes", string(payload), 0)
 				}
+			}
+		}
+
+		// Live session memory capture: capture touched files and goals after
+		// each turn so .brocode/memory.md is always up-to-date in real-time,
+		// without having to wait for the user to exit the CLI (Ctrl+C).
+		if m.memStore != nil && m.context != nil && m.context.Store() != nil {
+			if events, err := m.context.Store().GetSessionEvents(m.context.SessionID()); err == nil && len(events) > 0 {
+				_ = m.memStore.CaptureSession(m.context.SessionID(), events)
 			}
 		}
 
@@ -1736,10 +1758,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.scoutMgr != nil {
 					m.scoutMgr.CancelAll()
 				}
-				m.interrupted = true
+				// Bump generation so stale turnResultMsg from the cancelled
+				// goroutine is safely discarded by the generation guard.
+				m.turnGen++
+				// Snapshot any partial stream before resetting so history stays connected.
+				partial := strings.TrimSpace(m.pendingStream)
+				m.streaming = false
+				m.pendingStream = ""
+				m.turnRunning = false
 				m.activity = nil
 				m.status = "Ready"
+				if partial != "" {
+					m.appendMessages("BROCODE:\n💭 (interrupted — partial response)\n\n" + partial)
+				}
 				m.appendMessages("⚡ Interrupted turn execution.")
+				// Drain any already-queued prompts immediately.
+				if len(m.pendingQueue) > 0 {
+					next := m.pendingQueue[0]
+					m.pendingQueue = m.pendingQueue[1:]
+					if m.queueSel > 0 {
+						m.queueSel--
+					}
+					if len(m.pendingQueue) == 0 {
+						m.queueMode = false
+						m.queueSel = 0
+					}
+					return m.startTurn(next)
+				}
+				m.queueMode = false
+				m.queueSel = 0
 				return m, nil
 			}
 

@@ -200,9 +200,10 @@ func isHeavyVerifyDir(name string) bool {
 
 // planJSVerificationIn plans JS/TS checks for a specific directory using that
 // directory's own package manager and package.json. It prefers the "typecheck"
-// script, falls back to `tsc --noEmit` when a tsconfig exists and tsc is
-// locally installed, then runs the "lint" script when defined. Tests are
-// deliberately NOT auto-run (they are often integration-heavy and slow).
+// script, falls back to `tsc --noEmit --skipLibCheck` when a tsconfig exists
+// and tsc is locally installed, then runs the "lint" script when defined.
+// Tests are deliberately NOT auto-run (they are often integration-heavy, slow,
+// or enter interactive watch mode that never terminates — causing session hangs).
 func planJSVerificationIn(dir string) []checkCmd {
 	pm := detectJSManagerIn(dir)
 	var cmds []checkCmd
@@ -212,24 +213,23 @@ func planJSVerificationIn(dir string) []checkCmd {
 	} else if fileExistsIn(dir, "tsconfig.json") && tscAvailableIn(dir, pm) {
 		switch pm {
 		case "bun":
-			cmds = append(cmds, checkCmd{"bunx", []string{"tsc", "--noEmit"}, dir})
+			cmds = append(cmds, checkCmd{"bunx", []string{"tsc", "--noEmit", "--skipLibCheck"}, dir})
 		case "pnpm":
-			cmds = append(cmds, checkCmd{"pnpm", []string{"exec", "tsc", "--noEmit"}, dir})
+			cmds = append(cmds, checkCmd{"pnpm", []string{"exec", "tsc", "--noEmit", "--skipLibCheck"}, dir})
 		case "yarn":
-			cmds = append(cmds, checkCmd{"yarn", []string{"tsc", "--noEmit"}, dir})
+			cmds = append(cmds, checkCmd{"yarn", []string{"tsc", "--noEmit", "--skipLibCheck"}, dir})
 		default:
-			cmds = append(cmds, checkCmd{"npx", []string{"--no-install", "tsc", "--noEmit"}, dir})
+			cmds = append(cmds, checkCmd{"npx", []string{"--no-install", "tsc", "--noEmit", "--skipLibCheck"}, dir})
 		}
 	}
 
 	if scriptExistsIn(dir, "lint") {
 		cmds = append(cmds, checkCmd{pm, []string{"run", "lint"}, dir})
 	}
-	if scriptExistsIn(dir, "test:unit") {
-		cmds = append(cmds, checkCmd{pm, []string{"run", "test:unit"}, dir})
-	} else if scriptExistsIn(dir, "test") {
-		cmds = append(cmds, checkCmd{pm, []string{"run", "test"}, dir})
-	}
+	// NOTE: Test suites are intentionally NOT auto-run here. Jest and Vitest
+	// enter interactive watch mode when there is no CI=true env var, causing
+	// the verification step to hang indefinitely. The model can still run tests
+	// manually via the bash tool when explicitly needed.
 	return cmds
 }
 

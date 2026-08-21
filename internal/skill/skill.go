@@ -27,10 +27,9 @@ type Loader struct {
 	skills []Skill
 }
 
-// NewLoader initializes skill discovery across project and home locations.
+// NewLoader initializes skill discovery across project (.brocode/skills) and home locations (~/.config/brocode/skills).
 func NewLoader(workspaceDir string) *Loader {
 	l := &Loader{}
-	l.scanDir(filepath.Join(workspaceDir, ".agents", "skills"))
 	l.scanDir(filepath.Join(workspaceDir, ".brocode", "skills"))
 
 	home, _ := os.UserHomeDir()

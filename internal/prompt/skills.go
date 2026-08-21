@@ -35,7 +35,7 @@ func renderSkillsBlock(in *Input) string {
 		}
 	}
 	if extra > 0 {
-		fmt.Fprintf(&sb, "- (+%d more available — list .agents/skills and .brocode/skills for the full catalog)\n", extra)
+		fmt.Fprintf(&sb, "- (+%d more available — list .brocode/skills or ~/.config/brocode/skills for the full catalog)\n", extra)
 	}
 	sb.WriteString("When a task matches a skill, load its SKILL.md file (read_file) and follow its instructions.")
 	return sb.String()

@@ -202,13 +202,14 @@ func TestInterruptedTurnIsNotAnError(t *testing.T) {
 
 	// User presses ESC while a turn is running.
 	m.status = "Thinking..."
+	m.turnRunning = true
 	m.cancelTurn = func() {}
 	// KeyPressMsg is an alias for Key; KeyEscape renders as "esc".
 	if _, err := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape}); err != nil {
 		t.Fatalf("esc key update failed: %v", err)
 	}
-	if !m.interrupted {
-		t.Fatal("expected interrupted flag after ESC")
+	if m.turnRunning {
+		t.Fatal("expected turnRunning=false after ESC")
 	}
 
 	// The in-flight turn returns "context canceled".
@@ -264,6 +265,55 @@ func TestInterruptedPartialAnswerKept(t *testing.T) {
 	}
 	if m.pendingStream != "" {
 		t.Fatal("pendingStream not cleared after turn result")
+	}
+}
+
+// TestInterruptThenEnterRunsImmediately verifies that when a turn is interrupted
+// by ESC, typing a prompt and pressing ENTER immediately runs the new turn
+// instead of queuing it. It also verifies that late-arriving results from the
+// cancelled turn do NOT clobber the new turn.
+func TestInterruptThenEnterRunsImmediately(t *testing.T) {
+	m := newTestApp()
+
+	// 1. Start first turn
+	m.promptInput.SetValue("first question")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.turnRunning {
+		t.Fatal("expected turnRunning after first prompt")
+	}
+	firstGen := m.turnGen
+
+	// 2. User presses ESC to interrupt
+	m.cancelTurn = func() {}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.turnRunning {
+		t.Fatal("expected turnRunning=false immediately after ESC")
+	}
+	if m.status != "Ready" {
+		t.Fatalf("expected status Ready after ESC, got %q", m.status)
+	}
+
+	// 3. User types second prompt and presses Enter
+	m.promptInput.SetValue("second question")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.turnRunning {
+		t.Fatal("expected second prompt to start running immediately, not queue")
+	}
+	if len(m.pendingQueue) != 0 {
+		t.Fatalf("expected empty queue, but got %v", m.pendingQueue)
+	}
+
+	// 4. Stale turnResultMsg from first cancelled turn arrives
+	m.Update(turnResultMsg{err: fmt.Errorf("context canceled"), gen: firstGen})
+	// It must NOT stop the second turn!
+	if !m.turnRunning {
+		t.Fatal("stale turnResultMsg clobbered the second turn's turnRunning state")
+	}
+
+	// 5. Second turn completes
+	m.Update(turnResultMsg{content: "second answer", gen: m.turnGen})
+	if m.turnRunning {
+		t.Fatal("expected turnRunning=false after second turn completed")
 	}
 }
 
