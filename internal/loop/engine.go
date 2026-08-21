@@ -2062,6 +2062,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					return msg, nil
 				}
 				msg := "Level 1 verification check failed:\n" + vetErr + "\nPlease fix the issues."
+				if e.verifyErrorStreak >= 2 {
+					msg += "\n\n⚠️ [STRATEGY INVALIDATION]: This error has persisted across multiple attempts. Your initial hypothesis or syntax tweak is invalid. Step back, re-read the context, and pivot your strategy rather than repeating the same fix."
+				}
 				if localized := e.localizeVerifyFailure(); localized != "" {
 					msg += "\n\nLSP-localized view of the failing files (from the language server):\n" + localized
 				}

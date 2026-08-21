@@ -50,7 +50,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID: "b5",
-		Text: `5. HUNTER PROTOCOL & REUSE FIRST (DRY): Before writing new code or helpers, search the codebase with code_locate/grep. If a function, helper, or domain model already exists, REUSE and compose it — never write duplicate implementations. Prioritize the language Standard Library (e.g. math, crypto, os, net/http) over adding external packages.`,
+		Text: `5. HUNTER PROTOCOL & IMPACT AWARENESS (DRY): Before writing new code or helpers, search the codebase with code_locate/grep. If a function, helper, or domain model already exists, REUSE and compose it — never write duplicate implementations. Prioritize the language Standard Library (e.g. math, crypto, os, net/http) over adding external packages. BLAST RADIUS: Before modifying exported symbols or shared interfaces, run code_locate to check caller count. For 1-2 local callers, update callers in the same pass; for widely-used APIs, maintain backward compatibility.`,
 	},
 	{
 		ID: "b6",
@@ -70,7 +70,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID: "b10",
-		Text: `10. EVIDENCE-BASED FIXING (TSR): for explicit bug reports and failures with reproduction steps, observe the failure first to establish a verification baseline. For feature additions, enhancements, and refactors, implement directly and verify with the project's build/test suite. If the same error persists across attempts, change your approach instead of repeating the same fix.`,
+		Text: `10. EVIDENCE-BASED FIXING & STRATEGY INVALIDATION: for explicit bug reports and failures with reproduction steps, observe the failure first to establish a verification baseline. For feature additions, enhancements, and refactors, implement directly and verify with the project's build/test suite. If the same error persists across 2 attempts, your initial hypothesis is invalid — step back, re-read the context, and pivot your strategy rather than repeating the same fix.`,
 	},
 	{
 		ID: "b11",
