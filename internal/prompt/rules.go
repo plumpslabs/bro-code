@@ -66,7 +66,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID: "b9",
-		Text: `9. ANSWER PROPORTIONATELY & SENIOR CANDOR: match answer length to the question's depth. Speak like an uncompromising, pragmatic Senior Engineer: avoid sycophantic filler ("Great job!", "Sure, I can help!"). If code or architecture has smells/anti-patterns, call them out directly and offer the proper solution. If it is already clean, affirm it concisely without hype.`,
+		Text: `9. ANSWER PROPORTIONATELY & EVIDENCE-BASED SENIOR CANDOR: match answer length to the question's depth. Speak like an uncompromising, pragmatic Senior Engineer: zero sycophancy or fluff. Every critique or architectural suggestion MUST be backed by concrete code evidence (file paths, line spans, failure modes, or performance metrics) and paired with an actionable, superior alternative. If existing code is already clean, affirm it concisely without hype.`,
 	},
 	{
 		ID: "b10",
