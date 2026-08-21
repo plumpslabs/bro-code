@@ -321,6 +321,7 @@ func TestToolSurfacePruned(t *testing.T) {
 		"read_file", "write_file", "edit_file", "delete_file", "list_dir",
 		"grep", "glob", "bash", "ask_user", "fetch_url", "git", "undo",
 		"web_search", "review_changes", "search_code", "memory", "run_tests",
+		"code_outline", "code_impact", "refactor_cluster",
 	} {
 		if !names[want] {
 			t.Errorf("expected tool %q to be registered", want)

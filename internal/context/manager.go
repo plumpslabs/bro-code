@@ -18,6 +18,10 @@ import (
 // display string during RestoreSession. Wired by the tool package on startup.
 var FileChangesFormatter func(payloadJSON string) string
 
+// FileChangesRestorer restores a serialized JSON list of file changes into individual
+// live DIFF: entries during RestoreSession, matching the live turn layout.
+var FileChangesRestorer func(payloadJSON string) []string
+
 // CompactionSummary follows the structured 6-heading format used for context
 // compaction. The six headings (Goal, Files Touched, Decisions Made, Next
 // Action, Constraints, Last Known State) give a continuing agent everything it
@@ -340,6 +344,23 @@ func (m *Manager) AppendSystemNote(content string) error {
 	defer m.mu.Unlock()
 	payload, _ := json.Marshal(provider.Message{Role: "system", Content: content})
 	_, err := m.store.AppendEvent(m.sessionID, "system_msg", string(payload), 0)
+	return err
+}
+
+// AppendFileDiff records a live per-file diff at the exact moment an edit lands,
+// preserving the true chronological flow in the session history so -c resume
+// never dumps diffs at the bottom of the conversation.
+func (m *Manager) AppendFileDiff(path, diff string) error {
+	if m.store == nil || path == "" || diff == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	payload, _ := json.Marshal(map[string]string{
+		"path": path,
+		"diff": diff,
+	})
+	_, err := m.store.AppendEvent(m.sessionID, "file_diff", string(payload), 0)
 	return err
 }
 
@@ -734,11 +755,47 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 				text = ExtractEventContent(ev.PayloadJSON)
 			}
 			display = append(display, text)
-		case "file_changes":
+		case "file_diff":
 			flushPendingTools()
-			if FileChangesFormatter != nil {
-				if formatted := FileChangesFormatter(ev.PayloadJSON); formatted != "" {
-					display = append(display, formatted)
+			var p struct {
+				Path string `json:"path"`
+				Diff string `json:"diff"`
+			}
+			if json.Unmarshal([]byte(ev.PayloadJSON), &p) == nil && p.Path != "" {
+				prefix := "DIFF:\n" + p.Path + "\n"
+				replaced := false
+				for i := len(display) - 1; i >= 0; i-- {
+					if strings.HasPrefix(display[i], "YOU:\n") {
+						break
+					}
+					if strings.HasPrefix(display[i], prefix) {
+						display[i] = prefix + p.Diff
+						replaced = true
+						break
+					}
+				}
+				if !replaced {
+					display = append(display, prefix+p.Diff)
+				}
+			}
+		case "file_changes":
+			// If file_diff events already restored individual per-file diffs in place,
+			// skip legacy bulk file_changes to avoid duplicate diff display.
+			hasInlineDiff := false
+			for _, d := range display {
+				if strings.HasPrefix(d, "DIFF:\n") {
+					hasInlineDiff = true
+					break
+				}
+			}
+			if !hasInlineDiff {
+				flushPendingTools()
+				if FileChangesRestorer != nil {
+					display = append(display, FileChangesRestorer(ev.PayloadJSON)...)
+				} else if FileChangesFormatter != nil {
+					if formatted := FileChangesFormatter(ev.PayloadJSON); formatted != "" {
+						display = append(display, formatted)
+					}
 				}
 			}
 		}

@@ -274,16 +274,118 @@ func tscAvailableIn(dir, pm string) bool {
 	return pm == "bun" || pm == "pnpm"
 }
 
+// planVerificationForFiles plans verification checks scoped to the directories
+// containing editedFiles when possible, falling back to full repo plan.
+func planVerificationForFiles(editedFiles []string) []checkCmd {
+	if len(editedFiles) > 0 {
+		subdirs := make(map[string]bool)
+		for _, f := range editedFiles {
+			clean := filepath.ToSlash(filepath.Clean(f))
+			parts := strings.Split(clean, "/")
+			if len(parts) > 1 && !isHeavyVerifyDir(parts[0]) {
+				subdirs[parts[0]] = true
+			}
+		}
+		var subCmds []checkCmd
+		for dir := range subdirs {
+			if cmds := planIn(dir); len(cmds) > 0 {
+				for i := range cmds {
+					cmds[i].dir = dir
+				}
+				subCmds = append(subCmds, cmds...)
+			}
+		}
+		if len(subCmds) > 0 {
+			return subCmds
+		}
+	}
+	return planVerification()
+}
+
 // runVerification executes the planned checks in order and returns the first
-// failing output (capped), or "" when everything passes. It never runs when
-// the project has no recognized type system.
-func runVerification(ctx context.Context) string {
-	for _, c := range planVerification() {
+// failing output (capped), or "" when everything passes.
+// If editedFiles is non-empty, static analysis errors are filtered to ensure
+// that compiler/linter failures in untouched, unrelated files (pre-existing baseline errors)
+// do not falsely fail the turn and trap the model in a futile repair loop.
+func runVerification(ctx context.Context, editedFiles ...string) string {
+	for _, c := range planVerificationForFiles(editedFiles) {
 		if out := runCheck(ctx, c); out != "" {
+			if len(editedFiles) > 0 && isStaticAnalysisCheck(c) {
+				if filtered := filterRelevantErrors(out, editedFiles); filtered != "" {
+					return filtered
+				}
+				// All reported errors are in untouched files outside the edited set;
+				// ignore pre-existing baseline failures.
+				continue
+			}
 			return out
 		}
 	}
 	return ""
+}
+
+func isStaticAnalysisCheck(c checkCmd) bool {
+	switch c.name {
+	case "tsc", "bunx", "pnpm", "yarn", "npm":
+		for _, a := range c.args {
+			if a == "tsc" || a == "typecheck" || a == "lint" || a == "--noEmit" {
+				return true
+			}
+		}
+	case "go":
+		for _, a := range c.args {
+			if a == "vet" {
+				return true
+			}
+		}
+	case "cargo":
+		for _, a := range c.args {
+			if a == "check" {
+				return true
+			}
+		}
+	case "python3", "python":
+		for _, a := range c.args {
+			if a == "compileall" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// filterRelevantErrors filters multi-file compiler/linter error output to keep only
+// error blocks/lines that pertain to the files edited in this turn.
+func filterRelevantErrors(out string, editedFiles []string) string {
+	if len(editedFiles) == 0 || strings.TrimSpace(out) == "" {
+		return out
+	}
+
+	targets := make([]string, 0, len(editedFiles)*2)
+	for _, f := range editedFiles {
+		clean := filepath.ToSlash(filepath.Clean(f))
+		targets = append(targets, clean)
+		base := filepath.Base(clean)
+		if base != "." && base != "/" && len(base) > 2 {
+			targets = append(targets, base)
+		}
+	}
+
+	lines := strings.Split(out, "\n")
+	var relevant []string
+	for _, line := range lines {
+		for _, t := range targets {
+			if strings.Contains(line, t) {
+				relevant = append(relevant, line)
+				break
+			}
+		}
+	}
+
+	if len(relevant) == 0 {
+		return ""
+	}
+	return strings.Join(relevant, "\n")
 }
 
 // runCheck runs one check command with a bounded timeout and caps its output

@@ -66,7 +66,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID: "b9",
-		Text: `9. ANSWER PROPORTIONATELY & IN THE USER'S LANGUAGE: match answer length to the question's depth — full structured detail for exploration/architecture questions (with evidence from the code), terse for simple ones. Synthesize your findings; never dump raw exploration or file lists.`,
+		Text: `9. ANSWER PROPORTIONATELY & SENIOR CANDOR: match answer length to the question's depth. Speak like an uncompromising, pragmatic Senior Engineer: avoid sycophantic filler ("Great job!", "Sure, I can help!"). If code or architecture has smells/anti-patterns, call them out directly and offer the proper solution. If it is already clean, affirm it concisely without hype.`,
 	},
 	{
 		ID: "b10",

@@ -16,9 +16,32 @@ func init() {
 	bcontext.FileChangesFormatter = func(payloadJSON string) string {
 		var ch []FileChange
 		if err := json.Unmarshal([]byte(payloadJSON), &ch); err == nil && len(ch) > 0 {
+			ch = DeduplicateChanges(ch)
 			return FileChangesMessage(ch)
 		}
 		return ""
+	}
+	bcontext.FileChangesRestorer = func(payloadJSON string) []string {
+		var ch []FileChange
+		if err := json.Unmarshal([]byte(payloadJSON), &ch); err == nil && len(ch) > 0 {
+			ch = DeduplicateChanges(ch)
+			var out []string
+			for _, c := range ch {
+				var diff string
+				switch c.Action {
+				case "created":
+					diff = addPrefixLines(c.New, "+")
+				case "deleted":
+					diff = addPrefixLines(c.Old, "-")
+				default:
+					diff = unifiedDiff(c.Path, c.Old, c.New)
+				}
+				cleanDiff := strings.TrimRight(strings.TrimPrefix(diff, c.Path+"\n"), "\n")
+				out = append(out, "DIFF:\n"+c.Path+"\n"+cleanDiff)
+			}
+			return out
+		}
+		return nil
 	}
 }
 
@@ -30,6 +53,47 @@ type FileChange struct {
 	Action string `json:"action"` // "created" | "modified" | "deleted"
 	Old    string `json:"old,omitempty"`
 	New    string `json:"new,omitempty"`
+}
+
+// DeduplicateChanges merges multiple mutations to the same file path within
+// a turn into a single cumulative change (original Old -> latest New), so
+// the summary lists each file exactly once and the diff is clean.
+func DeduplicateChanges(ch []FileChange) []FileChange {
+	if len(ch) <= 1 {
+		return ch
+	}
+	type fileAggregate struct {
+		first FileChange
+		last  FileChange
+	}
+	order := make([]string, 0, len(ch))
+	byPath := make(map[string]*fileAggregate)
+
+	for _, c := range ch {
+		agg, ok := byPath[c.Path]
+		if !ok {
+			byPath[c.Path] = &fileAggregate{first: c, last: c}
+			order = append(order, c.Path)
+		} else {
+			agg.last = c
+		}
+	}
+
+	deduped := make([]FileChange, 0, len(order))
+	for _, p := range order {
+		agg := byPath[p]
+		merged := agg.last
+		switch {
+		case agg.last.Action == "deleted":
+			merged = FileChange{Path: p, Action: "deleted", Old: agg.first.Old}
+		case agg.first.Action == "created":
+			merged = FileChange{Path: p, Action: "created", New: agg.last.New}
+		default:
+			merged = FileChange{Path: p, Action: "modified", Old: agg.first.Old, New: agg.last.New}
+		}
+		deduped = append(deduped, merged)
+	}
+	return deduped
 }
 
 // The recorder is package-level (like the snapshot registry) because tools are

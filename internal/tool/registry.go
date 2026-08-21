@@ -168,6 +168,9 @@ func NewRegistry() *Registry {
 	r.Register(&MemoryTool{})
 	r.Register(&ContextRecallTool{})
 	r.Register(&RunTestsTool{})
+	r.Register(&CodeOutlineTool{})
+	r.Register(&CodeImpactTool{})
+	r.Register(&RefactorClusterTool{})
 	return r
 }
 

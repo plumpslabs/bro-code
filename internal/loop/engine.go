@@ -2007,19 +2007,23 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 
 			// Live red/green diff entry per edit: surface a cumulative
-			// diff for every path that gained a NEW change this round directly via onUpdate.
-			if onUpdate != nil {
-				if n := tool.ChangesLen(); n > e.lastChangeDiffEmit {
-					chs := tool.PeekChanges()[e.lastChangeDiffEmit:n]
-					e.lastChangeDiffEmit = n
-					seen := make(map[string]bool)
-					for _, ch := range chs {
-						if seen[ch.Path] {
-							continue
-						}
-						seen[ch.Path] = true
-						if d := tool.CumulativeChangeDiff(ch.Path); d != "" {
+			// diff for every path that gained a NEW change this round directly via onUpdate
+			// and persist as a file_diff event so -c resume preserves exact chronological placement.
+			if n := tool.ChangesLen(); n > e.lastChangeDiffEmit {
+				chs := tool.PeekChanges()[e.lastChangeDiffEmit:n]
+				e.lastChangeDiffEmit = n
+				seen := make(map[string]bool)
+				for _, ch := range chs {
+					if seen[ch.Path] {
+						continue
+					}
+					seen[ch.Path] = true
+					if d := tool.CumulativeChangeDiff(ch.Path); d != "" {
+						if onUpdate != nil {
 							onUpdate(e.state, "DIFF:\n"+ch.Path+"\n"+d)
+						}
+						if e.context != nil {
+							_ = e.context.AppendFileDiff(ch.Path, d)
 						}
 					}
 				}
@@ -2046,7 +2050,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				onUpdate(e.state, msg)
 			}
 
-			if vetErr := runVerification(ctx); vetErr != "" {
+			if vetErr := runVerification(ctx, e.editedFiles...); vetErr != "" {
 				// Typed revision contract (§ TSR REPAIR/STOP): track repair
 				// attempts and detect when the SAME error persists across fixes
 				// (the model is retrying without progress). Stop the repair loop
