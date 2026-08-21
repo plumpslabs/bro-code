@@ -1,6 +1,6 @@
 # BroCode CLI & Command Reference
 
-> **Version**: v0.1.12  
+> **Version**: v0.1.13  
 > Complete reference guide for CLI flags, interactive commands, operating modes, and environment variables.
 
 ---

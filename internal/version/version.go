@@ -4,7 +4,7 @@ import "fmt"
 
 var (
 	// Version is the current semver release of BroCode.
-	Version = "v0.1.12"
+	Version = "v0.1.13"
 	// Commit is the git commit hash, populated at build time via -ldflags.
 	Commit = "none"
 	// Date is the build timestamp, populated at build time via -ldflags.
