@@ -1324,6 +1324,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Streaming..."
 		}
 		m.pendingStream += string(msg)
+		m.logViewport.GotoBottom()
 		return m, nil
 
 	case fileDiffMsg:
@@ -3283,13 +3284,29 @@ func (m *Model) buildLog(contentWidth int) string {
 	out.WriteString(m.renderedHistory)
 	if m.streaming && m.pendingStream != "" {
 		label := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("BROCODE")
-		bar := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("205")).Padding(0, 1)
+		if m.mode != "" {
+			badgeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("232")).Bold(true).Padding(0, 1)
+			switch m.mode {
+			case "PLANNER":
+				badgeStyle = badgeStyle.Background(lipgloss.Color("141"))
+			case "MINER":
+				badgeStyle = badgeStyle.Background(lipgloss.Color("42"))
+			default:
+				badgeStyle = badgeStyle.Background(lipgloss.Color("205"))
+			}
+			label += "  " + badgeStyle.Render(m.mode)
+		}
+		if m.activeModel != "" {
+			modelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+			label += "  " + modelStyle.Render(m.activeModel)
+		}
+		botBarStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("205")).Padding(1, 2)
 		w := contentWidth
 		if w <= 0 {
 			w = getTerminalWidth() - 2
 		}
-		bar = bar.Width(w)
-		out.WriteString(bar.Render(label+"\n\n"+m.pendingStream) + "\n\n")
+		botBarStyle = botBarStyle.Width(w)
+		out.WriteString(botBarStyle.Render(label+"\n\n"+m.pendingStream) + "\n\n")
 	}
 	return out.String()
 }
