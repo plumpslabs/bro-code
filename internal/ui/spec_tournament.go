@@ -44,8 +44,12 @@ func executeSpecCommand(runner *subagent.Runner, feature string, prog *tea.Progr
 		prompt := fmt.Sprintf(
 			"You are an expert Principal Architect. Draft a rigorous, production-grade Architectural Blueprint Specification for:\n\n"+
 				"\"%s\"\n\n"+
-				"Inspect the codebase using tools (code_locate, blast_radius, read_file, search_code) to ground the design in real repository context.\n"+
-				"Output ONLY structured markdown with these 5 sections:\n"+
+				"Ground truth requirements (EVIDENCE-FIRST ARCHITECTURAL ACCURACY):\n"+
+				"1. Inspect the codebase thoroughly using tools (code_locate, blast_radius, grep, read_file, glob) to inspect real repository files.\n"+
+				"2. ZERO ASSUMPTIONS ON MIDDLEWARE: Trace route definitions to handler chains to verify the exact middleware attaching request context (e.g. req.user, req.workspaceSubscription) rather than assuming standard JWT auth middlewares.\n"+
+				"3. EXACT PAYLOAD & MAPPING KEYS: For third-party webhooks and services (e.g. Midtrans, Stripe, payment gateways), read the exact controller and service files to cite the actual payload keys (e.g. transaction_status vs generic notification_type) and mapping constants.\n"+
+				"4. EXACT GUARD & CONDITIONAL LOGIC: Cite exact file paths (e.g. file.js:Lxx) for state transitions, guard conditions, and error branches.\n"+
+				"5. Output ONLY structured markdown with these 5 sections:\n"+
 				"## 🎯 1. Objective & Architecture Context\n"+
 				"## 📐 2. Interface Contracts, Functions & Data Types\n"+
 				"## 🗄️ 3. Database Schema & State Changes\n"+

@@ -2147,11 +2147,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "shift+up", "ctrl+up", "alt+up":
 			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
-				m.logViewport.ScrollUp(1)
+				m.logViewport.ScrollUp(3)
 				return m, nil
 			}
 
 		case "shift+down", "ctrl+down", "alt+down":
+			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
+				m.logViewport.ScrollDown(3)
+				return m, nil
+			}
+
+		case "ctrl+e":
 			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
 				m.logViewport.ScrollDown(1)
 				return m, nil
@@ -2323,7 +2329,30 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.appendNote("📖 Commands:\n/ask <question> - Isolated QA: Ask codebase questions without polluting active task context\n/spec <feature> - Spec-First Gate: Draft an architectural blueprint contract before coding\n/tournament <task> - Run 2 parallel candidate agents to solve difficult bugs/tasks\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/report [--json] - View or export privacy-safe benchmark/activity report\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/diagnose fix - Scan, then auto-fix all safe warnings/errors via the agent\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
+		helpContent := `### 🚀 Core Engineering Commands
+- **` + "`/ask <question>`" + `** — Ephemeral Codebase QA: Ask questions without polluting context
+- **` + "`/spec <feature>`" + `** — Spec-First Gate: Draft an architectural blueprint contract before coding
+- **` + "`/tournament <task>`" + `** — Multi-Candidate Solver: Run 2 parallel candidate agents on difficult bugs
+- **` + "`/plan`" + `** — Inspect active plan checklist (` + "`/plan archive`" + ` to archive)
+- **` + "`/undo`" + `** — Time-Travel Rollback: Revert all file changes made in the last turn
+- **` + "`/diagnose`" + `** — Scan project for type errors/warnings (` + "`/diagnose fix`" + ` to auto-fix)
+- **` + "`/cost`" + `** — Live token usage & spend telemetry (USD & IDR)
+
+### ⚙️ Sessions & Configuration
+- **` + "`/models`" + `** — Interactive model picker (` + "`/model <id>`" + ` to switch)
+- **` + "`/connect`" + `** — 2-step API Key & provider setup wizard
+- **` + "`/sessions`" + `**, **` + "`/history`" + `** — Switch or manage past sessions
+- **` + "`/memory`" + `** — Inspect cross-session project memory
+- **` + "`/mcp`" + `** — Manage connected MCP servers & tools
+- **` + "`/lsp`" + `** — Code intelligence status (` + "`/lsp-install`" + ` to install missing servers)
+- **` + "`/workspace`" + `** — Inspect multi-repo workspace structure
+- **` + "`/clear`" + `**, **` + "`/new`" + `** — Clear chat or start fresh session
+
+### 🔀 Modes (Toggle with ` + "`Shift+Tab`" + `)
+- **` + "`BUILDER`" + `** *(Default)* — Autonomous coding agent with full read, write, edit, & run tools
+- **` + "`PLANNER`" + `** — Read-only architecture & strategy agent
+- **` + "`MINER`" + `** — Read-only knowledge mining agent that persists facts to memory`
+		m.appendMessages("HELP:\n" + helpContent)
 
 	case "/miner":
 		// Jump straight into MINER mode so the next prompt is a knowledge
@@ -2331,19 +2360,19 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.mode = "MINER"
 		m.engine.SetMode(m.mode)
 		m.persistMode()
-		m.appendNote("⛏️ MINER mode active — explore the codebase and I'll persist verified knowledge (architecture, build commands, conventions, decisions, gotchas) into project memory. Shift+Tab to switch back to BUILDER.")
+		m.appendMessages("MODE:MINER\n⛏️ MINER mode active — explore the codebase and I'll persist verified knowledge (architecture, build commands, conventions, decisions, gotchas) into project memory. Shift+Tab to switch back to BUILDER.")
 
 	case "/builder":
 		m.mode = "BUILDER"
 		m.engine.SetMode(m.mode)
 		m.persistMode()
-		m.appendNote("🔨 BUILDER mode active — autonomous coding agent with full read, write, edit, and execution capabilities.")
+		m.appendMessages("MODE:BUILDER\n🔨 BUILDER mode active — autonomous coding agent with full read, write, edit, and execution capabilities.")
 
 	case "/planner":
 		m.mode = "PLANNER"
 		m.engine.SetMode(m.mode)
 		m.persistMode()
-		m.appendNote("📋 PLANNER mode active — read-only architecture and strategy agent.")
+		m.appendMessages("MODE:PLANNER\n📋 PLANNER mode active — read-only architecture and strategy agent.")
 
 	case "/mode":
 		if len(parts) > 1 {
@@ -2352,7 +2381,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				m.mode = target
 				m.engine.SetMode(m.mode)
 				m.persistMode()
-				m.appendNote(fmt.Sprintf("✅ Mode switched to %s", m.mode))
+				m.appendMessages(fmt.Sprintf("MODE:%s\n✅ Mode switched to %s", m.mode, m.mode))
 				return m, nil
 			}
 		}
@@ -2373,22 +2402,22 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		if err != nil || curPlan == nil || len(curPlan.Steps) == 0 {
 			m.appendMessages("ℹ️ No active plan found in `.brocode/current_plan.md`.\nSwitch to PLANNER mode (Shift+Tab or `/planner`) to draft an execution plan.")
 		} else {
-			m.appendMessages(plan.RenderMarkdownPlan(curPlan) + "\n💡 Run `/plan archive` when finished to archive and clear this plan.")
+			m.appendMessages("PLAN:\n" + plan.RenderMarkdownPlan(curPlan))
 		}
 
 	case "/memory":
 		if m.memStore != nil {
 			s := m.memStore.List()
 			if m.memStore.Path() != "" {
-				s += "\n\n📍 " + m.memStore.Path()
+				s += "\n\n📍 *" + m.memStore.Path() + "*"
 			}
-			m.appendMessages(s)
+			m.appendMessages("MEMORY:\n" + s)
 		} else {
 			m.appendMessages("⚠️ Project memory not initialized.")
 		}
 
 	case "/cost":
-		m.appendMessages(m.engine.CostSummary())
+		m.appendMessages("COST:\n" + m.engine.CostSummary())
 
 	case "/ask":
 		query := strings.TrimSpace(strings.TrimPrefix(cmd, "/ask"))
@@ -2462,7 +2491,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m, executeTournamentCommand(m.scoutMgr.Runner, task, m.prog)
 
 	case "/lsp":
-		m.appendMessages(m.lspStatus())
+		m.appendMessages("LSP:\n" + m.lspStatus())
 
 	case "/diagnose":
 		if m.lspMgr == nil {
@@ -2483,7 +2512,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				return diagnoseFixMsg(out)
 			}
 			out += "\n\n💡 Type `/diagnose fix` for BroCode to automatically fix all warnings/errors above."
-			return diagnoseResultMsg(out)
+			return diagnoseResultMsg("DIAGNOSE:\n" + out)
 		})
 
 	case "/lsp-install":
@@ -2585,28 +2614,28 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		cwd, _ := os.Getwd()
 		ws := repo.DiscoverWorkspace(cwd)
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("📦 **Multi-Repo Workspace: %s**\n\n", ws.RootPath))
+		sb.WriteString(fmt.Sprintf("### 📦 Workspace Root: `%s`\n\n", ws.RootPath))
 		if len(ws.Repos) == 0 {
 			sb.WriteString("No repositories detected in workspace.\n")
 		} else {
-			sb.WriteString(fmt.Sprintf("Found %d repository/repositories in workspace:\n", len(ws.Repos)))
-			for i, r := range ws.Repos {
+			sb.WriteString(fmt.Sprintf("Found **%d repository/repositories**:\n\n", len(ws.Repos)))
+			for _, r := range ws.Repos {
 				gitBadge := "git"
 				if !r.IsGit {
 					gitBadge = "non-git"
 				}
-				sb.WriteString(fmt.Sprintf("%d. **%s** `[%s]` — %s\n", i+1, r.Name, gitBadge, r.Path))
+				sb.WriteString(fmt.Sprintf("- **%s** `[%s]` — `%s`\n", r.Name, gitBadge, r.Path))
 			}
 		}
-		sb.WriteString("\n*Tips:* Delegated subagents and tools can target specific repos using `target_dir: \"<repo_name>\"`.")
-		m.appendNote(sb.String())
+		sb.WriteString("\n*Tips:* Subagents and tools can target specific repos using `target_dir: \"<repo_name>\"`.")
+		m.appendMessages("WORKSPACE:\n" + sb.String())
 
 	case "/undo":
 		count := tool.RestoreAllSnapshots()
 		if count > 0 {
-			m.appendMessages(fmt.Sprintf("↩️ Time-Travel Rollback: Successfully restored %d file(s) back to pre-turn snapshot.", count))
+			m.appendMessages(fmt.Sprintf("UNDO:\n↩️ Successfully restored %d file(s) back to pre-turn snapshot.", count))
 		} else {
-			m.appendMessages("⚠️ No live snapshots available to roll back.")
+			m.appendMessages("UNDO:\n⚠️ No live snapshots available to roll back (no files were modified in the active turn).")
 		}
 
 	case "/model":
@@ -2649,11 +2678,11 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			if err := os.WriteFile(outPath, []byte(jsonData), 0o644); err != nil {
 				m.appendMessages(fmt.Sprintf("⚠️ Failed to write %s: %v", outPath, err))
 			} else {
-				m.appendNote(fmt.Sprintf("📊 Privacy-safe session report exported to `%s` (%d bytes).\nReady to share with community / devs for benchmarking & optimization!", outPath, len(jsonData)))
+				m.appendMessages(fmt.Sprintf("REPORT:\n📊 Privacy-safe session report exported to `%s` (%d bytes).\n\nReady to share with community / devs for benchmarking & optimization!", outPath, len(jsonData)))
 			}
 			return m, nil
 		}
-		m.appendNote(r.RenderMarkdown())
+		m.appendMessages("REPORT:\n" + r.RenderMarkdown())
 	}
 	return m, nil
 }
@@ -4409,7 +4438,6 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 	if strings.HasPrefix(msg, "ASK:\n") {
 		body := strings.TrimPrefix(msg, "ASK:\n")
 		query, answer, _ := strings.Cut(body, "\n---\n")
-
 		askCardStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("86")).Padding(0, 1)
 		if width > 0 {
 			askCardStyle = askCardStyle.Width(width)
@@ -4417,16 +4445,13 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 		qStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
 		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-
 		wrap := width - 6
 		if wrap < 30 {
 			wrap = 30
 		}
 		renderedAnswer := renderMarkdown(strings.TrimSpace(answer), wrap)
-
 		header := labelStyle.Render("💬 CODEBASE QA") + "  " + dimStyle.Render("(Ephemeral · Zero Context Pollution)")
 		qLine := qStyle.Render("❓ \"" + query + "\"")
-
 		return askCardStyle.Render(header + "\n" + qLine + "\n\n" + renderedAnswer)
 	}
 
@@ -4434,45 +4459,75 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 	if strings.HasPrefix(msg, "SPEC:\n") {
 		body := strings.TrimPrefix(msg, "SPEC:\n")
 		specPath, specContent, _ := strings.Cut(body, "\n---\n")
-
-		specCardStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("141")).Padding(0, 1)
-		if width > 0 {
-			specCardStyle = specCardStyle.Width(width)
-		}
-		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
-		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-
-		wrap := width - 6
-		if wrap < 30 {
-			wrap = 30
-		}
-		renderedSpec := renderMarkdown(strings.TrimSpace(specContent), wrap)
-		header := labelStyle.Render("📋 ARCHITECTURAL BLUEPRINT CONTRACT") + "  " + dimStyle.Render("("+specPath+")")
-		footerHint := dimStyle.Render("💡 Next: Switch to BUILDER (Shift+Tab) and say 'Implement spec in " + specPath + "'")
-
-		return specCardStyle.Render(header + "\n\n" + renderedSpec + "\n\n" + footerHint)
+		return renderBorderedCard("📋 ARCHITECTURAL BLUEPRINT CONTRACT", "("+specPath+")", specContent, "💡 Next: Switch to BUILDER (Shift+Tab) and say 'Implement spec in "+specPath+"'", "141", width)
 	}
 
 	// Multi-Candidate Tournament (/tournament):
 	if strings.HasPrefix(msg, "TOURNAMENT:\n") {
 		body := strings.TrimPrefix(msg, "TOURNAMENT:\n")
 		task, content, _ := strings.Cut(body, "\n---\n")
+		return renderBorderedCard("🏆 MULTI-CANDIDATE TOURNAMENT", "(\""+truncatePrompt(task)+"\")", content, "", "220", width)
+	}
 
-		tournCardStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("220")).Padding(0, 1)
-		if width > 0 {
-			tournCardStyle = tournCardStyle.Width(width)
-		}
-		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	// Active Execution Plan (/plan):
+	if strings.HasPrefix(msg, "PLAN:\n") {
+		content := strings.TrimPrefix(msg, "PLAN:\n")
+		return renderBorderedCard("📋 ACTIVE EXECUTION PLAN", "(.brocode/current_plan.md)", content, "💡 Next: Switch to BUILDER (Shift+Tab) to execute or type `/plan archive` to clear.", "81", width)
+	}
 
-		wrap := width - 6
-		if wrap < 30 {
-			wrap = 30
-		}
-		renderedTourn := renderMarkdown(strings.TrimSpace(content), wrap)
-		header := labelStyle.Render("🏆 MULTI-CANDIDATE TOURNAMENT") + "  " + dimStyle.Render("(\""+truncatePrompt(task)+"\")")
+	// Commands & Cheatsheet (/help):
+	if strings.HasPrefix(msg, "HELP:\n") {
+		content := strings.TrimPrefix(msg, "HELP:\n")
+		return renderBorderedCard("📖 BROCODE CLI CHEATSHEET & SHORTCUTS", "(Commands & Keybindings)", content, "", "214", width)
+	}
 
-		return tournCardStyle.Render(header + "\n\n" + renderedTourn)
+	// Cross-Session Project Memory (/memory):
+	if strings.HasPrefix(msg, "MEMORY:\n") {
+		content := strings.TrimPrefix(msg, "MEMORY:\n")
+		return renderBorderedCard("🧠 PROJECT MEMORY", "(.brocode/memory.md)", content, "", "177", width)
+	}
+
+	// Token Economy & Spend Radar (/cost):
+	if strings.HasPrefix(msg, "COST:\n") {
+		content := strings.TrimPrefix(msg, "COST:\n")
+		return renderBorderedCard("📊 TOKEN ECONOMY & COST RADAR", "(Spend Telemetry)", content, "", "42", width)
+	}
+
+	// Multi-Repo Workspace (/workspace):
+	if strings.HasPrefix(msg, "WORKSPACE:\n") {
+		content := strings.TrimPrefix(msg, "WORKSPACE:\n")
+		return renderBorderedCard("📦 MULTI-REPO WORKSPACE", "(Discovered Repos)", content, "", "208", width)
+	}
+
+	// LSP Intelligence (/lsp):
+	if strings.HasPrefix(msg, "LSP:\n") {
+		content := strings.TrimPrefix(msg, "LSP:\n")
+		return renderBorderedCard("⚡ LANGUAGE SERVER PROTOCOL (LSP)", "(Code Intelligence)", content, "", "39", width)
+	}
+
+	// Diagnostics (/diagnose):
+	if strings.HasPrefix(msg, "DIAGNOSE:\n") {
+		content := strings.TrimPrefix(msg, "DIAGNOSE:\n")
+		return renderBorderedCard("🩺 CODEBASE DIAGNOSTICS", "(Diagnostics & Warnings)", content, "", "226", width)
+	}
+
+	// Benchmark & Activity Report (/report):
+	if strings.HasPrefix(msg, "REPORT:\n") {
+		content := strings.TrimPrefix(msg, "REPORT:\n")
+		return renderBorderedCard("📊 SESSION ACTIVITY & BENCHMARK REPORT", "(/report --json to export)", content, "", "37", width)
+	}
+
+	// Time-Travel Rollback (/undo):
+	if strings.HasPrefix(msg, "UNDO:\n") {
+		content := strings.TrimPrefix(msg, "UNDO:\n")
+		return renderBorderedCard("↩️ TIME-TRAVEL SHADOW ROLLBACK", "(Reverted File Edits)", content, "", "208", width)
+	}
+
+	// Mode Switch Alert:
+	if strings.HasPrefix(msg, "MODE:") {
+		line, content, _ := strings.Cut(msg, "\n")
+		targetMode := strings.TrimPrefix(line, "MODE:")
+		return renderBorderedCard("🔀 MODE ACTIVATED: "+targetMode, "(Shift+Tab to toggle)", content, "", "86", width)
 	}
 
 	if strings.HasPrefix(msg, "PROCESS:\n") {
@@ -4578,4 +4633,32 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 		return lipgloss.NewStyle().Width(width).Render(msg)
 	}
 	return msg
+}
+
+// renderBorderedCard formats structured cards (plans, specs, help, diagnostics, reports, etc.)
+// with a consistent thick left border, title header, optional badge/subtitle, and optional footer.
+func renderBorderedCard(title, subtitle, body, footer, colorCode string, width int) string {
+	cardStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color(colorCode)).Padding(0, 1)
+	if width > 0 {
+		cardStyle = cardStyle.Width(width)
+	}
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(colorCode)).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+
+	wrap := width - 6
+	if wrap < 30 {
+		wrap = 30
+	}
+	renderedBody := renderMarkdown(strings.TrimSpace(body), wrap)
+
+	header := labelStyle.Render(title)
+	if subtitle != "" {
+		header += "  " + dimStyle.Render(subtitle)
+	}
+
+	res := header + "\n\n" + renderedBody
+	if footer != "" {
+		res += "\n\n" + dimStyle.Render(footer)
+	}
+	return cardStyle.Render(res)
 }
