@@ -324,18 +324,27 @@ func (m *Model) skipAsk() {
 	}
 }
 
-// appendAskToHistory records the user's answers into the chat transcript.
+// appendAskToHistory records the user's answers into the chat transcript with clean readable formatting.
 func (m *Model) appendAskToHistory(results []tool.AskResult) {
-	var lines []string
+	var entries []string
 	for _, r := range results {
 		ans := "(none)"
 		if len(r.Answers) > 0 {
 			ans = strings.Join(r.Answers, ", ")
+		} else if r.Custom != "" {
+			ans = r.Custom
 		}
-		lines = append(lines, fmt.Sprintf("• %s → %s", r.Question, ans))
+		q := strings.TrimSpace(r.Question)
+		if strings.Contains(q, "\n") || strings.Contains(q, "```") {
+			// For multiline or code block questions (e.g. gated command confirmations),
+			// format the chosen answer cleanly on a new line below the block.
+			entries = append(entries, fmt.Sprintf("%s\n\n↳ **Answer**: %s", q, ans))
+		} else {
+			entries = append(entries, fmt.Sprintf("• %s → %s", q, ans))
+		}
 	}
-	if len(lines) > 0 {
-		m.appendMessages("YOU:\n" + strings.Join(lines, "\n"))
+	if len(entries) > 0 {
+		m.appendMessages("YOU:\n" + strings.Join(entries, "\n\n"))
 	}
 }
 

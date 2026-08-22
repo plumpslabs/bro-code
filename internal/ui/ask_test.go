@@ -44,6 +44,33 @@ func TestSubmitAskAppendsToHistory(t *testing.T) {
 	}
 }
 
+func TestSubmitAskGatedCommandFormatting(t *testing.T) {
+	m := newTestApp()
+	m.ask = newAskBroker()
+	m.askQuestions = []tool.AskQuestion{
+		{
+			Question: "⚠️ BroCode wants to run a gated command:\n\n```\nnpm test -- tests/auth.test.js\n```",
+			Options:  []string{"✅ Allow once", "🚫 Deny"},
+			Multi:    false,
+		},
+	}
+	m.askSel = map[int]int{0: 0} // ✅ Allow once
+	m.askID = "test-gated"
+
+	m.submitAsk()
+
+	entry := m.messages[len(m.messages)-1]
+	if !strings.HasPrefix(entry, "YOU:") {
+		t.Errorf("entry should be a YOU message, got %q", entry)
+	}
+	if !strings.Contains(entry, "↳ **Answer**: ✅ Allow once") {
+		t.Errorf("multiline command question should place answer below block cleanly, got %q", entry)
+	}
+	if strings.Contains(entry, "``` →") {
+		t.Errorf("answer must not dangle directly after closing backticks, got %q", entry)
+	}
+}
+
 func TestAskNavigationDoesNotChangeSelection(t *testing.T) {
 	m := newTestApp()
 	m.ask = newAskBroker()
