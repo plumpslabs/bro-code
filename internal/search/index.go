@@ -107,8 +107,12 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 		workers = 16
 	}
 
-	jobs := make(chan string, len(files))
-	results := make(chan fileResult, len(files))
+	bufSize := workers * 4
+	if bufSize < 16 {
+		bufSize = 16
+	}
+	jobs := make(chan string, bufSize)
+	results := make(chan fileResult, bufSize)
 	var wg sync.WaitGroup
 
 	for i := 0; i < workers; i++ {
@@ -127,13 +131,14 @@ func BuildGlobalIndex(root string) *GlobalIndex {
 		}()
 	}
 
-	for _, f := range files {
-		jobs <- f
-	}
-	close(jobs)
-
-	wg.Wait()
-	close(results)
+	go func() {
+		for _, f := range files {
+			jobs <- f
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
 
 	for res := range results {
 		for _, s := range res.symbols {

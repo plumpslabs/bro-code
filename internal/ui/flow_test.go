@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/mcp"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/store"
+	"github.com/plumpslabs/bro-code/internal/tokens"
 	"github.com/plumpslabs/bro-code/internal/tool"
 )
 
@@ -22,6 +24,29 @@ import (
 // progress message lands (as happens with the opencode CLI adapter whose
 // stderr goroutine may outlive the turn). The user's prompt must stay visible
 // and the status must settle to "Ready".
+// TestAuditMemoryFootprint measures exact heap and sys memory at startup and idle.
+func TestAuditMemoryFootprint(t *testing.T) {
+	var m0, m1, m2 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m0)
+
+	app := newTestApp()
+	runtime.ReadMemStats(&m1)
+
+	// Trigger BPE tokenizer
+	_ = tokens.CountTokens("Test prompt with some long code content to test BPE token table allocations", "gpt-4o")
+	runtime.ReadMemStats(&m2)
+
+	t.Logf("Baseline HeapAlloc: %.2f MB, HeapSys: %.2f MB, Sys: %.2f MB",
+		float64(m0.HeapAlloc)/(1024*1024), float64(m0.HeapSys)/(1024*1024), float64(m0.Sys)/(1024*1024))
+	t.Logf("After App Init HeapAlloc: %.2f MB, HeapSys: %.2f MB, Sys: %.2f MB",
+		float64(m1.HeapAlloc)/(1024*1024), float64(m1.HeapSys)/(1024*1024), float64(m1.Sys)/(1024*1024))
+	t.Logf("After BPE Tokenizer HeapAlloc: %.2f MB, HeapSys: %.2f MB, Sys: %.2f MB",
+		float64(m2.HeapAlloc)/(1024*1024), float64(m2.HeapSys)/(1024*1024), float64(m2.Sys)/(1024*1024))
+
+	_ = app
+}
+
 func TestTurnFlowKeepsHistoryAndSettlesStatus(t *testing.T) {
 	m := newTestApp()
 	m.width = 140

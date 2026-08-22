@@ -106,9 +106,9 @@ type Manager struct {
 }
 
 // DefaultIdleTimeout is how long a language server stays alive after its last
-// use before it is shut down to free memory. 10 minutes covers a normal task
-// burst while keeping idle processes bounded.
-const DefaultIdleTimeout = 10 * time.Minute
+// use before it is shut down to free memory. 3 minutes covers active turns
+// while keeping idle background processes lean.
+const DefaultIdleTimeout = 3 * time.Minute
 
 // NewManager creates an empty LSP manager with an idle reaper.
 func NewManager() *Manager {
@@ -816,26 +816,42 @@ func collectSupportedFiles(root string, max int) []string {
 	return files
 }
 
-// WarmUp spawns language servers for supported files under root in the
-// background, so the first lsp_* call of the session is instant instead of
-// paying spawn + initialize + (cache-warm) index on first use — the persistent
-// per-session gap. Servers the user never touches are shut down by the idle
-// reaper after idleTimeout, so unused warm-up costs nothing in the long run.
-// Never blocks; errors are ignored (lazy spawn still happens on first call).
+// WarmUp proactively warms at most 1 primary language server for the workspace
+// in the background. Other language servers remain strictly lazy and are only
+// spawned on-demand when a file in that language is actually queried.
+// Servers the user never touches are shut down by the idle reaper after
+// idleTimeout, so unused warm-up costs nothing in the long run.
 func (m *Manager) WarmUp(root string) {
 	files := collectSupportedFiles(root, 10)
-	seen := map[string]bool{}
+	if len(files) == 0 {
+		return
+	}
+	counts := map[string]int{}
+	langFile := map[string]string{}
 	for _, f := range files {
 		spec := specForPath(f)
-		if spec == nil || seen[spec.Language] {
-			continue
+		if spec != nil {
+			counts[spec.Language]++
+			if langFile[spec.Language] == "" {
+				langFile[spec.Language] = f
+			}
 		}
-		seen[spec.Language] = true
-		go func(path string) {
+	}
+	var topLang string
+	var topCount int
+	for lang, count := range counts {
+		if count > topCount {
+			topCount = count
+			topLang = lang
+		}
+	}
+	if topLang != "" && langFile[topLang] != "" {
+		path := langFile[topLang]
+		go func() {
 			ctx, cancel := context.WithTimeout(m.ctx, 20*time.Second)
 			defer cancel()
 			_, _ = m.clientFor(ctx, path)
-		}(f)
+		}()
 	}
 }
 

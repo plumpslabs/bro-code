@@ -41,7 +41,7 @@ func ExtractSymbols(path string) ([]SymbolItem, error) {
 // extractGoSymbols uses Go standard library AST parser (zero dependencies).
 func extractGoSymbols(path string) ([]SymbolItem, error) {
 	fset := token.NewFileSet()
-	node, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+	node, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 	if err != nil {
 		return nil, err
 	}

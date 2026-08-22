@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -70,12 +72,21 @@ func renderMarkdown(text string, wrap int) string {
 	mdRenderers.Lock()
 	r, ok := mdRenderers.m[wrap]
 	if !ok {
+		// Cap cached renderers to 4 recent widths to prevent memory leaks on continuous terminal resizes
+		if len(mdRenderers.m) >= 4 {
+			for k := range mdRenderers.m {
+				delete(mdRenderers.m, k)
+				break
+			}
+		}
 		r, _ = glamour.NewTermRenderer(
 			glamour.WithStandardStyle("dark"),
 			glamour.WithWordWrap(wrap),
 			glamour.WithPreservedNewLines(),
 		)
-		mdRenderers.m[wrap] = r
+		if r != nil {
+			mdRenderers.m[wrap] = r
+		}
 	}
 	mdRenderers.Unlock()
 
@@ -1360,6 +1371,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queueMode = false
 			m.queueSel = 0
 		}
+
+		// Turn and queue completed: immediately reclaim memory from large tool outputs,
+		// diff buffers, and JSON ASTs back to OS kernel before entering idle sleep.
+		runtime.GC()
+		debug.FreeOSMemory()
+
 		return m, nil
 
 	case streamChunkMsg:

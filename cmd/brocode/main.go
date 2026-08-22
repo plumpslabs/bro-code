@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -300,6 +302,11 @@ func main() {
 	}
 
 	appModel := ui.NewApp(cfg, activeProvider, activeModel, adapter, tools, ctxMgr, mcpMgr, lspMgr, scoutMgr, *flagBudget, previousPrompts, activityLog, initialMessages...)
+
+	// Trim startup indexing & reflection allocations and return unused memory to the OS kernel
+	runtime.GC()
+	debug.FreeOSMemory()
+
 	p := tea.NewProgram(&appModel)
 	appModel.SetProgram(p)
 

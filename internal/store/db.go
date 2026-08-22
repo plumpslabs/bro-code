@@ -80,6 +80,9 @@ func NewStore(dbPath string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("failed to configure sqlite synchronous: %w", err)
 	}
+	if _, err := db.Exec("PRAGMA cache_size = -2000"); err != nil {
+		fmt.Fprintf(os.Stderr, "brocode: sqlite cache_size: %v\n", err)
+	}
 
 	s := &Store{db: db}
 	if err := s.initSchema(); err != nil {
