@@ -89,6 +89,10 @@ var builderRules = []Rule{
 		ID:   "b13",
 		Text: `13. OUT-OF-SCOPE FINDINGS (capture, don't chase): if during the task you notice a real bug, inefficiency, or bad practice OUTSIDE the task's scope, do NOT fix it and do NOT expand scope. End your answer with a section headed exactly "### OUT-OF-SCOPE FINDINGS" listing each as ONE concise bullet (file, what's wrong, suggested fix) — the engine records these into project memory for a follow-up. If you found nothing outside scope, omit the section entirely.`,
 	},
+	{
+		ID:   "b14",
+		Text: `14. GIT & ACTION INTEGRITY: When asked to commit changes or run operations, you MUST actually invoke the execution tool ('bash' or 'git'). NEVER claim or assume a commit was created if you only ran 'git add' — always execute 'git commit -m "..."' and verify the commit output before reporting success to the user.`,
+	},
 }
 
 var plannerRules = []Rule{

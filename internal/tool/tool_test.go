@@ -630,6 +630,58 @@ func TestGitToolReadOnly(t *testing.T) {
 	}
 }
 
+func TestGitToolAtomicCommit(t *testing.T) {
+	repo := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test")
+	_ = os.WriteFile(filepath.Join(repo, "f1.txt"), []byte("v1"), 0o644)
+	run("add", "f1.txt")
+	run("commit", "-qm", "initial")
+
+	cwd, _ := os.Getwd()
+	defer os.Chdir(cwd)
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Modify f1.txt without staging it, then commit directly with GitTool (auto-stages tracked modified)
+	_ = os.WriteFile(filepath.Join(repo, "f1.txt"), []byte("v2"), 0o644)
+	out, err := (&GitTool{}).Execute(context.Background(), `{"action":"commit","message":"update f1"}`)
+	if err != nil {
+		t.Fatalf("atomic commit failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(out, "update f1") {
+		t.Errorf("expected commit message in output, got: %s", out)
+	}
+
+	// 2. Add a new file and commit with all: true
+	_ = os.WriteFile(filepath.Join(repo, "f2.txt"), []byte("new file"), 0o644)
+	out, err = (&GitTool{}).Execute(context.Background(), `{"action":"commit","message":"add f2","all":true}`)
+	if err != nil {
+		t.Fatalf("commit with all:true failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(out, "add f2") {
+		t.Errorf("expected commit output for f2, got: %s", out)
+	}
+
+	// 3. Add a new file and commit specifying specific files
+	_ = os.WriteFile(filepath.Join(repo, "f3.txt"), []byte("file 3"), 0o644)
+	out, err = (&GitTool{}).Execute(context.Background(), `{"action":"commit","message":"add f3","files":["f3.txt"]}`)
+	if err != nil {
+		t.Fatalf("commit with files failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(out, "add f3") {
+		t.Errorf("expected commit output for f3, got: %s", out)
+	}
+}
+
 func TestSnapshotAndUndo(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "f.txt")
 	_ = os.WriteFile(tmp, []byte("original"), 0o644)

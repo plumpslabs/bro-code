@@ -167,6 +167,42 @@ func TestDuplicateSymbols(t *testing.T) {
 	}
 }
 
+func TestDuplicateSymbolsStopwordFilteringAndCapping(t *testing.T) {
+	dir := t.TempDir()
+	known := map[string]map[string]bool{
+		"old/other.ts": {"data": true, "req": true, "res": true, "id": true, "commonFunc": true},
+	}
+	// A file with common local variable names like 'data', 'req', 'res' should NOT trigger false positive duplicate warnings
+	p := writeFile(t, dir, "service.ts", "export function commonFunc() {}\nconst data = 1;\nconst req = 2;\n")
+	issues := findDuplicateSymbols([]string{p}, known)
+
+	// Should only match the real exported function 'commonFunc', not stopwords 'data'/'req'
+	for _, i := range issues {
+		if strings.Contains(i.Message, "'data'") || strings.Contains(i.Message, "'req'") {
+			t.Errorf("stopwords must not be flagged as duplicates: %s", i.Message)
+		}
+	}
+
+	// Output of formatConventionIssues must be capped
+	var manyIssues []conventionIssue
+	for i := 0; i < 50; i++ {
+		manyIssues = append(manyIssues, conventionIssue{
+			Path:    "large/file.ts",
+			Line:    i + 1,
+			Kind:    "duplicate",
+			Sev:     sevInfo,
+			Message: "duplicate symbol found in another file",
+		})
+	}
+	formatted := formatConventionIssues(manyIssues)
+	if len(formatted) > 1600 {
+		t.Errorf("formatted review output exceeds 1600 chars: length=%d", len(formatted))
+	}
+	if !strings.Contains(formatted, "and 42 more minor convention items") {
+		t.Errorf("expected capped summary in output, got: %s", formatted)
+	}
+}
+
 func TestExtractToolPath(t *testing.T) {
 	if got := extractToolPath(`{"path":"src/app.ts","content":"x"}`); got != "src/app.ts" {
 		t.Errorf("expected src/app.ts, got %q", got)

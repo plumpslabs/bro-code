@@ -257,15 +257,31 @@ func dartPatterns() []pattern {
 	}
 }
 
-// symbolNameRe extracts top-level function/class/const names for duplicate
-// detection (JS/TS/Go/Python — the common agent-edited languages).
+var commonSymbolStopwords = map[string]bool{
+	"id": true, "err": true, "error": true, "data": true, "req": true, "res": true,
+	"result": true, "response": true, "client": true, "config": true, "options": true,
+	"state": true, "params": true, "props": true, "event": true, "item": true,
+	"index": true, "key": true, "val": true, "value": true, "text": true, "body": true,
+	"status": true, "url": true, "msg": true, "message": true, "logger": true,
+	"test": true, "main": true, "init": true, "helper": true, "utils": true,
+	"handler": true, "service": true, "model": true, "controller": true,
+}
+
+// symbolNameRe extracts top-level function/class/interface/type names for duplicate
+// detection across major programming languages (JS/TS/Go/Python/Rust/Java/PHP/C#/C++).
 var symbolNameRe = map[string]*regexp.Regexp{
-	".js":  regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*)|const\s+([A-Za-z_$][\w$]*)\s*=)`),
-	".jsx": regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*)|const\s+([A-Za-z_$][\w$]*)\s*=)`),
-	".ts":  regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*)|const\s+([A-Za-z_$][\w$]*)\s*=|interface\s+([A-Za-z_$][\w$]*))`),
-	".tsx": regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*)|const\s+([A-Za-z_$][\w$]*)\s*=|interface\s+([A-Za-z_$][\w$]*))`),
-	".go":  regexp.MustCompile(`(?m)^\s*func\s+([A-Za-z_][\w]*)\s*\(`),
-	".py":  regexp.MustCompile(`(?m)^\s*(?:async\s+)?def\s+([a-zA-Z_]\w*)\s*\(|^\s*class\s+([A-Za-z_]\w*)\s*:`),
+	".js":   regexp.MustCompile(`(?m)^(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*))`),
+	".jsx":  regexp.MustCompile(`(?m)^(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*))`),
+	".ts":   regexp.MustCompile(`(?m)^(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*)|interface\s+([A-Za-z_$][\w$]*)|type\s+([A-Za-z_$][\w$]*))`),
+	".tsx":  regexp.MustCompile(`(?m)^(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\s+([A-Za-z_$][\w$]*)|class\s+([A-Za-z_$][\w$]*)|interface\s+([A-Za-z_$][\w$]*)|type\s+([A-Za-z_$][\w$]*))`),
+	".go":   regexp.MustCompile(`(?m)^func\s+(?:\([^)]+\)\s+)?([A-Za-z_][\w]*)\s*\(`),
+	".py":   regexp.MustCompile(`(?m)^(?:async\s+)?def\s+([a-zA-Z_]\w*)\s*\(|^class\s+([A-Za-z_]\w*)\s*:`),
+	".rs":   regexp.MustCompile(`(?m)^(?:\s*pub(?:\([^)]*\))?\s+)?(?:fn\s+([A-Za-z_][\w]*)|struct\s+([A-Za-z_][\w]*)|enum\s+([A-Za-z_][\w]*)|trait\s+([A-Za-z_][\w]*))`),
+	".java": regexp.MustCompile(`(?m)^\s*(?:public|protected|private)?\s*(?:static\s+)?(?:class\s+([A-Za-z_][\w]*)|interface\s+([A-Za-z_][\w]*)|(?:[A-Za-z_][\w<>\[\]]*\s+)+([A-Za-z_][\w]*)\s*\()`),
+	".php":  regexp.MustCompile(`(?m)^\s*(?:final\s+|abstract\s+)?(?:class\s+([A-Za-z_][\w]*)|function\s+([A-Za-z_][\w]*))`),
+	".cs":   regexp.MustCompile(`(?m)^\s*(?:public|protected|private|internal)?\s*(?:static\s+)?(?:class\s+([A-Za-z_][\w]*)|interface\s+([A-Za-z_][\w]*))`),
+	".cpp":  regexp.MustCompile(`(?m)^\s*(?:class\s+([A-Za-z_][\w]*)|struct\s+([A-Za-z_][\w]*))`),
+	".hpp":  regexp.MustCompile(`(?m)^\s*(?:class\s+([A-Za-z_][\w]*)|struct\s+([A-Za-z_][\w]*))`),
 }
 
 // symbolsInFile returns the set of top-level symbol names defined in a file.
@@ -282,7 +298,7 @@ func symbolsInFile(path string) map[string]bool {
 	syms := map[string]bool{}
 	for _, m := range re.FindAllStringSubmatch(string(data), -1) {
 		for _, g := range m[1:] {
-			if g != "" {
+			if g != "" && len(g) >= 4 && !commonSymbolStopwords[strings.ToLower(g)] {
 				syms[g] = true
 			}
 		}
@@ -318,6 +334,9 @@ func findDuplicateSymbols(editedPaths []string, knownSymbols map[string]map[stri
 							Kind:    "duplicate",
 							Message: "symbol '" + s + "' already defined in " + other + " — prefer reusing the existing implementation",
 						})
+						if len(issues) >= 5 {
+							return issues
+						}
 						break
 					}
 				}
@@ -558,16 +577,27 @@ func formatConventionIssues(issues []conventionIssue) string {
 	if len(issues) == 0 {
 		return ""
 	}
+	const maxIssues = 8
 	var sb strings.Builder
 	sb.WriteString("Code review found issues to fix before done:\n")
+	shown := 0
 	for _, i := range issues {
+		if shown >= maxIssues {
+			fmt.Fprintf(&sb, "- ... and %d more minor convention items\n", len(issues)-shown)
+			break
+		}
 		loc := i.Path
 		if i.Line > 0 {
 			loc += ":" + itoa(i.Line)
 		}
 		fmt.Fprintf(&sb, "- [%s] %s — %s\n", i.Sev, loc, i.Message)
+		shown++
 	}
-	return strings.TrimSpace(sb.String())
+	res := strings.TrimSpace(sb.String())
+	if len(res) > 1500 {
+		res = res[:1500] + "… (review output capped)"
+	}
+	return res
 }
 
 func itoa(n int) string {

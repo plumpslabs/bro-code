@@ -1790,12 +1790,12 @@ func (t *FetchURLTool) Execute(ctx context.Context, argsJSON string) (string, er
 	return text, nil
 }
 
-// GitTool runs read-only git commands only — no commands that mutate the repo.
+// GitTool runs git commands with built-in atomic commit staging and read-only queries.
 type GitTool struct{}
 
 func (t *GitTool) Name() string { return "git" }
 func (t *GitTool) Description() string {
-	return "Run git commands: status, diff, log, branch (read-only) and commit (requires user approval). Commit and other mutating operations go through the permission gate."
+	return "Run git commands: status, diff, log, branch (read-only) and commit (atomic staging + commit with user approval). For commit, provide 'message' and optionally 'files' or 'all: true'."
 }
 func (t *GitTool) Parameters() map[string]any {
 	return map[string]any{
@@ -1803,6 +1803,8 @@ func (t *GitTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action":  map[string]any{"type": "string", "enum": []string{"status", "diff", "log", "branch", "commit"}, "description": "Which git operation to run"},
 			"message": map[string]any{"type": "string", "description": "commit: the commit message (required for commit)"},
+			"files":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "commit: specific file paths to stage and commit"},
+			"all":     map[string]any{"type": "boolean", "description": "commit: stage all modified and untracked files (git add -A) before committing"},
 			"stat":    map[string]any{"type": "boolean", "description": "diff: show file stats instead of the full diff (default false)"},
 			"limit":   map[string]any{"type": "integer", "description": "log: max commits to show (default 10, max 50)"},
 		},
@@ -1811,14 +1813,20 @@ func (t *GitTool) Parameters() map[string]any {
 }
 func (t *GitTool) Execute(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
-		Action  string `json:"action"`
-		Message string `json:"message"`
-		Stat    bool   `json:"stat"`
-		Limit   int    `json:"limit"`
+		Action  string   `json:"action"`
+		Message string   `json:"message"`
+		Files   []string `json:"files"`
+		All     bool     `json:"all"`
+		Stat    bool     `json:"stat"`
+		Limit   int      `json:"limit"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+
+	// Bound git ops so a slow/hung repo cannot stall the agent loop.
+	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 
 	var argv []string
 	switch args.Action {
@@ -1845,14 +1853,33 @@ func (t *GitTool) Execute(ctx context.Context, argsJSON string) (string, error) 
 		if msg == "" {
 			return "", fmt.Errorf("commit requires a message parameter")
 		}
+
+		// Atomic staging: stage files before committing so commits never fail due to unstaged changes
+		if args.All {
+			addCmd := exec.CommandContext(tctx, "git", "add", "-A")
+			if addOut, addErr := addCmd.CombinedOutput(); addErr != nil {
+				return "", fmt.Errorf("git add -A failed: %s (%w)", strings.TrimSpace(string(addOut)), addErr)
+			}
+		} else if len(args.Files) > 0 {
+			addArgs := append([]string{"add", "--"}, args.Files...)
+			addCmd := exec.CommandContext(tctx, "git", addArgs...)
+			if addOut, addErr := addCmd.CombinedOutput(); addErr != nil {
+				return "", fmt.Errorf("git add failed: %s (%w)", strings.TrimSpace(string(addOut)), addErr)
+			}
+		} else {
+			// Check if anything is already staged; if not, auto-stage tracked modified files
+			diffCmd := exec.CommandContext(tctx, "git", "diff", "--cached", "--quiet")
+			if diffCmd.Run() == nil {
+				addCmd := exec.CommandContext(tctx, "git", "add", "-u")
+				_ = addCmd.Run()
+			}
+		}
+
 		argv = []string{"commit", "-m", msg}
 	default:
 		return "", fmt.Errorf("unknown git action %q (allowed: status, diff, log, branch, commit)", args.Action)
 	}
 
-	// Bound git ops so a slow/hung repo cannot stall the agent loop.
-	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
 	cmd := exec.CommandContext(tctx, "git", argv...)
 	out, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(out))
