@@ -324,6 +324,29 @@ func (m *Model) skipAsk() {
 	}
 }
 
+// extractCommandFromQuestion extracts the inner code command from a gated question if present.
+func extractCommandFromQuestion(q string) (string, bool) {
+	if !strings.Contains(q, "```") {
+		return "", false
+	}
+	parts := strings.Split(q, "```")
+	if len(parts) >= 3 {
+		cmd := strings.TrimSpace(parts[1])
+		lines := strings.Split(cmd, "\n")
+		if len(lines) > 0 {
+			first := strings.TrimSpace(lines[0])
+			if first == "bash" || first == "sh" || first == "zsh" {
+				lines = lines[1:]
+			}
+		}
+		cleanCmd := strings.TrimSpace(strings.Join(lines, "\n"))
+		if cleanCmd != "" {
+			return cleanCmd, true
+		}
+	}
+	return "", false
+}
+
 // appendAskToHistory records the user's answers into the chat transcript with clean readable formatting.
 func (m *Model) appendAskToHistory(results []tool.AskResult) {
 	var entries []string
@@ -335,10 +358,13 @@ func (m *Model) appendAskToHistory(results []tool.AskResult) {
 			ans = r.Custom
 		}
 		q := strings.TrimSpace(r.Question)
-		if strings.Contains(q, "\n") || strings.Contains(q, "```") {
-			// For multiline or code block questions (e.g. gated command confirmations),
-			// format the chosen answer cleanly on a new line below the block.
-			entries = append(entries, fmt.Sprintf("%s\n\n↳ **Answer**: %s", q, ans))
+		if cmd, ok := extractCommandFromQuestion(q); ok {
+			// Clean terminal command card without raw backticks
+			entries = append(entries, fmt.Sprintf("• Command Approval: %s\n  $ %s", ans, cmd))
+		} else if strings.Contains(q, "\n") {
+			lines := strings.Split(q, "\n")
+			firstLine := strings.TrimSpace(lines[0])
+			entries = append(entries, fmt.Sprintf("• %s\n  ↳ Answer: %s", firstLine, ans))
 		} else {
 			entries = append(entries, fmt.Sprintf("• %s → %s", q, ans))
 		}

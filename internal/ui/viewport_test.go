@@ -471,3 +471,39 @@ func TestFirstFrameClippedBeforeWindowSize(t *testing.T) {
 		t.Fatalf("newest content missing after first-frame clip:\n%s", visible)
 	}
 }
+
+// TestStreamingPreservesUserScrollUp verifies that when the user scrolls up to read history
+// while the agent is streaming an answer, incoming stream chunks do NOT force the viewport back to bottom.
+func TestStreamingPreservesUserScrollUp(t *testing.T) {
+	m := newTestApp()
+	m.width = 100
+	m.height = 30
+	m.turnRunning = true
+
+	for i := 1; i <= 30; i++ {
+		m.appendMessages(fmt.Sprintf("YOU:\nold message %d", i))
+		m.appendMessages(fmt.Sprintf("BROCODE:\nold response %d", i))
+	}
+
+	// First stream chunk arrives, user is at bottom
+	m.Update(streamChunkMsg("streaming chunk 1..."))
+	_ = m.View()
+
+	// User scrolls up to read old history
+	m.logViewport.SetYOffset(5)
+	if m.logViewport.AtBottom() {
+		t.Fatal("expected viewport not to be at bottom after scroll up")
+	}
+
+	// Next stream chunk arrives while user is reading history
+	m.Update(streamChunkMsg(" streaming chunk 2..."))
+	_ = m.View()
+
+	// Viewport offset must be preserved, NOT reset to bottom
+	if m.logViewport.AtBottom() {
+		t.Fatalf("viewport was forced to bottom during streaming while user was reading history: YOffset=%d", m.logViewport.YOffset())
+	}
+	if m.logViewport.YOffset() != 5 {
+		t.Fatalf("expected YOffset=5 preserved, got %d", m.logViewport.YOffset())
+	}
+}

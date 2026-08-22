@@ -63,11 +63,14 @@ func TestSubmitAskGatedCommandFormatting(t *testing.T) {
 	if !strings.HasPrefix(entry, "YOU:") {
 		t.Errorf("entry should be a YOU message, got %q", entry)
 	}
-	if !strings.Contains(entry, "↳ **Answer**: ✅ Allow once") {
-		t.Errorf("multiline command question should place answer below block cleanly, got %q", entry)
+	if !strings.Contains(entry, "• Command Approval: ✅ Allow once") {
+		t.Errorf("expected command approval status in entry, got %q", entry)
 	}
-	if strings.Contains(entry, "``` →") {
-		t.Errorf("answer must not dangle directly after closing backticks, got %q", entry)
+	if !strings.Contains(entry, "$ npm test -- tests/auth.test.js") {
+		t.Errorf("expected clean $ command card in entry, got %q", entry)
+	}
+	if strings.Contains(entry, "```") {
+		t.Errorf("entry must not contain raw markdown backticks, got %q", entry)
 	}
 }
 

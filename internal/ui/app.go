@@ -1391,7 +1391,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Streaming..."
 		}
 		m.pendingStream += string(msg)
-		m.logViewport.GotoBottom()
 		return m, nil
 
 	case fileDiffMsg:
