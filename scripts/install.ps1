@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 
 $Repo = "plumpslabs/bro-code"
 $BinaryName = "brocode"
-$DefaultTag = "v0.1.30"
+$DefaultTag = "v0.1.31"
 
 # 1. Detect Architecture
 $Arch = $env:PROCESSOR_ARCHITECTURE

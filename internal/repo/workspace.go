@@ -1,12 +1,14 @@
 package repo
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // RepoInfo describes a single repository inside a workspace.
@@ -77,7 +79,7 @@ func DiscoverWorkspace(rootPath string) *Workspace {
 				continue
 			}
 			childPath := filepath.Join(rootPath, name)
-			if isGitRepo(childPath) {
+			if hasLocalGitDir(childPath) {
 				// Don't add if already added (e.g. if root == childPath)
 				alreadyExists := false
 				for _, r := range ws.Repos {
@@ -135,13 +137,21 @@ func (w *Workspace) FindRepoForPath(filePath string) *RepoInfo {
 	return bestMatch
 }
 
+// hasLocalGitDir checks whether path contains a local .git directory or file (fast os.Stat).
+func hasLocalGitDir(path string) bool {
+	gitDir := filepath.Join(path, ".git")
+	_, err := os.Stat(gitDir)
+	return err == nil
+}
+
 // isGitRepo checks whether path is a valid Git working directory.
 func isGitRepo(path string) bool {
-	gitDir := filepath.Join(path, ".git")
-	if info, err := os.Stat(gitDir); err == nil && (info.IsDir() || !info.IsDir()) {
+	if hasLocalGitDir(path) {
 		return true
 	}
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
 	cmd.Dir = path
 	out, err := cmd.Output()
 	return err == nil && strings.TrimSpace(string(out)) == "true"

@@ -2192,12 +2192,13 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// memory so a follow-up task can pick them up instead of losing them
 		// to the chat history. Deterministic parse, no extra LLM call.
 		if e.Mode() == "BUILDER" {
-			if len(e.editedFiles) > 0 {
-				_, _ = plan.MarkStepsDoneByEditedFiles(e.repoRoot, e.editedFiles)
-				if archived, archPath, _ := plan.AutoArchiveIfDone(e.repoRoot); archived {
-					if onUpdate != nil {
-						onUpdate(e.state, fmt.Sprintf("📦 All plan tasks completed — archived to %s", filepath.Base(archPath)))
-					}
+			_, changed, _ := plan.SyncPlanProgress(e.repoRoot, e.editedFiles, resp.Content)
+			if changed && onUpdate != nil {
+				onUpdate(e.state, "📋 Active plan progress updated in .brocode/current_plan.md")
+			}
+			if archived, archPath, _ := plan.AutoArchiveIfDone(e.repoRoot); archived {
+				if onUpdate != nil {
+					onUpdate(e.state, fmt.Sprintf("📦 All plan tasks completed — archived to %s", filepath.Base(archPath)))
 				}
 			}
 			if e.mem != nil {

@@ -162,3 +162,50 @@ func TestParseMarkdownPlan_GenericHeadingAndCleanFallback(t *testing.T) {
 		t.Fatalf("expected 3 steps, got %d", len(p.Steps))
 	}
 }
+
+func TestSyncPlanProgress(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	p := &Plan{
+		Goal:   "Fix Contact Modal",
+		Status: "ACTIVE",
+		Steps: []PlanStep{
+			{ID: "step_1", Description: "Update ContactModal.tsx styles", Status: "pending"},
+			{ID: "step_2", Description: "Verify unit tests via npm test", Status: "pending"},
+		},
+	}
+	if err := SaveCurrentPlan(tmpDir, p); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Sync after editing ContactModal.tsx
+	updated, changed, err := SyncPlanProgress(tmpDir, []string{"src/components/ContactModal.tsx"}, "")
+	if err != nil || !changed {
+		t.Fatalf("expected step 1 to be marked done: changed=%v, err=%v", changed, err)
+	}
+	if updated.Steps[0].Status != "done" {
+		t.Errorf("expected step 1 done, got %s", updated.Steps[0].Status)
+	}
+	if updated.Steps[1].Status != "pending" {
+		t.Errorf("expected step 2 pending, got %s", updated.Steps[1].Status)
+	}
+
+	// 2. Sync from response text checking step 2
+	resp := "All modifications complete:\n- [x] Update ContactModal.tsx styles\n- [x] Verify unit tests via npm test\n\nDone!"
+	updated, changed, err = SyncPlanProgress(tmpDir, nil, resp)
+	if err != nil || !changed {
+		t.Fatalf("expected step 2 to be marked done from response: changed=%v, err=%v", changed, err)
+	}
+	if updated.Steps[1].Status != "done" {
+		t.Errorf("expected step 2 done, got %s", updated.Steps[1].Status)
+	}
+
+	// 3. Auto archive when all steps done
+	archived, archPath, err := AutoArchiveIfDone(tmpDir)
+	if err != nil || !archived {
+		t.Fatalf("expected plan to be auto-archived: archived=%v, err=%v", archived, err)
+	}
+	if !strings.Contains(archPath, "fix_contact_modal") {
+		t.Errorf("expected archive path to contain slug, got %s", archPath)
+	}
+}

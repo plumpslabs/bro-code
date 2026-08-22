@@ -149,14 +149,15 @@ func (p *Plan) IsAllStepsDone() bool {
 	return true
 }
 
-// MarkStepsDoneByEditedFiles matches edited file paths against step descriptions,
-// marking matching steps as done and saving the updated plan.
-func MarkStepsDoneByEditedFiles(workspaceDir string, editedFiles []string) (*Plan, error) {
+// SyncPlanProgress updates current_plan.md by matching edited files and checked tasks (- [x]) from the response.
+func SyncPlanProgress(workspaceDir string, editedFiles []string, responseContent string) (*Plan, bool, error) {
 	p, err := LoadCurrentPlan(workspaceDir)
 	if err != nil || p == nil || len(p.Steps) == 0 {
-		return nil, err
+		return nil, false, err
 	}
 	changed := false
+
+	// 1. Mark steps done by edited files
 	for i := range p.Steps {
 		if p.Steps[i].Status == "done" {
 			continue
@@ -164,17 +165,49 @@ func MarkStepsDoneByEditedFiles(workspaceDir string, editedFiles []string) (*Pla
 		for _, ef := range editedFiles {
 			base := filepath.Base(ef)
 			desc := p.Steps[i].Description
-			if strings.Contains(desc, ef) || strings.Contains(desc, base) {
+			if strings.Contains(desc, ef) || (len(base) > 3 && strings.Contains(desc, base)) {
 				p.Steps[i].Status = "done"
 				changed = true
 				break
 			}
 		}
 	}
+
+	// 2. Mark steps done if response contains checked markdown checklist item matching step description
+	if responseContent != "" {
+		lines := strings.Split(responseContent, "\n")
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if isChecklistDone(trimmed) && len(trimmed) > 5 {
+				clean := strings.ToLower(cleanTaskDesc(trimmed[5:]))
+				if len(clean) < 3 {
+					continue
+				}
+				for i := range p.Steps {
+					if p.Steps[i].Status == "done" {
+						continue
+					}
+					stepDesc := strings.ToLower(cleanTaskDesc(p.Steps[i].Description))
+					if strings.Contains(stepDesc, clean) || strings.Contains(clean, stepDesc) {
+						p.Steps[i].Status = "done"
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
 	if changed {
 		_ = SaveCurrentPlan(workspaceDir, p)
 	}
-	return p, nil
+	return p, changed, nil
+}
+
+// MarkStepsDoneByEditedFiles matches edited file paths against step descriptions,
+// marking matching steps as done and saving the updated plan.
+func MarkStepsDoneByEditedFiles(workspaceDir string, editedFiles []string) (*Plan, error) {
+	p, _, err := SyncPlanProgress(workspaceDir, editedFiles, "")
+	return p, err
 }
 
 // AutoArchiveIfDone archives the plan if all steps have been marked done.

@@ -83,7 +83,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID:   "b12",
-		Text: `12. PLAN-THEN-ACT (multi-step tasks): for an implementation task the engine first runs a read-only PLAN pass and asks you to confirm before any edit. When you are in PLAN MODE, follow its instructions — research, propose a concise plan, then ask_user to confirm. After approval, execute that agreed plan; do NOT silently re-plan or re-decide architecture mid-execution. If you discover the plan is wrong, surface it and re-confirm rather than wandering.`,
+		Text: `12. PLAN-THEN-ACT (multi-step tasks): for an implementation task the engine first runs a read-only PLAN pass and asks you to confirm before any edit. When an ACTIVE TASK PLAN (.brocode/current_plan.md) is present, execute its steps in order. Before moving to the next step, explicitly mark finished steps as done (- [x] Step name) in your progress summary so every implementation can be cross-checked. When all steps are verified, announce completion so the plan can be cleanly archived to .brocode/plans/archive/. If you discover the plan is wrong, surface it and re-confirm rather than wandering.`,
 	},
 	{
 		ID:   "b13",
@@ -102,6 +102,7 @@ var plannerRules = []Rule{
 	{ID: "p4", Text: `4. BROCODE NATIVE SOVEREIGNTY: Work exclusively with BroCode's native ecosystem (.brocode/). NEVER search for, inspect, read, or write plans to .agents/, .cursor/, .windsurf/, or any third-party framework directories.`},
 	{ID: "p5", Text: `5. ACTIONABLE STEPS & FILE BINDING: Format tasks as actionable checklist items (- [ ] Action Verb: description) with explicit target file paths. Avoid writing vague symptoms — specify WHAT will be changed and WHERE.`},
 	{ID: "p6", Text: `6. PROPORTIONALITY & VERIFICATION: Keep the plan proportional to complexity (lean 1-2 steps for small fixes, phased roadmap for major features). ALWAYS include a concrete verification task as the final step (e.g. run tsc, go test, npm test, or build).`},
+	{ID: "p7", Text: `7. PLAN RESET & COMPLETION: If the user indicates the current task is completed or asks to reset/clear/archive the plan (e.g. "task selesai", "reset", "clear plan"), acknowledge the completion directly in text and summarize next steps or propose a fresh goal. DO NOT repeatedly re-read .brocode files or slice lines in a loop.`},
 }
 
 var minerRules = []Rule{
