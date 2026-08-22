@@ -348,6 +348,72 @@ func (m *Model) appendAskToHistory(results []tool.AskResult) {
 	}
 }
 
+// formatQuestionBlock renders question text, markdown code blocks, and hints cleanly.
+func formatQuestionBlock(text string, maxWidth int) string {
+	text = strings.TrimSpace(text)
+	if !strings.Contains(text, "```") {
+		lines := strings.Split(text, "\n")
+		var out []string
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if l != "" {
+				out = append(out, "  "+l)
+			}
+		}
+		if len(out) == 0 {
+			return "  " + text + "\n"
+		}
+		return strings.Join(out, "\n") + "\n"
+	}
+
+	var sb strings.Builder
+	parts := strings.Split(text, "```")
+	for i, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		if i%2 == 1 {
+			// Code block: render in a clean styled box
+			codeLines := strings.Split(trimmed, "\n")
+			if len(codeLines) > 0 {
+				first := strings.TrimSpace(codeLines[0])
+				if first == "bash" || first == "sh" || first == "json" || first == "js" || first == "ts" {
+					codeLines = codeLines[1:]
+				}
+			}
+			cleanCode := strings.Join(codeLines, "\n")
+			codeBox := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#38bdf8")).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#475569")).
+				Padding(0, 1).
+				MarginLeft(2)
+			if maxWidth > 12 {
+				codeBox = codeBox.Width(maxWidth - 8)
+			}
+			sb.WriteString(codeBox.Render(cleanCode) + "\n")
+		} else {
+			// Plain text or hint outside code block
+			lines := strings.Split(trimmed, "\n")
+			for _, l := range lines {
+				l = strings.TrimSpace(l)
+				if l == "" {
+					continue
+				}
+				if strings.HasPrefix(l, "💡") {
+					hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#94a3b8")).Italic(true)
+					sb.WriteString("  " + hintStyle.Render(l) + "\n")
+				} else {
+					qStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#f8fafc"))
+					sb.WriteString("  " + qStyle.Render(l) + "\n")
+				}
+			}
+		}
+	}
+	return sb.String()
+}
+
 // buildAskBody renders the scrollable content of the question modal cleanly without noisy emojis.
 func (m *Model) buildAskBody() string {
 	var sb strings.Builder
@@ -357,6 +423,7 @@ func (m *Model) buildAskBody() string {
 	checkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#34d399")).Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b"))
 	shortcutStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#94a3b8"))
+	badgeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#94a3b8")).Background(lipgloss.Color("#1e293b")).Padding(0, 1)
 
 	sb.WriteString(titleStyle.Render("Clarification Required") + " " + dimStyle.Render(fmt.Sprintf("(%d questions)", len(m.askQuestions))) + "\n\n")
 
@@ -367,12 +434,15 @@ func (m *Model) buildAskBody() string {
 		if q.Multi {
 			tag = "multi-select"
 		}
-		header := fmt.Sprintf("Q%d/%d · %s", qi+1, len(m.askQuestions), q.Question)
+		qTag := badgeStyle.Render(tag)
+		qNum := fmt.Sprintf("Question %d/%d", qi+1, len(m.askQuestions))
+
 		if !onSubmit && qi == m.askCursor {
-			sb.WriteString(cursorStyle.Render("▸ "+header) + dimStyle.Render("  ["+tag+"]") + "\n")
+			sb.WriteString(cursorStyle.Render("▸ "+qNum) + "  " + qTag + "\n")
 		} else {
-			sb.WriteString("  " + header + dimStyle.Render("  ["+tag+"]") + "\n")
+			sb.WriteString("  " + titleStyle.Render(qNum) + "  " + qTag + "\n")
 		}
+		sb.WriteString(formatQuestionBlock(q.Question, m.width-6) + "\n")
 
 		for oi, opt := range q.Options {
 			flatHere := row
@@ -417,13 +487,13 @@ func (m *Model) buildAskBody() string {
 			if m.askChecked[qi][customIdx] {
 				mark = checkStyle.Render("[✓]")
 			}
-			sb.WriteString(fmt.Sprintf("%s%s%s Custom answer...\n", cursor, sc, mark))
+			sb.WriteString(fmt.Sprintf("%s%s%s ✏️  Custom answer...\n", cursor, sc, mark))
 		} else {
 			mark := dimStyle.Render("( )")
 			if m.askSel[qi] == customIdx {
 				mark = checkStyle.Render("(●)")
 			}
-			sb.WriteString(fmt.Sprintf("%s%s%s Custom answer...\n", cursor, sc, mark))
+			sb.WriteString(fmt.Sprintf("%s%s%s ✏️  Custom answer...\n", cursor, sc, mark))
 		}
 		sb.WriteString("\n")
 	}
