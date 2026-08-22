@@ -263,7 +263,7 @@ func runFakeServer() {
 			// Push diagnostics so the Diagnostics tool and ScanDiagnostics have
 			// something to show: one error and one deprecated-warning (tag 2).
 			go func() {
-				time.Sleep(30 * time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
 				notify(writer, "textDocument/publishDiagnostics", map[string]any{
 					"uri": uri,
 					"diagnostics": []map[string]any{
@@ -477,7 +477,7 @@ func TestScanDiagnostics(t *testing.T) {
 	}
 
 	old := scanSettle
-	scanSettle = 1 * time.Second
+	scanSettle = 5 * time.Second
 	defer func() { scanSettle = old }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
