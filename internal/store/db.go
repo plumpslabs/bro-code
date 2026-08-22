@@ -139,6 +139,18 @@ func (s *Store) initSchema() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_notes_kind ON notes(kind);
 	CREATE INDEX IF NOT EXISTS idx_notes_weight ON notes(weight DESC, last_seen DESC);
+
+	CREATE TABLE IF NOT EXISTS playbooks (
+		id          TEXT PRIMARY KEY,
+		pattern     TEXT NOT NULL,
+		root_cause  TEXT NOT NULL DEFAULT '',
+		solution    TEXT NOT NULL,
+		category    TEXT NOT NULL DEFAULT 'error_fix',
+		occurrences INTEGER DEFAULT 1,
+		created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		last_used   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_playbooks_pattern ON playbooks(pattern);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err

@@ -1498,4 +1498,36 @@ func TestTurnModeIsolationDuringMidTurnShiftTab(t *testing.T) {
 	}
 }
 
+func TestEphemeralAskSlashCommand(t *testing.T) {
+	m := newTestApp()
+	m.width = 120
+	m.height = 40
+
+	// 1. Empty /ask prints usage
+	m.handleSlashCommand("/ask")
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg, "Usage: `/ask <question>`") {
+		t.Fatalf("expected usage message for empty /ask, got: %s", lastMsg)
+	}
+
+	// 2. Receiving ephemeralAskResultMsg displays note and resets status to Ready
+	askResult := "ASK:\nWhere is webhook?\n---\nIt is in `services/webhook.js`"
+	m.Update(ephemeralAskResultMsg(askResult))
+
+	if m.status != "Ready" {
+		t.Errorf("expected status 'Ready', got %q", m.status)
+	}
+	found := false
+	for _, msg := range m.messages {
+		if strings.Contains(msg, "Where is webhook?") && strings.Contains(msg, "services/webhook.js") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected ephemeral ask answer in UI message log, got messages: %v", m.messages)
+	}
+}
+
+
 

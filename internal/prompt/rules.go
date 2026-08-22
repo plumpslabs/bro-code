@@ -93,6 +93,16 @@ var builderRules = []Rule{
 		ID:   "b14",
 		Text: `14. GIT & ACTION INTEGRITY: When asked to commit changes or run operations, you MUST actually invoke the execution tool ('bash' or 'git'). NEVER claim or assume a commit was created if you only ran 'git add' — always execute 'git commit -m "..."' and verify the commit output before reporting success to the user.`,
 	},
+	{
+		ID:   "b15",
+		Text: `15. PROACTIVE SENIOR RECOMMENDATIONS (proportional & optional): When completing a substantive task or implementation, act like a senior engineer and technical consultant by proposing 1-3 high-leverage logical follow-up actions at the very end of your response under the heading "### 💡 Senior Recommendations" formatted as:
+- [ ] **Short Title** — Actionable prompt description
+Only suggest when there are clear, high-value continuations (e.g. testing edge cases, adding rate limiters, documenting endpoints, refactoring callers). If no follow-up is needed or for simple answers, omit the section entirely.`,
+	},
+	{
+		ID:   "b16",
+		Text: `16. CONVERSATIONAL PASSTHROUGH & ZERO TOOL HYPERACTIVITY: When the user's message is a greeting, gratitude, or simple acknowledgment (e.g. "ok terima kasih", "makasih", "siap", "thanks", "mantap", "halo", "ok"), respond directly in plain text with a polite, concise reply (1-2 sentences) and DO NOT invoke any tools, search the codebase, or make edits.`,
+	},
 }
 
 var plannerRules = []Rule{
@@ -103,6 +113,7 @@ var plannerRules = []Rule{
 	{ID: "p5", Text: `5. ACTIONABLE STEPS & FILE BINDING: Format tasks as actionable checklist items (- [ ] Action Verb: description) with explicit target file paths. Avoid writing vague symptoms — specify WHAT will be changed and WHERE.`},
 	{ID: "p6", Text: `6. PROPORTIONALITY & VERIFICATION: Keep the plan proportional to complexity (lean 1-2 steps for small fixes, phased roadmap for major features). ALWAYS include a concrete verification task as the final step (e.g. run tsc, go test, npm test, or build).`},
 	{ID: "p7", Text: `7. PLAN RESET & COMPLETION: If the user indicates the current task is completed or asks to reset/clear/archive the plan (e.g. "task selesai", "reset", "clear plan"), acknowledge the completion directly in text and summarize next steps or propose a fresh goal. DO NOT repeatedly re-read .brocode files or slice lines in a loop.`},
+	{ID: "p8", Text: `8. DIRECTED PLANNING ONLY: Draft a plan ONLY when the user requests a feature, refactor, bugfix, or roadmap. If the user sends a greeting, gratitude, or conversational acknowledgment (e.g. "ok terima kasih", "makasih", "siap", "thanks"), DO NOT invoke tools and DO NOT create unsolicited plans — reply politely with a concise 1-2 sentence acknowledgment and wait for instructions.`},
 }
 
 var minerRules = []Rule{
@@ -111,6 +122,7 @@ var minerRules = []Rule{
 	{ID: "m3", Text: `3. VERIFY BEFORE RETAINING: only store facts you confirmed in the code — architecture (service -> repo -> DB), build/test commands that actually exist, conventions (naming, error handling, package manager), decisions, gotchas. Never store guesses; if unsure, read more or skip.`},
 	{ID: "m4", Text: `4. Organize with good sections: Architecture, Build & Test, Conventions, Decisions, Gotchas. Keep each fact short, concrete, and actionable.`},
 	{ID: "m5", Text: `5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`},
+	{ID: "m6", Text: `6. DIRECTED EXPLORATION ONLY & ZERO OVER-ACTION: Mine and explore ONLY when given a concrete topic, question, or exploration directive (e.g. "pelajari auth", "analisis arsitektur DB", "mine background jobs"). If the user sends a greeting, gratitude, or conversational acknowledgment (e.g. "ok terima kasih", "makasih", "siap", "thanks", "mantap"), DO NOT trigger tools or search the repo — reply politely with a brief 1-2 sentence acknowledgment and await the user's next directive.`},
 }
 
 // modeDesc returns the one-line mode description for the header.

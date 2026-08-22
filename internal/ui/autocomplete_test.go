@@ -17,6 +17,22 @@ func TestDetectAutocompleteSlashCommands(t *testing.T) {
 		t.Errorf("expected first match to be /memory, got %+v", state.Items)
 	}
 
+	// Test newly added breakthrough slash commands: /ask, /spec, /tournament
+	askState := DetectAutocomplete("/as", nil, AutocompleteState{})
+	if !askState.Active || len(askState.Items) == 0 || askState.Items[0].Value != "/ask" {
+		t.Fatalf("expected /ask autocomplete match, got %+v", askState.Items)
+	}
+
+	specState := DetectAutocomplete("/sp", nil, AutocompleteState{})
+	if !specState.Active || len(specState.Items) == 0 || specState.Items[0].Value != "/spec" {
+		t.Fatalf("expected /spec autocomplete match, got %+v", specState.Items)
+	}
+
+	tournState := DetectAutocomplete("/tour", nil, AutocompleteState{})
+	if !tournState.Active || len(tournState.Items) == 0 || tournState.Items[0].Value != "/tournament" {
+		t.Fatalf("expected /tournament autocomplete match, got %+v", tournState.Items)
+	}
+
 	// Space should deactivate slash autocomplete
 	stateWithSpace := DetectAutocomplete("/memory arg", nil, state)
 	if stateWithSpace.Active {

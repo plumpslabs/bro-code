@@ -171,6 +171,7 @@ func NewRegistry() *Registry {
 	r.Register(&CodeOutlineTool{})
 	r.Register(&CodeImpactTool{})
 	r.Register(&RefactorClusterTool{})
+	r.Register(&BlastRadiusTool{})
 	return r
 }
 

@@ -134,6 +134,14 @@ func (r *Runner) Run(ctx context.Context, task string) (string, error) {
 	return r.runOne(ctx, "1", task, "BUILDER", "", "", nil)
 }
 
+// RunWithProgress executes a single sub-agent and streams live progress updates through onUpdate.
+func (r *Runner) RunWithProgress(ctx context.Context, task, mode string, onUpdate loop.TurnOutputHandler) (string, error) {
+	if mode == "" {
+		mode = "BUILDER"
+	}
+	return r.runOne(ctx, "1", task, mode, "", "", onUpdate)
+}
+
 // RunMany executes the given tasks — concurrently when parallel is true,
 // sequentially otherwise — and returns one report per task. Completed agents
 // stream a one-line progress update through onUpdate (may be nil) so the caller

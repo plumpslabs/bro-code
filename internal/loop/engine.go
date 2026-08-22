@@ -2109,6 +2109,11 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				if localized := e.localizeVerifyFailure(); localized != "" {
 					msg += "\n\nLSP-localized view of the failing files (from the language server):\n" + localized
 				}
+				if e.knowledge != nil {
+					if pb, _ := e.knowledge.MatchPlaybook(vetErr); pb != nil {
+						msg += "\n\n" + learn.FormatPlaybookHint(pb)
+					}
+				}
 				_ = e.context.AppendUserMessage(msg)
 				continue
 			}
@@ -2212,12 +2217,22 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 
 		// Lesson auto-extract: a repair that started failing and ended passing
 		// is the highest-value failure signal a harness can capture — distill a
-		// one-line durable lesson into project memory (## Gotchas) so future
-		// sessions start knowing this failure mode instead of re-discovering it.
-		if e.repairSucceeded && e.mem != nil && e.lastVerifyErr != "" {
-			if lesson := e.distillLesson(ctx); lesson != "" {
-				_, _ = e.mem.Retain("Gotchas", lesson)
-				e.tagSkillLesson(lesson)
+		// one-line durable lesson into project memory (## Gotchas) and record a
+		// self-healing Playbook in SQLite so future sessions start knowing this
+		// failure mode instead of re-discovering it.
+		if e.repairSucceeded && e.lastVerifyErr != "" {
+			if e.mem != nil {
+				if lesson := e.distillLesson(ctx); lesson != "" {
+					_, _ = e.mem.Retain("Gotchas", lesson)
+					e.tagSkillLesson(lesson)
+				}
+			}
+			if e.knowledge != nil {
+				pattern := learn.ExtractErrorPattern(e.lastVerifyErr)
+				if pattern != "" {
+					solution := fmt.Sprintf("Resolved via code modifications in %s", strings.Join(e.editedFiles, ", "))
+					_ = e.knowledge.RecordPlaybook(pattern, e.lastVerifyErr, solution, "repair_fix")
+				}
 			}
 		}
 

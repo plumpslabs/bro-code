@@ -269,6 +269,9 @@ type Model struct {
 	// appended to the conversation history.
 	activity []string
 
+	// activeRecommendations holds interactive follow-up suggestions from the latest turn
+	activeRecommendations []QuickRecommendation
+
 
 	// Log viewport: the conversation scrolls inside a fixed-height window so
 	// the terminal never repaints the whole history (flicker fix) and the
@@ -535,6 +538,9 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 		}
 	})
 
+	// Reset active recommendations on fresh user prompt
+	m.activeRecommendations = nil
+
 	runTurnCmd := func() tea.Msg {
 		res, err := m.engine.RunTurn(ctx, userQuery, func(state loop.LoopState, info string) {
 			if m.quitting {
@@ -557,6 +563,28 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(runTurnCmd, tickCmd())
+}
+
+// triggerRecommendation executes or queues a senior quick recommendation.
+func (m *Model) triggerRecommendation(idx int) (tea.Model, tea.Cmd) {
+	for i := range m.activeRecommendations {
+		if m.activeRecommendations[i].Index == idx && !m.activeRecommendations[i].Clicked {
+			m.activeRecommendations[i].Clicked = true
+			rec := m.activeRecommendations[i]
+			if m.turnRunning {
+				// Agent is busy executing a turn — queue for auto-run when current turn completes
+				m.pendingQueue = append(m.pendingQueue, QueuedPrompt{
+					Text: rec.Prompt,
+					Mode: m.mode,
+				})
+				m.appendNote(fmt.Sprintf("📥 Queued recommendation [%d]: %s (\"%s\")", rec.Index, rec.Title, rec.Prompt))
+				return m, nil
+			}
+			// Agent is idle — start execution immediately
+			return m.startTurn(rec.Prompt)
+		}
+	}
+	return m, nil
 }
 
 type statusUpdateMsg string
@@ -606,6 +634,9 @@ type diagnoseResultMsg string
 // diagnoseFixMsg carries a finished project scan whose findings should be
 // handed straight to the agent to fix (the `/diagnose fix` command).
 type diagnoseFixMsg string
+
+// ephemeralAskResultMsg carries the output of an isolated /ask query without context pollution.
+type ephemeralAskResultMsg string
 
 // NewApp initializes the Bubble Tea v2 TUI model.
 func NewApp(
@@ -778,6 +809,7 @@ func NewApp(
 	cwd, _ := os.Getwd()
 	m.globalIndex = search.BuildGlobalIndex(cwd)
 	m.tools.Register(&tool.CodeLocateTool{Index: m.globalIndex})
+	m.tools.Register(&tool.BlastRadiusTool{Index: m.globalIndex})
 	m.tools.Register(&tool.CheckpointTool{})
 	m.tools.Register(&tool.RunTestsTool{Plan: loop.TestCommandPlan})
 	if m.scoutMgr != nil && m.scoutMgr.Runner != nil {
@@ -1291,6 +1323,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.appendMessages("BROCODE:\n" + display)
 				}
 			}
+			// Extract senior recommendations for quick interactive execution
+			if recs := ExtractRecommendations(display); len(recs) > 0 {
+				m.activeRecommendations = recs
+			}
 			// When the primary provider failed and a fallback served the turn,
 			// say so in the history — otherwise the answer is mistaken for the
 			// active provider's (which is exactly the confusion the user saw:
@@ -1404,6 +1440,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case diagnoseResultMsg:
+		m.appendNote(string(msg))
+		m.status = "Ready"
+
+	case ephemeralAskResultMsg:
+		m.appendNote(string(msg))
+		m.status = "Ready"
+
+	case specResultMsg:
+		m.appendNote(string(msg))
+		m.status = "Ready"
+
+	case tournamentResultMsg:
 		m.appendNote(string(msg))
 		m.status = "Ready"
 
@@ -2049,6 +2097,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.askSelectQuickOption(num)
 				return m, nil
 			}
+			// When prompt input is empty and recommendations exist: type 1/2/3 to execute or queue
+			if m.promptInput.Value() == "" && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
+				num := int(keyStr[0] - '0')
+				if num >= 1 && num <= len(m.activeRecommendations) && !m.activeRecommendations[num-1].Clicked {
+					return m.triggerRecommendation(num)
+				}
+			}
 
 		case "left", "right":
 			if m.showFileConfirm {
@@ -2268,7 +2323,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	switch parts[0] {
 	case "/help":
-		m.appendNote("📖 Commands:\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/report [--json] - View or export privacy-safe benchmark/activity report\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/diagnose fix - Scan, then auto-fix all safe warnings/errors via the agent\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
+		m.appendNote("📖 Commands:\n/ask <question> - Isolated QA: Ask codebase questions without polluting active task context\n/spec <feature> - Spec-First Gate: Draft an architectural blueprint contract before coding\n/tournament <task> - Run 2 parallel candidate agents to solve difficult bugs/tasks\n/sessions, /history - Switch, or manage past sessions (d = delete, D = delete all, with confirm)\n/new - Create a new clean session\n/undo - Time-Travel Rollback: Revert all file changes made in the last turn\n/report [--json] - View or export privacy-safe benchmark/activity report\n/models - Open interactive model picker\n/model <provider>/<model> - Switch active model\n/connect - Setup API Key & Provider interactively (2-step wizard)\n/mcp - Show connected MCP servers & tools\n/lsp - Show code intelligence status (gopls, tsserver, ...)\n/lsp-install - Auto-install missing language servers\n/diagnose - Scan project for type errors, warnings & deprecated APIs\n/diagnose fix - Scan, then auto-fix all safe warnings/errors via the agent\n/memory - Show cross-session project memory\n/miner - Switch to MINER mode (learn + persist knowledge)\n/cost - Show session token & estimated cost per model\n/debug-context - View active LLM context & session tokens\n/clear - Clear chat screen\n\nModes (Shift+Tab): BUILDER (edit code) → PLANNER (read-only analysis) → MINER (read-only, persists verified knowledge to memory — the more you use BroCode, the smarter it gets)")
 
 	case "/miner":
 		// Jump straight into MINER mode so the next prompt is a knowledge
@@ -2334,6 +2389,74 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 
 	case "/cost":
 		m.appendMessages(m.engine.CostSummary())
+
+	case "/ask":
+		query := strings.TrimSpace(strings.TrimPrefix(cmd, "/ask"))
+		if query == "" {
+			m.appendMessages("Usage: `/ask <question>`\nAsk an isolated question about the codebase without polluting your active task's conversation context.\n\nExample: `/ask Where is the WhatsApp webhook handler defined?`")
+			return m, nil
+		}
+		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
+			m.appendMessages("⚠️ Subagent runner is not initialized for /ask.")
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Answering: %s...", truncatePrompt(query))
+		m.turnStart = time.Now()
+		runner := m.scoutMgr.Runner
+		askPrompt := fmt.Sprintf(
+			"You are an expert codebase answering assistant. The user is asking:\n\n"+
+				"\"%s\"\n\n"+
+				"Instructions:\n"+
+				"1. Be helpful, perceptive, and interpret informal phrasing or typos intelligently.\n"+
+				"2. Search and inspect the actual repository using codebase tools (code_locate, grep, read_file, glob) to find relevant code, models, services, functions, and configs related to their question.\n"+
+				"3. Provide a clear, direct, and concise explanation with exact file paths and code references.\n"+
+				"4. Anti-loop efficiency: Once you locate the relevant functions/schemas, synthesize and output your answer directly instead of repeatedly reading file slices in small chunks.\n"+
+				"5. Do NOT complain about typos or phrasing — interpret their intent and explain what exists in the codebase.\n"+
+				"6. Do NOT edit or modify any files.",
+			query,
+		)
+		prog := m.prog
+		return m, tea.Batch(tickCmd(), func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+			defer cancel()
+			ans, err := runner.RunWithProgress(ctx, askPrompt, "BUILDER", func(state loop.LoopState, info string) {
+				if prog != nil {
+					prog.Send(stepProgressMsg{state: state, info: info})
+				}
+			})
+			if err != nil {
+				return ephemeralAskResultMsg(fmt.Sprintf("❌ `/ask` query failed: %v", err))
+			}
+			return ephemeralAskResultMsg(fmt.Sprintf("ASK:\n%s\n---\n%s", query, ans))
+		})
+
+	case "/spec":
+		feature := strings.TrimSpace(strings.TrimPrefix(cmd, "/spec"))
+		if feature == "" {
+			m.appendMessages("Usage: `/spec <feature description>`\nDraft a structured Architectural Blueprint Specification Contract (ADR, endpoints, data models, blast radius) before writing code.\n\nExample: `/spec Multi-channel Webhook Dispatcher`")
+			return m, nil
+		}
+		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
+			m.appendMessages("⚠️ Subagent runner is not initialized for /spec.")
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Drafting spec: %s...", truncatePrompt(feature))
+		m.turnStart = time.Now()
+		return m, executeSpecCommand(m.scoutMgr.Runner, feature, m.prog)
+
+	case "/tournament":
+		task := strings.TrimSpace(strings.TrimPrefix(cmd, "/tournament"))
+		if task == "" {
+			m.appendMessages("Usage: `/tournament <bug or complex task>`\nRuns 2 parallel candidate agents with distinct solving strategies to find the cleanest, verified solution.\n\nExample: `/tournament Fix race condition in connection pooling`")
+			return m, nil
+		}
+		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
+			m.appendMessages("⚠️ Subagent runner is not initialized for /tournament.")
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Running tournament: %s...", truncatePrompt(task))
+		m.turnStart = time.Now()
+		return m, executeTournamentCommand(m.scoutMgr.Runner, task, m.prog)
 
 	case "/lsp":
 		m.appendMessages(m.lspStatus())
@@ -3705,6 +3828,13 @@ func (m *Model) buildLogChrome() (string, int) {
 		sb.WriteString("\n")
 	}
 
+	// Interactive Senior Recommendations:
+	if len(m.activeRecommendations) > 0 && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug && !m.showMCP && !m.showAsk && !m.showFileConfirm {
+		if recBar := RenderRecommendationsBar(m.activeRecommendations, m.width); recBar != "" {
+			sb.WriteString(recBar + "\n\n")
+		}
+	}
+
 	// Input area: while a critical file action (create/delete) awaits
 	// approval, the chat input is temporarily replaced by the confirm bar. In
 	// pager mode the input gives way to a hint bar naming the pager keys.
@@ -4250,6 +4380,75 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 			return diffBarStyle.Render(labelStyle.Render(actionLabel) + "  " + path + "  " + statStyle.Render(fmt.Sprintf("(+%d −%d) · [press Ctrl+F for diff]", add, del)))
 		}
 
+	// Ephemeral Codebase QA (/ask):
+	if strings.HasPrefix(msg, "ASK:\n") {
+		body := strings.TrimPrefix(msg, "ASK:\n")
+		query, answer, _ := strings.Cut(body, "\n---\n")
+
+		askCardStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("86")).Padding(0, 1)
+		if width > 0 {
+			askCardStyle = askCardStyle.Width(width)
+		}
+		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+		qStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+
+		wrap := width - 6
+		if wrap < 30 {
+			wrap = 30
+		}
+		renderedAnswer := renderMarkdown(strings.TrimSpace(answer), wrap)
+
+		header := labelStyle.Render("💬 CODEBASE QA") + "  " + dimStyle.Render("(Ephemeral · Zero Context Pollution)")
+		qLine := qStyle.Render("❓ \"" + query + "\"")
+
+		return askCardStyle.Render(header + "\n" + qLine + "\n\n" + renderedAnswer)
+	}
+
+	// Architectural Blueprint Spec (/spec):
+	if strings.HasPrefix(msg, "SPEC:\n") {
+		body := strings.TrimPrefix(msg, "SPEC:\n")
+		specPath, specContent, _ := strings.Cut(body, "\n---\n")
+
+		specCardStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("141")).Padding(0, 1)
+		if width > 0 {
+			specCardStyle = specCardStyle.Width(width)
+		}
+		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("141")).Bold(true)
+		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+
+		wrap := width - 6
+		if wrap < 30 {
+			wrap = 30
+		}
+		renderedSpec := renderMarkdown(strings.TrimSpace(specContent), wrap)
+		header := labelStyle.Render("📋 ARCHITECTURAL BLUEPRINT CONTRACT") + "  " + dimStyle.Render("("+specPath+")")
+		footerHint := dimStyle.Render("💡 Next: Switch to BUILDER (Shift+Tab) and say 'Implement spec in " + specPath + "'")
+
+		return specCardStyle.Render(header + "\n\n" + renderedSpec + "\n\n" + footerHint)
+	}
+
+	// Multi-Candidate Tournament (/tournament):
+	if strings.HasPrefix(msg, "TOURNAMENT:\n") {
+		body := strings.TrimPrefix(msg, "TOURNAMENT:\n")
+		task, content, _ := strings.Cut(body, "\n---\n")
+
+		tournCardStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color("220")).Padding(0, 1)
+		if width > 0 {
+			tournCardStyle = tournCardStyle.Width(width)
+		}
+		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+
+		wrap := width - 6
+		if wrap < 30 {
+			wrap = 30
+		}
+		renderedTourn := renderMarkdown(strings.TrimSpace(content), wrap)
+		header := labelStyle.Render("🏆 MULTI-CANDIDATE TOURNAMENT") + "  " + dimStyle.Render("(\""+truncatePrompt(task)+"\")")
+
+		return tournCardStyle.Render(header + "\n\n" + renderedTourn)
+	}
 
 	if strings.HasPrefix(msg, "PROCESS:\n") {
 		content := strings.TrimPrefix(msg, "PROCESS:\n")
