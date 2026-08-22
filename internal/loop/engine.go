@@ -3173,7 +3173,19 @@ func (e *Engine) fitMessages(sysPrompt string) []provider.Message {
 		total += c
 		start = i
 	}
-	return msgs[start:]
+	res := msgs[start:]
+	if len(res) > 0 {
+		// Hard safety net: ensure newest message does not exceed budget on its own
+		lastIdx := len(res) - 1
+		lastTokens := bcontext.EstimateTokens(res[lastIdx].Content)
+		if lastTokens > budget && budget > 500 {
+			maxChars := budget * 3
+			if len(res[lastIdx].Content) > maxChars {
+				res[lastIdx].Content = res[lastIdx].Content[:maxChars] + "\n\n[truncated for provider context window limit]"
+			}
+		}
+	}
+	return res
 }
 
 // completeTurn runs a completion through the adaptive router. It returns the

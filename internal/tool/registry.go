@@ -1304,6 +1304,11 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		return "", err
 	}
 
+	pat := strings.TrimSpace(args.Pattern)
+	if pat == "." || pat == ".*" || pat == "" {
+		return "Error: grep pattern is too broad (matches every character). Please specify a concrete keyword, function name, or symbol (e.g. 'subscription', 'authenticate', 'handleWebhook').", nil
+	}
+
 	if args.Path == "" {
 		args.Path = "."
 	}
@@ -1388,6 +1393,12 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		}
 		toolResultCache.Put("grep", grepKey, "No matches found.", "global")
 		return "No matches found.", nil
+	}
+
+	for i := range lines {
+		if len(lines[i]) > 250 {
+			lines[i] = lines[i][:250] + "… [line truncated]"
+		}
 	}
 
 	if len(lines) > 50 {

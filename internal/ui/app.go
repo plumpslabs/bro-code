@@ -2400,6 +2400,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.appendMessages("⚠️ Subagent runner is not initialized for /ask.")
 			return m, nil
 		}
+		m.appendMessages("CMD:/ask\n" + query)
 		m.status = fmt.Sprintf("Answering: %s...", truncatePrompt(query))
 		m.turnStart = time.Now()
 		runner := m.scoutMgr.Runner
@@ -2440,6 +2441,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.appendMessages("⚠️ Subagent runner is not initialized for /spec.")
 			return m, nil
 		}
+		m.appendMessages("CMD:/spec\n" + feature)
 		m.status = fmt.Sprintf("Drafting spec: %s...", truncatePrompt(feature))
 		m.turnStart = time.Now()
 		return m, executeSpecCommand(m.scoutMgr.Runner, feature, m.prog)
@@ -2454,6 +2456,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.appendMessages("⚠️ Subagent runner is not initialized for /tournament.")
 			return m, nil
 		}
+		m.appendMessages("CMD:/tournament\n" + task)
 		m.status = fmt.Sprintf("Running tournament: %s...", truncatePrompt(task))
 		m.turnStart = time.Now()
 		return m, executeTournamentCommand(m.scoutMgr.Runner, task, m.prog)
@@ -4327,6 +4330,28 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 	if strings.HasPrefix(msg, "YOU:\n") || strings.HasPrefix(msg, "👤 ") {
 		content := strings.TrimPrefix(strings.TrimPrefix(msg, "YOU:\n"), "👤 ")
 		return userBarStyle.Render(userLabelStyle.Render("YOU") + "\n" + content)
+	}
+
+	if strings.HasPrefix(msg, "CMD:") {
+		line, content, _ := strings.Cut(msg, "\n")
+		cmdName := strings.TrimPrefix(line, "CMD:")
+
+		color := "86" // default cyan
+		switch cmdName {
+		case "/spec":
+			color = "141" // purple
+		case "/tournament":
+			color = "220" // gold
+		case "/ask":
+			color = "39" // bright sky blue
+		}
+
+		cmdLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true)
+		cmdBarStyle := lipgloss.NewStyle().Border(lipgloss.ThickBorder(), false, false, false, true).BorderForeground(lipgloss.Color(color)).Padding(1, 2)
+		if width > 0 {
+			cmdBarStyle = cmdBarStyle.Width(width)
+		}
+		return cmdBarStyle.Render(cmdLabelStyle.Render("YOU ("+cmdName+")") + "\n" + content)
 	}
 
 	// File-change summary (see tool.FileChangesMessage): compact per-file rows

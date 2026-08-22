@@ -632,13 +632,23 @@ func (m *Manager) Compact(summary CompactionSummary) error {
 // BOTH ends — the head (what the run printed first) and the tail (where test
 // failures and stack traces live) — so the repair loop still sees the error
 // without carrying the full dump. The full output is preserved on disk by the
-// engine's artifact pointer (internal/loop/artifacts.go) when available.
+// TruncateToolOutput limits the length of raw tool outputs before appending to context.
+// It guarantees the returned string NEVER exceeds maxChars.
 func TruncateToolOutput(content string, maxChars int) string {
+	if maxChars <= 0 {
+		maxChars = maxToolResultContextChars
+	}
 	if len(content) <= maxChars {
 		return content
 	}
 	lines := strings.Split(content, "\n")
 	if len(lines) > 50 {
+		// Truncate long lines so minified files or long single lines don't explode memory
+		for i := range lines {
+			if len(lines[i]) > 300 {
+				lines[i] = lines[i][:300] + "…"
+			}
+		}
 		head := strings.Join(lines[:40], "\n")
 		tail := strings.Join(lines[len(lines)-40:], "\n")
 		return fmt.Sprintf("%s\n\n… [showing top 40/bottom 40 of %d lines — %d lines elided; full output is on disk via the artifact pointer if present] …\n\n%s", head, len(lines), len(lines)-80, tail)
