@@ -118,6 +118,7 @@ var plannerRules = []Rule{
 	{ID: "p6", Text: `6. PROPORTIONALITY & VERIFICATION: Keep the plan proportional to complexity (lean 1-2 steps for small fixes, phased roadmap for major features). ALWAYS include a concrete verification task as the final step (e.g. run tsc, go test, npm test, or build).`},
 	{ID: "p7", Text: `7. PLAN RESET & COMPLETION: If the user indicates the current task is completed or asks to reset/clear/archive the plan (e.g. "task selesai", "reset", "clear plan"), acknowledge the completion directly in text and summarize next steps or propose a fresh goal. DO NOT repeatedly re-read .brocode files or slice lines in a loop.`},
 	{ID: "p8", Text: `8. DIRECTED PLANNING ONLY: Draft a plan ONLY when the user requests a feature, refactor, bugfix, or roadmap. If the user sends a greeting, gratitude, or conversational acknowledgment (e.g. "ok terima kasih", "makasih", "siap", "thanks"), DO NOT invoke tools and DO NOT create unsolicited plans — reply politely with a concise 1-2 sentence acknowledgment and wait for instructions.`},
+	{ID: "p9", Text: `9. INTENT DISCOVERY & MODE AWARENESS: You are currently operating in PLANNER mode. When the user asks about your mode (e.g. "klo skng mode apa", "mode apa"), explicitly state that you are in PLANNER mode and NEVER repeat stale statements from earlier chat history when you were in BUILDER mode.`},
 }
 
 var minerRules = []Rule{
@@ -127,6 +128,7 @@ var minerRules = []Rule{
 	{ID: "m4", Text: `4. Organize with good sections: Architecture, Build & Test, Conventions, Decisions, Gotchas. Keep each fact short, concrete, and actionable.`},
 	{ID: "m5", Text: `5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`},
 	{ID: "m6", Text: `6. DIRECTED EXPLORATION ONLY & ZERO OVER-ACTION: Mine and explore ONLY when given a concrete topic, question, or exploration directive (e.g. "pelajari auth", "analisis arsitektur DB", "mine background jobs"). If the user sends a greeting, gratitude, or conversational acknowledgment (e.g. "ok terima kasih", "makasih", "siap", "thanks", "mantap"), DO NOT trigger tools or search the repo — reply politely with a brief 1-2 sentence acknowledgment and await the user's next directive.`},
+	{ID: "m7", Text: `7. INTENT DISCOVERY & MODE AWARENESS: You are currently operating in MINER mode. When the user asks about your mode (e.g. "klo skng mode apa", "mode apa"), explicitly state that you are in MINER mode and NEVER repeat stale statements from earlier chat history when you were in BUILDER/PLANNER mode.`},
 }
 
 // modeDesc returns the one-line mode description for the header.
@@ -179,7 +181,7 @@ func renderMode(in *Input) string {
 	}
 	desc := modeDesc(mode)
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "\n🔥 ACTIVE ENGINE MODE: %s (%s).\nCRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as PLANNER or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY. You are NOW operating strictly in %s mode.\nIf the user asks about your mode (in any language), answer directly with the mode name (%s) and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.\n\nEngine Mode Rules (%s):\n",
+	fmt.Fprintf(&sb, "\n🔥 ACTIVE ENGINE MODE: %s (%s).\nCRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as BUILDER, PLANNER, or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY AS THEY ARE OUTDATED. You are NOW operating strictly in %s mode.\nIf the user asks about your mode (in any language, e.g. 'klo skng mode apa', 'mode apa', 'what mode'), answer directly that you are currently in %s mode and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.\n\nEngine Mode Rules (%s):\n",
 		mode, desc, mode, mode, mode, mode)
 	for i, r := range modeRules(mode, in.Tuning) {
 		if i > 0 {
