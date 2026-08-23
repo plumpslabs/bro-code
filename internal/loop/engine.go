@@ -3419,6 +3419,31 @@ func formatToolCallInfo(name, argsJSON string) string {
 			}
 			return fmt.Sprintf("📖 read_file %s", shortenPath(path))
 		}
+		if name == "doc_lookup" {
+			lib, _ := m["library"].(string)
+			query, _ := m["query"].(string)
+			if query != "" {
+				if len(query) > 30 {
+					query = query[:27] + "…"
+				}
+				return fmt.Sprintf("📚 doc_lookup %s (%s)", lib, query)
+			}
+			return fmt.Sprintf("📚 doc_lookup %s", lib)
+		}
+		if name == "web_search" {
+			query, _ := m["query"].(string)
+			if len(query) > 40 {
+				query = query[:37] + "…"
+			}
+			return fmt.Sprintf("🌐 web_search %s", query)
+		}
+		if name == "fetch_url" {
+			rawURL, _ := m["url"].(string)
+			if len(rawURL) > 40 {
+				rawURL = rawURL[:37] + "…"
+			}
+			return fmt.Sprintf("🌐 fetch_url %s", rawURL)
+		}
 		if path, ok := m["path"].(string); ok && path != "" {
 			return fmt.Sprintf("🔧 %s %s", name, shortenPath(path))
 		}

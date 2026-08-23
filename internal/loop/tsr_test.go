@@ -520,3 +520,23 @@ func TestVerifyErrorSignature(t *testing.T) {
 		t.Error("expected different errors to differ")
 	}
 }
+
+func TestFormatToolCallInfoResearch(t *testing.T) {
+	// 1. doc_lookup
+	res := formatToolCallInfo("doc_lookup", `{"library": "nextjs", "query": "routing"}`)
+	if !strings.Contains(res, "📚 doc_lookup nextjs (routing)") {
+		t.Fatalf("unexpected doc_lookup formatting: %s", res)
+	}
+
+	// 2. web_search
+	res = formatToolCallInfo("web_search", `{"query": "fastapi cors"}`)
+	if !strings.Contains(res, "🌐 web_search fastapi cors") {
+		t.Fatalf("unexpected web_search formatting: %s", res)
+	}
+
+	// 3. fetch_url
+	res = formatToolCallInfo("fetch_url", `{"url": "https://example.com/docs"}`)
+	if !strings.Contains(res, "🌐 fetch_url https://example.com/docs") {
+		t.Fatalf("unexpected fetch_url formatting: %s", res)
+	}
+}
