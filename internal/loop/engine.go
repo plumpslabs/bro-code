@@ -356,6 +356,9 @@ type Engine struct {
 	// symbolsProvider optionally returns defined symbols across the project
 	// for DRY reuse checking.
 	symbolsProvider func() map[string]map[string]bool
+	// researchCache caches identical doc_lookup, web_search, and fetch_url
+	// queries within the turn to prevent wasteful re-queries.
+	researchCache map[string]string
 	// reproGateArmed is true when the current task looks like a bug fix (the
 	// user query carried a failure signal). While armed and no repro is
 	// established, write/edit/delete calls are gated behind a TSR REPRODUCE
@@ -664,7 +667,7 @@ const maxParallelReadOnlyTools = 4
 // effects and user prompts keep their order.
 func isParallelReadOnly(name string) bool {
 	switch name {
-	case "read_file", "list_dir", "grep", "glob", "search_code", "fetch_url", "web_search":
+	case "read_file", "list_dir", "grep", "glob", "search_code", "fetch_url", "web_search", "doc_lookup":
 		return true
 	}
 	return false
@@ -1084,6 +1087,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.artifactSeq = 0
 	e.loadedSkills = map[string]bool{}
 	e.skillDirs = map[string]string{}
+	e.researchCache = map[string]string{}
 	e.turnUsedTools = false
 	e.applyModePolicy()
 	// Reset the turn's recorded file changes so the review complexity gate and
@@ -1835,10 +1839,19 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 				}
 
-				// Marginal Information Gain Guard: Prevent over-searching and infinite web research loops
-				if tc.Name == "web_search" || tc.Name == "fetch_url" {
+				// Research Query Deduplication & Marginal Information Gain Guard:
+				if tc.Name == "web_search" || tc.Name == "fetch_url" || tc.Name == "doc_lookup" {
+					sig := tc.Name + ":" + strings.TrimSpace(tc.Arguments)
+					if prev, ok := e.researchCache[sig]; ok {
+						cachedMsg := fmt.Sprintf("💡 [QUERY CACHED]: You already fetched '%s' in this turn. Using cached findings:\n\n%s", formatToolCallInfo(tc.Name, tc.Arguments), prev)
+						if onUpdate != nil {
+							onUpdate(e.state, "💡 Reusing cached research result for "+formatToolCallInfo(tc.Name, tc.Arguments))
+						}
+						pending[i] = pendingTool{tc: tc, output: cachedMsg}
+						continue
+					}
 					if callCount >= 3 {
-						infoGuard := fmt.Sprintf("💡 [INFORMATION SATURATION]: You have performed %d web searches/fetches in this turn. You have accumulated sufficient context. Stop querying external sources and proceed directly to synthesizing your technical answer or implementing the required code.", callCount)
+						infoGuard := fmt.Sprintf("💡 [INFORMATION SATURATION]: You have performed %d web searches/docs lookups in this turn. You have accumulated sufficient context. Stop querying external sources and proceed directly to synthesizing your technical answer or implementing the required code.", callCount)
 						if onUpdate != nil {
 							onUpdate(e.state, "💡 Information saturation reached — instructing model to synthesize")
 						}
@@ -1941,6 +1954,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}(i)
 				}
 				wg.Wait()
+				for i := range pending {
+					if pending[i].tc.Name == "web_search" || pending[i].tc.Name == "fetch_url" || pending[i].tc.Name == "doc_lookup" {
+						sig := pending[i].tc.Name + ":" + strings.TrimSpace(pending[i].tc.Arguments)
+						if pending[i].output != "" {
+							e.researchCache[sig] = pending[i].output
+						}
+					}
+				}
 				if ctx.Err() != nil {
 					return "", ctx.Err()
 				}
