@@ -717,22 +717,38 @@ func NewApp(
 	styles := ti.Styles()
 	styles.Focused = clean
 	styles.Blurred = clean
-	// Themed block cursor (teal, matching the ❯ prompt) instead of default white.
+	// Themed solid block cursor (teal, matching the ❯ prompt) instead of default white.
+	// Blink is disabled so the cursor never vanishes during timer desyncs or on Windows/Linux ConPTY.
 	styles.Cursor.Color = lipgloss.Color("86")
+	styles.Cursor.Shape = tea.CursorBlock
+	styles.Cursor.Blink = false
 	ti.SetStyles(styles)
+	ti.SetVirtualCursor(true)
 	ti.Focus()
+
+	applyInputCursorStyle := func(inp *textinput.Model) {
+		inp.SetVirtualCursor(true)
+		st := inp.Styles()
+		st.Cursor.Color = lipgloss.Color("86")
+		st.Cursor.Shape = tea.CursorBlock
+		st.Cursor.Blink = false
+		inp.SetStyles(st)
+	}
 
 	cti := textinput.New()
 	cti.Placeholder = "Paste or type API Key here (leave empty if none)..."
 	cti.Prompt = ""
+	applyInputCursorStyle(&cti)
 
 	cni := textinput.New()
 	cni.Placeholder = "e.g. my-gateway, local-ai..."
 	cni.Prompt = ""
+	applyInputCursorStyle(&cni)
 
 	cbi := textinput.New()
 	cbi.Placeholder = "e.g. https://api.my-gateway.example/v1"
 	cbi.Prompt = ""
+	applyInputCursorStyle(&cbi)
 
 	cmi := textarea.New()
 	cmi.Placeholder = "Optional: JSON models block, e.g.\n{\"model-a\":{\"name\":\"Model A\",\"limit\":{\"context\":1048576,\"output\":32768}}}\n(outer braces optional — a bare key:value list also works)\n\nOr a plain JSON array: [\"model-a\", \"model-b\"]"
@@ -752,22 +768,30 @@ func NewApp(
 	cmStyles := cmi.Styles()
 	cmStyles.Focused = cleanCM
 	cmStyles.Blurred = cleanCM
+	cmStyles.Cursor.Color = lipgloss.Color("86")
+	cmStyles.Cursor.Shape = tea.CursorBlock
+	cmStyles.Cursor.Blink = false
 	cmi.SetStyles(cmStyles)
+	cmi.SetVirtualCursor(true)
 
 	aci := textinput.New()
 	aci.Placeholder = "Type your custom answer..."
 	aci.Prompt = ""
+	applyInputCursorStyle(&aci)
 
 	// MCP add-wizard inputs (clean, un-focused by default).
 	mcpName := textinput.New()
 	mcpName.Placeholder = "e.g. github, filesystem, my-tools..."
 	mcpName.Prompt = ""
+	applyInputCursorStyle(&mcpName)
 	mcpCmd := textinput.New()
 	mcpCmd.Placeholder = "e.g. npx -y @modelcontextprotocol/server-github"
 	mcpCmd.Prompt = ""
+	applyInputCursorStyle(&mcpCmd)
 	mcpURL := textinput.New()
 	mcpURL.Placeholder = "e.g. https://mcp.notion.com/mcp"
 	mcpURL.Prompt = ""
+	applyInputCursorStyle(&mcpURL)
 
 	brk := newAskBroker()
 	if askTool, ok := tools.Lookup("ask_user").(*tool.AskUserTool); ok {
@@ -2422,7 +2446,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		cmds = append(cmds, cmd)
-	} else if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk {
+	} else if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk && !m.showFileConfirm {
+		if !m.promptInput.Focused() {
+			cmds = append(cmds, m.promptInput.Focus())
+		}
 		var cmd tea.Cmd
 		m.promptInput, cmd = m.promptInput.Update(msg)
 		cmds = append(cmds, cmd)
