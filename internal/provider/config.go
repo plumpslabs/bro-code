@@ -564,10 +564,37 @@ func ParseModelJSON(input string) ([]string, map[string]CustomModel, error) {
 }
 
 // SaveGlobalConfig saves config to global path (~/.config/brocode/config.json)
-// safely. Duplicate providers (same base URL) are pruned first so imported
-// opencode providers that were persisted by an older build self-clean on the
-// next save.
+// safely with field preservation: search/context7 keys on disk are never
+// clobbered by partial in-memory configs.
 func SaveGlobalConfig(cfg AppConfig) error {
+	p := GlobalConfigPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		return err
+	}
+
+	// Preservation safeguard: merge non-empty disk properties if cfg has them empty
+	// (prevents model/provider switch operations from accidentally overwriting search/docs keys).
+	if raw, err := os.ReadFile(p); err == nil {
+		var disk AppConfig
+		if json.Unmarshal([]byte(stripJSONComments(string(raw))), &disk) == nil {
+			if cfg.SearchKey == "" && disk.SearchKey != "" {
+				cfg.SearchKey = disk.SearchKey
+				cfg.SearchProvider = disk.SearchProvider
+			}
+			if cfg.Context7Key == "" && disk.Context7Key != "" {
+				cfg.Context7Key = disk.Context7Key
+			}
+			if cfg.FallbackPolicy == "" && disk.FallbackPolicy != "" {
+				cfg.FallbackPolicy = disk.FallbackPolicy
+			}
+		}
+	}
+
+	return writeGlobalConfigDirect(cfg)
+}
+
+// writeGlobalConfigDirect writes cfg directly to ~/.config/brocode/config.json.
+func writeGlobalConfigDirect(cfg AppConfig) error {
 	p := GlobalConfigPath()
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		return err
@@ -715,7 +742,7 @@ func SaveSearchProviderKey(providerName, key string) error {
 	if providerName == "clear" || providerName == "reset" || providerName == "delete" || key == "clear" || key == "delete" || (providerName == "" && key == "") {
 		cfg.SearchKey = ""
 		cfg.SearchProvider = ""
-		return SaveGlobalConfig(cfg)
+		return writeGlobalConfigDirect(cfg)
 	}
 
 	if providerName == "" {
@@ -730,7 +757,7 @@ func SaveSearchProviderKey(providerName, key string) error {
 
 	cfg.SearchKey = key
 	cfg.SearchProvider = providerName
-	return SaveGlobalConfig(cfg)
+	return writeGlobalConfigDirect(cfg)
 }
 
 // GetActiveContext7Key retrieves the active Context7 API key.
@@ -754,5 +781,5 @@ func SaveContext7Key(key string) error {
 	} else {
 		cfg.Context7Key = key
 	}
-	return SaveGlobalConfig(cfg)
+	return writeGlobalConfigDirect(cfg)
 }

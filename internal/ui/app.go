@@ -2769,6 +2769,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		lower := strings.ToLower(arg)
 		if lower == "clear" || lower == "reset" || lower == "delete" || lower == "remove" {
 			_ = provider.SaveSearchKey("")
+			m.cfg = provider.LoadConfig()
 			m.appendNote("SEARCH:\n🧹 **Search Key Cleared & Removed!**\n\nBroCode has switched to **Zero-Config Free Search Mode** (`🌐:Free`).")
 			return m, nil
 		}
@@ -2785,6 +2786,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.appendNote(fmt.Sprintf("SEARCH:\n❌ Failed to save search key: %v", err))
 			return m, nil
 		}
+		m.cfg = provider.LoadConfig()
 		_, activeProv := provider.GetActiveSearchKey()
 		if activeProv == "" {
 			activeProv = "tavily"
@@ -2811,6 +2813,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		lower := strings.ToLower(arg)
 		if lower == "clear" || lower == "reset" || lower == "delete" || lower == "remove" {
 			_ = provider.SaveContext7Key("")
+			m.cfg = provider.LoadConfig()
 			m.appendNote("CONTEXT7:\n🧹 **Context7 API Key Cleared & Removed!**\n\nBroCode documentation lookup will fall back to Web Search.")
 			return m, nil
 		}
@@ -2819,6 +2822,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.appendNote(fmt.Sprintf("CONTEXT7:\n❌ Failed to save Context7 API key: %v", err))
 			return m, nil
 		}
+		m.cfg = provider.LoadConfig()
 		m.appendNote("CONTEXT7:\n✅ **Context7 API Key Configured Successfully!**\n\n• **Mode**: Native High-Speed REST Client (Zero Node.js overhead)\n• **Status**: Active & Persisted to `~/.config/brocode/config.json`\n• **Tool**: `doc_lookup` (Automatic 3-Tier Docs Cascade)\n\nBroCode is now ready to query official documentation directly!")
 		return m, nil
 
@@ -3750,6 +3754,7 @@ func (m *Model) saveCustomProvider() {
 
 // saveProviderConfig writes a provider into the global config and switches to it.
 func (m *Model) saveProviderConfig(pID string, info provider.ProviderInfo, keyVal, baseURL string, modelIDs []string, modelMap map[string]provider.CustomModel) {
+	m.cfg = provider.LoadConfig()
 	if m.cfg.Providers == nil {
 		m.cfg.Providers = make(map[string]provider.CustomProviderConfig)
 	}
@@ -3813,6 +3818,7 @@ func (m *Model) getModelList() []modelOptionItem {
 }
 
 func (m *Model) switchProviderAndModel(pID, modelName string) {
+	m.cfg = provider.LoadConfig()
 	detected := provider.AutoDetect(m.cfg)
 	for _, d := range detected {
 		if d.Info.ID == pID {
