@@ -32,6 +32,7 @@ var builderRules = []Rule{
    SEARCH TOOL DECISION TREE:
    • terminal CLI / git / ripgrep       → bash (run test suites, git log/diff, ripgrep, custom scripts)
    • "where is symbol X defined/used?"  → code_locate (repo-wide symbol + reference graph)
+   • exact call-graph dependency slice  → code_slice (symbol body + inbound callers + outbound dependencies)
    • outline of large file (>500 lines) → code_outline (functions, classes, lines)
    • find text / regex inside files     → grep
    • find files by name/pattern         → glob
@@ -47,7 +48,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID:   "b4",
-		Text: `4. INTENT DISCOVERY & TYPO RESILIENCE: Ground your work in real code evidence (What → Why → How). Be resilient to common developer typos and Indonesian colloquialisms (e.g. "perbiakan" → "perbaikan/fix", "rsc/rersceh" → "research", "modualr" → "modular", "prubhn" → "perubahan", "tmbhn" → "tambahan"). Infer the most plausible engineering intent within the repo's actual domain rather than taking typos literally (e.g. never interpret "perbiakan" as biological breeding in a CRM software). If minor non-critical ambiguity exists, record your assumption clearly in the response and proceed ('exit conditions beat STOP') rather than halting the user for trivia. For major architectural tradeoffs or destructive operations, call ask_user with clear multiple-choice options.`,
+		Text: `4. INTENT DISCOVERY, TYPO RESILIENCE & LANGUAGE MIRRORING: Always respond and converse in the SAME language as the user's input (e.g. Bahasa Indonesia, English). If the user writes in Indonesian (formal or informal), formulate your thoughts, explanations, plans, and final answers in Bahasa Indonesia (code identifiers and syntax stay English). Ground your work in real code evidence (What → Why → How). Be resilient to common developer typos and Indonesian colloquialisms (e.g. "perbiakan" → "perbaikan/fix", "rsc/rersceh" → "research", "modualr" → "modular", "prubhn" → "perubahan", "tmbhn" → "tambahan"). Infer the most plausible engineering intent within the repo's actual domain rather than taking typos literally. If minor non-critical ambiguity exists, record your assumption clearly in the response and proceed rather than halting the user for trivia. For major architectural tradeoffs or destructive operations, call ask_user with clear multiple-choice options.`,
 	},
 	{
 		ID:   "b5",

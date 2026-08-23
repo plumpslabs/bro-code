@@ -82,6 +82,8 @@ type Input struct {
 	PlanMode bool
 	// ActivePlan carries the active task plan from .brocode/current_plan.md.
 	ActivePlan string
+	// AgentPrompt carries custom instructions from an active user-defined CustomAgent.
+	AgentPrompt string
 	// Tuning carries the runtime surface (block toggles, rule toggles, skill
 	// catalog budgets). Nil falls back to DefaultTuning.
 	Tuning *Tuning
@@ -147,6 +149,8 @@ func blocks(_ *Input) []Block {
 		{Name: "preflight_autofix", Render: renderPreflightAuto},
 		{Name: "active_plan", Render: renderActivePlan},
 		{Name: "plan_mode", Render: renderPlanMode},
+		// L0 — custom agent instructions (if active).
+		{Name: "custom_agent", Render: renderCustomAgent},
 		// L0 — universal contract: mode header + tunable mode rules.
 		{Name: "mode", Always: true, Render: renderMode},
 	}
@@ -249,5 +253,15 @@ func renderActivePlan(in *Input) string {
 	if strings.TrimSpace(in.ActivePlan) == "" {
 		return ""
 	}
-	return "\n\n🎯 ACTIVE TASK PLAN (.brocode/current_plan.md):\nYou are executing this plan. Confine your work strictly to these tasks and impacted files:\n" + strings.TrimSpace(in.ActivePlan)
+	if in.Mode == "PLANNER" {
+		return "\n\n📋 EXISTING PLAN IN WORKSPACE (.brocode/current_plan.md):\n" + strings.TrimSpace(in.ActivePlan) + "\n(If the user's request is a continuation, refine or extend this plan. If the user is starting a new unrelated task or bugfix, output the fresh plan and BroCode will automatically archive this previous plan to .brocode/plans/archive/)."
+	}
+	return "\n\n🎯 ACTIVE TASK PLAN (.brocode/current_plan.md):\nYou are executing this plan. Confine your work strictly to these tasks and impacted files. BroCode automatically tracks file edits and checks off completed tasks in .brocode/current_plan.md:\n" + strings.TrimSpace(in.ActivePlan)
+}
+
+func renderCustomAgent(in *Input) string {
+	if strings.TrimSpace(in.AgentPrompt) == "" {
+		return ""
+	}
+	return "\n\n### 🤖 CUSTOM AGENT SPECIFICATION & DIRECTIVES:\n" + strings.TrimSpace(in.AgentPrompt)
 }

@@ -1529,5 +1529,53 @@ func TestEphemeralAskSlashCommand(t *testing.T) {
 	}
 }
 
+func TestClearInputShortcuts(t *testing.T) {
+	m := newTestApp()
 
+	// 1. Ctrl+U clears the input bar
+	m.promptInput.SetValue("some long prompt typed by user")
+	m.Update(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+	if m.promptInput.Value() != "" {
+		t.Fatalf("Ctrl+U should clear promptInput, got %q", m.promptInput.Value())
+	}
 
+	// 2. Esc clears the input bar when not running a turn
+	m.promptInput.SetValue("another prompt draft")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.promptInput.Value() != "" {
+		t.Fatalf("Esc should clear promptInput, got %q", m.promptInput.Value())
+	}
+
+	// 3. Alt+Backspace / Ctrl+Backspace clears the input bar
+	m.promptInput.SetValue("windows / mac shortcut test")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace, Mod: tea.ModAlt})
+	if m.promptInput.Value() != "" {
+		t.Fatalf("Alt+Backspace should clear promptInput, got %q", m.promptInput.Value())
+	}
+}
+
+func TestNormalizeEmojiSpacing(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"⚠️ Same-command loop detected", "⚠️ Same-command loop detected"},
+		{"⚠️  Final warning", "⚠️ Final warning"},
+		{"🧠 Turn 10/25 reasoning...", "🧠 Turn 10/25 reasoning..."},
+		{"🧠  Turn 23/25", "🧠 Turn 23/25"},
+		{"🧠 Thinking & analyzing request...", "🧠 Thinking & analyzing request..."},
+		{"⏳ poolside/laguna-s-2", "⏳ poolside/laguna-s-2"},
+		{"📖  read_file src/app.ts", "📖 read_file src/app.ts"},
+		{"📖 read_file src/app.ts", "📖 read_file src/app.ts"},
+		{"🔧  edit_file src/main.go", "🔧 edit_file src/main.go"},
+		{"⚙️  bash npm test", "⚙️ bash npm test"},
+		{"Plain text with no emoji", "Plain text with no emoji"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		got := normalizeEmojiSpacing(tc.input)
+		if got != tc.want {
+			t.Errorf("normalizeEmojiSpacing(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}

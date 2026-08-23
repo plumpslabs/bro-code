@@ -52,6 +52,12 @@ type Runner struct {
 	Ask func(question string, options []string) (string, error)
 	// ContextWindow is the token limit for sub-agent contexts. 0 defaults to 128k.
 	ContextWindow int
+	// StreamHandler receives live token stream deltas from the sub-agent engine
+	// so the UI can render smooth real-time typing instead of blocking.
+	StreamHandler func(delta string)
+	// UsageTracker, when set, merges sub-agent token and cost accounting into
+	// the main session's /cost tracker for full transparency.
+	UsageTracker *loop.UsageTracker
 }
 
 // SubAgent is a single delegated task.
@@ -115,6 +121,12 @@ func (r *Runner) runOneResult(ctx context.Context, id, task, mode, targetDir, mo
 	if r.BudgetUSD > 0 {
 		eng.SetBudgetUSD(r.BudgetUSD)
 	}
+	if r.StreamHandler != nil {
+		eng.SetStreamHandler(r.StreamHandler)
+	}
+	if r.UsageTracker != nil {
+		eng.SetUsageTracker(r.UsageTracker)
+	}
 
 	// One turn with a focused directive. The loop guard, tool budget and
 	// verification ladder all apply inside the sub-loop as well.
@@ -140,6 +152,14 @@ func (r *Runner) RunWithProgress(ctx context.Context, task, mode string, onUpdat
 		mode = "BUILDER"
 	}
 	return r.runOne(ctx, "1", task, mode, "", "", onUpdate)
+}
+
+// RunWithProgressMetrics executes a single sub-agent with progress and returns full RunMetrics.
+func (r *Runner) RunWithProgressMetrics(ctx context.Context, task, mode string, onUpdate loop.TurnOutputHandler) (RunMetrics, error) {
+	if mode == "" {
+		mode = "BUILDER"
+	}
+	return r.runOneResult(ctx, "1", task, mode, "", "", onUpdate)
 }
 
 // RunMany executes the given tasks — concurrently when parallel is true,
@@ -185,7 +205,20 @@ func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, 
 			}
 			return
 		}
-		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, agents[i].Mode, agents[i].TargetDir, "", onUpdate)
+		// Wrap onUpdate with a concise agent tag so parallel runs are transparent
+		agentUpdate := onUpdate
+		if onUpdate != nil && len(agents) > 1 {
+			prefix := fmt.Sprintf("[%s]", id)
+			if strings.Contains(id, "Alpha") {
+				prefix = "[Alpha]"
+			} else if strings.Contains(id, "Beta") {
+				prefix = "[Beta]"
+			}
+			agentUpdate = func(state loop.LoopState, info string) {
+				onUpdate(state, prefix+" "+info)
+			}
+		}
+		results[i], errs[i] = r.runOne(ctx, id, agents[i].Task, agents[i].Mode, agents[i].TargetDir, "", agentUpdate)
 		if onUpdate != nil {
 			status := "DONE"
 			if errs[i] != nil {
@@ -230,6 +263,91 @@ func (r *Runner) RunMany(ctx context.Context, agents []SubAgent, parallel bool, 
 		reports = append(reports, sb.String())
 	}
 	return reports, nil
+}
+
+// RunManyMetrics executes the given tasks and returns detailed RunMetrics per task.
+func (r *Runner) RunManyMetrics(ctx context.Context, agents []SubAgent, parallel bool, onUpdate loop.TurnOutputHandler) ([]RunMetrics, error) {
+	if len(agents) == 0 {
+		return nil, fmt.Errorf("no sub-agent tasks provided")
+	}
+
+	mutating := false
+	for _, a := range agents {
+		if a.Mutates {
+			mutating = true
+			break
+		}
+	}
+	allowed := !mutating
+	if mutating && r.Ask != nil {
+		ans, err := r.Ask("Parallel sub-agents include MUTATING tasks (write/delete/exec). Approve them?", []string{"yes", "no"})
+		if err == nil && strings.EqualFold(strings.TrimSpace(ans), "yes") {
+			allowed = true
+		}
+	}
+
+	results := make([]RunMetrics, len(agents))
+	errs := make([]error, len(agents))
+
+	run := func(i int) {
+		id := agents[i].ID
+		if id == "" {
+			id = fmt.Sprintf("%d", i+1)
+		}
+		if agents[i].Mutates && !allowed {
+			errs[i] = fmt.Errorf("sub-agent %q is mutating and was not approved by the user", id)
+			if onUpdate != nil {
+				onUpdate(loop.StateBlocked, fmt.Sprintf("🤖 Sub-agent %s DENIED (mutating, not confirmed)", id))
+			}
+			return
+		}
+		agentUpdate := onUpdate
+		if onUpdate != nil && len(agents) > 1 {
+			prefix := fmt.Sprintf("[%s]", id)
+			if strings.Contains(id, "Alpha") {
+				prefix = "[Alpha]"
+			} else if strings.Contains(id, "Beta") {
+				prefix = "[Beta]"
+			}
+			agentUpdate = func(state loop.LoopState, info string) {
+				onUpdate(state, prefix+" "+info)
+			}
+		}
+		results[i], errs[i] = r.runOneResult(ctx, id, agents[i].Task, agents[i].Mode, agents[i].TargetDir, "", agentUpdate)
+		if onUpdate != nil {
+			status := "DONE"
+			if errs[i] != nil {
+				status = "FAILED"
+			}
+			onUpdate(loop.StateObserving, fmt.Sprintf("🤖 Sub-agent %s %s", id, status))
+		}
+	}
+
+	if parallel && len(agents) > 1 {
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, 3)
+		for i := range agents {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				run(i)
+			}(i)
+		}
+		wg.Wait()
+	} else {
+		for i := range agents {
+			run(i)
+		}
+	}
+
+	for i := range agents {
+		if errs[i] != nil {
+			results[i].Answer = fmt.Sprintf("**Status:** FAILED\n%v", errs[i])
+		}
+	}
+	return results, nil
 }
 
 // Merge combines per-sub-agent reports into one concise, de-duplicated summary.

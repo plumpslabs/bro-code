@@ -99,9 +99,30 @@ func fileSHA256(path string) string {
 	return sha256Hex(data)
 }
 
-// EnsureDefaultsInstalled materializes the embedded default pack into
-// workspaceDir/.brocode/skills/<name>/SKILL.md and keeps them in sync with the
-// binary's pack across upgrades:
+// GlobalSkillsDir returns the default user-level skills directory (~/.config/brocode/skills).
+func GlobalSkillsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "brocode", "skills")
+}
+
+// EnsureGlobalDefaultsInstalled materializes the embedded default pack into
+// ~/.config/brocode/skills/<name>/SKILL.md (the user's global config root)
+// so all repositories on this machine have access to up-to-date default skills
+// without polluting each individual repository with a .brocode/skills/ folder.
+func EnsureGlobalDefaultsInstalled() int {
+	dir := GlobalSkillsDir()
+	if dir == "" {
+		return 0
+	}
+	return EnsureDefaultsInstalled(dir)
+}
+
+// EnsureDefaultsInstalled materializes the embedded default pack into the given
+// directory (either global ~/.config/brocode/skills or a specific test directory)
+// and keeps them in sync with the binary's pack across upgrades:
 //
 //   - Missing skill        → installed (counted).
 //   - Installed, untouched → upgraded in place when the embedded version is
@@ -114,11 +135,19 @@ func fileSHA256(path string) string {
 //
 // Best-effort: a failure to write never breaks a session (the catalog just
 // shows fewer entries).
-func EnsureDefaultsInstalled(workspaceDir string) int {
-	if workspaceDir == "" {
+func EnsureDefaultsInstalled(targetDir string) int {
+	if targetDir == "" {
+		targetDir = GlobalSkillsDir()
+	}
+	if targetDir == "" {
 		return 0
 	}
-	stateDir := filepath.Join(workspaceDir, ".brocode", "skills")
+
+	stateDir := targetDir
+	if filepath.Base(targetDir) != "skills" {
+		stateDir = filepath.Join(targetDir, ".brocode", "skills")
+	}
+
 	st := loadVersionState(stateDir)
 	installed := 0
 	for _, s := range DefaultSkills() {

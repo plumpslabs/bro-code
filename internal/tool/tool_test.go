@@ -54,16 +54,13 @@ func TestReadFileBlockedForSensitiveAndHeavy(t *testing.T) {
 	}
 }
 
-// TestReadFileTruncationGuidance verifies a large file (>150 lines) returns a
-// short head preview with ACTIONABLE guidance (start_line/end_line ranges,
-// code_locate, shrinkwrap) — not a whole-file dump that makes the model ingest
-// code it only needs one span of, nor a vague "request more" that triggers
-// bash sed/head/tail truncation-fighting loops.
+// TestReadFileTruncationGuidance verifies a truly massive file (>1500 lines) returns
+// the first 1000 lines with ACTIONABLE guidance (start_line/end_line ranges, code_locate).
 func TestReadFileTruncationGuidance(t *testing.T) {
 	tmpDir := t.TempDir()
 	big := filepath.Join(tmpDir, "big.js")
 	var sb strings.Builder
-	for i := 1; i <= 500; i++ {
+	for i := 1; i <= 1800; i++ {
 		sb.WriteString(fmt.Sprintf("// line %d\n", i))
 	}
 	if err := os.WriteFile(big, []byte(sb.String()), 0o644); err != nil {
@@ -75,14 +72,14 @@ func TestReadFileTruncationGuidance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read_file failed: %v", err)
 	}
-	if !strings.Contains(out, "501 lines") {
+	if !strings.Contains(out, "1801 lines") {
 		t.Fatalf("structural overview notice missing line count: %q", out)
 	}
 	if !strings.Contains(out, "start_line/end_line") || !strings.Contains(out, "code_locate") {
 		t.Fatalf("structural overview must give actionable guidance: %q", out)
 	}
-	if strings.Contains(out, "line 300") {
-		t.Fatalf("read_file returned content past the first 60 lines of the overview")
+	if strings.Contains(out, "line 1500") {
+		t.Fatalf("read_file returned content past the first 1000 lines of the massive file overview")
 	}
 
 	// A range read returns the requested section.
@@ -92,6 +89,49 @@ func TestReadFileTruncationGuidance(t *testing.T) {
 	}
 	if !strings.Contains(rangeOut, "line 200") || !strings.Contains(rangeOut, "line 205") {
 		t.Fatalf("range read missing expected lines: %q", rangeOut)
+	}
+}
+
+// TestReadFileAutoPaging verifies that consecutive read_file calls on a massive file (>1000 lines)
+// automatically advance the page window instead of getting stuck in a loop on lines 1-1000.
+func TestReadFileAutoPaging(t *testing.T) {
+	tmpDir := t.TempDir()
+	big := filepath.Join(tmpDir, "giant.js")
+	var sb strings.Builder
+	for i := 1; i <= 2500; i++ {
+		sb.WriteString(fmt.Sprintf("// code line %d\n", i))
+	}
+	if err := os.WriteFile(big, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &ReadFileTool{}
+
+	// Call 1: lines 1 to 1000
+	p1, err := rt.Execute(context.Background(), `{"path":"`+big+`"}`)
+	if err != nil {
+		t.Fatalf("page 1 failed: %v", err)
+	}
+	if !strings.Contains(p1, "showing lines 1 to 1000") || !strings.Contains(p1, "code line 500") {
+		t.Fatalf("page 1 missing lines 1-1000: %q", p1)
+	}
+
+	// Call 2: automatically pages to lines 1001 to 2000
+	p2, err := rt.Execute(context.Background(), `{"path":"`+big+`"}`)
+	if err != nil {
+		t.Fatalf("page 2 failed: %v", err)
+	}
+	if !strings.Contains(p2, "showing lines 1001 to 2000") || !strings.Contains(p2, "code line 1500") {
+		t.Fatalf("page 2 should auto-page to lines 1001-2000, got: %q", p2)
+	}
+
+	// Call 3: automatically pages to lines 2001 to end
+	p3, err := rt.Execute(context.Background(), `{"path":"`+big+`"}`)
+	if err != nil {
+		t.Fatalf("page 3 failed: %v", err)
+	}
+	if !strings.Contains(p3, "showing lines 2001 to") || !strings.Contains(p3, "code line 2500") {
+		t.Fatalf("page 3 should auto-page to lines 2001 to end, got: %q", p3)
 	}
 }
 

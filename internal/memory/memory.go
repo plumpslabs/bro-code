@@ -29,7 +29,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/plumpslabs/bro-code/internal/plan"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/store"
@@ -265,6 +264,8 @@ func (s *Store) WarmStart() string {
 		return ""
 	}
 	s.load()
+
+	s.mu.Lock()
 	// Deterministic section order: WarmStart feeds the system prompt, which is
 	// part of the stable prefix that prompt caching keys off. Map iteration
 	// would randomize section order per call, silently invalidating the cache
@@ -286,6 +287,8 @@ func (s *Store) WarmStart() string {
 			sb.WriteString("- ");sb.WriteString(f);sb.WriteString("\n")
 		}
 	}
+	s.mu.Unlock()
+
 	out := strings.TrimSpace(sb.String())
 	if out == "" {
 		return ""
@@ -319,7 +322,10 @@ func (s *Store) WarmStartRelevant(query string) string {
 		return s.WarmStart()
 	}
 	s.load()
+
+	s.mu.Lock()
 	if len(s.facts) == 0 {
+		s.mu.Unlock()
 		return ""
 	}
 
@@ -333,6 +339,7 @@ func (s *Store) WarmStartRelevant(query string) string {
 			})
 		}
 	}
+	s.mu.Unlock()
 	if len(docs) == 0 {
 		return ""
 	}
@@ -742,15 +749,6 @@ func (s *Store) CaptureSession(sessionID string, events []store.Event) error {
 				lastGoal = c
 			}
 		case "assistant_msg":
-			// If the assistant output an execution plan, ensure it is saved to .brocode/current_plan.md.
-			// Active plans live in current_plan.md as the single source of truth (not duplicated into memory.md).
-			parsed := plan.ParseMarkdownPlan(msg.Content)
-			if parsed != nil && len(parsed.Steps) >= 1 && (msg.Mode == "PLANNER" || len(parsed.Steps) >= 2) {
-				if s.path != "" {
-					wsDir := filepath.Dir(filepath.Dir(s.path))
-					_ = plan.SaveCurrentPlan(wsDir, parsed)
-				}
-			}
 			for _, tc := range msg.ToolCalls {
 				if tc.Name == "write_file" || tc.Name == "edit_file" {
 					var args struct {

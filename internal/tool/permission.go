@@ -130,12 +130,68 @@ func AllowKey(cmd string) string {
 		return ""
 	case "cd", "pushd":
 		return first
+	case "npm", "yarn", "pnpm", "bun":
+		if len(fields) >= 3 {
+			sub := strings.ToLower(fields[1])
+			if sub == "install" || sub == "i" || sub == "add" {
+				if pkg := firstNonFlag(fields[2:]); pkg != "" {
+					return first + " " + sub + " " + pkg
+				}
+			}
+		}
+		return ""
+	case "pip", "pip3":
+		if len(fields) >= 3 && strings.ToLower(fields[1]) == "install" {
+			if pkg := firstNonFlag(fields[2:]); pkg != "" {
+				return first + " install " + pkg
+			}
+		}
+		return ""
+	case "go":
+		if len(fields) >= 3 && strings.ToLower(fields[1]) == "get" {
+			if pkg := firstNonFlag(fields[2:]); pkg != "" {
+				return "go get " + pkg
+			}
+		}
+		return ""
+	case "cargo":
+		if len(fields) >= 3 && strings.ToLower(fields[1]) == "add" {
+			if pkg := firstNonFlag(fields[2:]); pkg != "" {
+				return "cargo add " + pkg
+			}
+		}
+		return ""
 	default:
 		if gatedKeys[first] {
 			return first
 		}
 		return ""
 	}
+}
+
+// firstNonFlag returns the first argument that does not start with '-' or '--'.
+func firstNonFlag(args []string) string {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+	}
+	return ""
+}
+
+// dangerousDatabaseDrop reports whether a command drops or wipes a database/table.
+func dangerousDatabaseDrop(cmd string) bool {
+	lower := strings.ToLower(cmd)
+	if strings.Contains(lower, "drop database") ||
+		strings.Contains(lower, "drop table") ||
+		strings.Contains(lower, "truncate table") ||
+		strings.Contains(lower, "prisma migrate reset") ||
+		strings.Contains(lower, "db:drop") ||
+		strings.Contains(lower, "db:reset") ||
+		strings.Contains(lower, "schema:drop") {
+		return true
+	}
+	return false
 }
 
 // GateCommand decides whether cmd may run, needs confirmation, or is blocked.
@@ -146,6 +202,11 @@ func GateCommand(cmd, repoRoot string, allow map[string]bool) GateDecision {
 	// explicit "always allow" for that session overrides it).
 	if dangerousRm(strings.ToLower(cmd)) {
 		return GateDeny
+	}
+
+	// Destructive database drop/reset commands must always ask confirmation
+	if dangerousDatabaseDrop(cmd) {
+		return GateAsk
 	}
 
 	key := AllowKey(cmd)
@@ -172,22 +233,31 @@ func GateCommand(cmd, repoRoot string, allow map[string]bool) GateDecision {
 	// of the project the user opened).
 	if key == "cd" || key == "pushd" {
 		target := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(cmd), key))
+		for _, sep := range []string{"&&", "||", ";", "|"} {
+			if idx := strings.Index(target, sep); idx >= 0 {
+				target = strings.TrimSpace(target[:idx])
+			}
+		}
 		target = strings.Trim(target, " \"'`;")
 		if target == "" || target == "~" || target == "$home" || strings.HasPrefix(target, "~/") {
 			return GateAsk // home or missing target — the classic wander
 		}
-		if strings.HasPrefix(target, "-") {
-			return GateAllow // cd - (previous dir), cd .. handled below
+		if strings.HasPrefix(target, "-") || target == "." || target == "./" || target == "/workspace" {
+			return GateAllow // cd - (previous dir), cd ., or /workspace container root alias
 		}
 		abs := target
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(repoRoot, abs)
 		}
+		abs = filepath.Clean(abs)
 		root := filepath.Clean(repoRoot)
 		if root == "" {
 			root = "/"
 		}
-		if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {
+		absLower := strings.ToLower(abs)
+		rootLower := strings.ToLower(root)
+		sep := string(filepath.Separator)
+		if absLower == rootLower || strings.HasPrefix(absLower, strings.TrimSuffix(rootLower, sep)+sep) {
 			return GateAllow // still inside the repo
 		}
 		return GateAsk

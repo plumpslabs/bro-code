@@ -80,6 +80,14 @@ func Load(projectRoot string) *Manager {
 	return m
 }
 
+// AddHooks registers additional runtime hooks (e.g. from an active custom agent).
+func (m *Manager) AddHooks(hooksList []Hook) {
+	if m == nil || len(hooksList) == 0 {
+		return
+	}
+	m.hooks = append(m.hooks, hooksList...)
+}
+
 // ForEvent returns the hooks configured for a given event.
 func (m *Manager) ForEvent(ev Event) []Hook {
 	if m == nil {

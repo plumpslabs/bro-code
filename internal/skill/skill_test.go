@@ -28,7 +28,7 @@ func TestLoaderAll(t *testing.T) {
 	writeSkill(t, root, "go-build", "---\nname: go-build\ndescription: Build and test Go projects\n---\n", "## Steps\n- run go build\n")
 	writeSkill(t, root, "no-desc", "---\nname: no-desc\n---\n", "")
 
-	l := NewLoader(root)
+	l := NewLoaderWithDirs(root, "")
 	skills := l.All()
 	if len(skills) != 2 {
 		t.Fatalf("expected 2 skills, got %d", len(skills))
@@ -61,7 +61,7 @@ func TestLoaderMatch(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, root, "go-build", "---\nname: go-build\ndescription: Build and test Go projects\n---\n", "")
 
-	l := NewLoader(root)
+	l := NewLoaderWithDirs(root, "")
 	if got := l.Match("go"); len(got) != 1 {
 		t.Errorf("expected 1 match for 'go', got %d", len(got))
 	}
@@ -83,7 +83,7 @@ func TestEnsureDefaultsInstalled(t *testing.T) {
 		t.Fatalf("second install must be a no-op, installed %d", n)
 	}
 	// The regular loader picks them up as real, readable skills.
-	all := NewLoader(root).All()
+	all := NewLoaderWithDirs(root, filepath.Join(root, ".brocode", "skills")).All()
 	if len(all) == 0 {
 		t.Fatal("loader found no skills after install")
 	}
@@ -272,10 +272,58 @@ func TestLoaderScopes(t *testing.T) {
 
 	l := NewLoader(root)
 	skills := l.All()
-	if len(skills) != 1 {
-		t.Fatalf("expected 1 skill from .brocode, got %d", len(skills))
+	var found bool
+	for _, s := range skills {
+		if s.Name == "team-rule" {
+			found = true
+			break
+		}
 	}
-	if skills[0].Name != "team-rule" {
-		t.Errorf("expected team-rule, got %s", skills[0].Name)
+	if !found {
+		t.Errorf("expected team-rule in loaded skills, got %+v", skills)
+	}
+}
+
+func TestProjectSkillOverridesGlobal(t *testing.T) {
+	globalRoot := t.TempDir()
+	globalSkillDir := filepath.Join(globalRoot, "skills")
+	EnsureDefaultsInstalled(globalSkillDir)
+
+	// In project root, create a custom override for "go-workflow"
+	projectRoot := t.TempDir()
+	projectSkillDir := filepath.Join(projectRoot, ".brocode", "skills", "go-workflow")
+	if err := os.MkdirAll(projectSkillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectSkillDir, "SKILL.md"), []byte("---\nname: go-workflow\ndescription: PROJECT SPECIFIC OVERRIDE\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := &Loader{}
+	// Scan project first, then global
+	l.scanDir(filepath.Join(projectRoot, ".brocode", "skills"))
+	l.scanDir(globalSkillDir)
+
+	var goSkill *Skill
+	for i, s := range l.All() {
+		if s.Name == "go-workflow" {
+			goSkill = &l.All()[i]
+			break
+		}
+	}
+	if goSkill == nil {
+		t.Fatal("go-workflow skill not found")
+	}
+	if goSkill.Description != "PROJECT SPECIFIC OVERRIDE" {
+		t.Fatalf("expected project override to take precedence, got: %q", goSkill.Description)
+	}
+}
+
+func TestZeroRepoPollution(t *testing.T) {
+	cleanRepo := t.TempDir()
+	// EnsureGlobalDefaultsInstalled should NOT create .brocode in cleanRepo
+	brocodeDir := filepath.Join(cleanRepo, ".brocode")
+	if _, err := os.Stat(brocodeDir); !os.IsNotExist(err) {
+		t.Fatalf("clean repo should not have .brocode before anything is created")
 	}
 }

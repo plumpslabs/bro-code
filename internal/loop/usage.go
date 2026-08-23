@@ -90,8 +90,7 @@ func (u *UsageTracker) Summary() string {
 			estimated = true
 		}
 	}
-	idrRate := 16250.0
-	fmt.Fprintf(&sb, "\nTOTAL: %s tokens — $%.4f (~Rp %s)", fmtTokens(totalTokens), totalCost, fmtIDR(totalCost*idrRate))
+	fmt.Fprintf(&sb, "\nTOTAL: %s tokens — $%.4f", fmtTokens(totalTokens), totalCost)
 	if estimated {
 		// Honest labeling (PHILOSOPHY Principle 3): raw usage is the provider's
 		// true token counts, but token estimates (Claude p50k, DeepSeek ratios,
@@ -100,24 +99,6 @@ func (u *UsageTracker) Summary() string {
 		sb.WriteString("\n\nNote: token figures for non-OpenAI models are local estimates; actual billing may differ.")
 	}
 	return strings.TrimSpace(sb.String())
-}
-
-// fmtIDR formats an amount into Indonesian Rupiah format with thousand separators.
-func fmtIDR(val float64) string {
-	n := int64(val)
-	s := fmt.Sprintf("%d", n)
-	if len(s) <= 3 {
-		return s
-	}
-	var res []string
-	for len(s) > 3 {
-		res = append([]string{s[len(s)-3:]}, res...)
-		s = s[:len(s)-3]
-	}
-	if len(s) > 0 {
-		res = append([]string{s}, res...)
-	}
-	return strings.Join(res, ".")
 }
 
 // fmtTokens renders a token count as a compact human-readable string.

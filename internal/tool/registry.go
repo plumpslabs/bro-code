@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hexops/gotextdiff"
@@ -135,6 +136,20 @@ type Registry struct {
 	// entries synchronously — so the engine gets smart warm-start hints without
 	// re-scanning unchanged files.
 	knowledgeStore *store.Store
+
+	// Custom agent filters (allow/deny tools and commands)
+	toolFilter func(toolName string) bool
+	cmdFilter  func(cmd string) (allowed bool, denied bool)
+}
+
+// SetToolFilter sets a dynamic tool filter (e.g. from an active CustomAgent).
+func (r *Registry) SetToolFilter(fn func(toolName string) bool) {
+	r.toolFilter = fn
+}
+
+// SetCommandFilter sets a dynamic command permission filter (e.g. from an active CustomAgent).
+func (r *Registry) SetCommandFilter(fn func(cmd string) (bool, bool)) {
+	r.cmdFilter = fn
 }
 
 // SetExecutionPolicy hard-enforces a read-only mode at the executor level.
@@ -153,6 +168,7 @@ func NewRegistry() *Registry {
 	r.Register(&WriteFileTool{})
 	r.Register(&EditFileTool{})
 	r.Register(&EditSymbolTool{})
+	r.Register(&CodeSliceTool{})
 	r.Register(&DeleteFileTool{})
 	r.Register(&ListDirTool{})
 	r.Register(&GrepTool{})
@@ -324,6 +340,14 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 		cmd = "git commit"
 	default:
 		return true, "", nil
+	}
+
+	if r.cmdFilter != nil {
+		if allowed, denied := r.cmdFilter(cmd); denied {
+			return false, fmt.Sprintf("command %q is prohibited by active agent permission policy", cmd), nil
+		} else if allowed {
+			return true, "", nil
+		}
 	}
 
 	switch GateCommand(cmd, r.repoRoot, r.allow) {
@@ -501,6 +525,9 @@ func (r *Registry) Definitions() []provider.ToolDefinition {
 
 	defs := make([]provider.ToolDefinition, 0, len(names))
 	for _, name := range names {
+		if r.toolFilter != nil && !r.toolFilter(name) {
+			continue
+		}
 		t := r.tools[name]
 		defs = append(defs, provider.ToolDefinition{
 			Name:        t.Name(),
@@ -512,6 +539,10 @@ func (r *Registry) Definitions() []provider.ToolDefinition {
 }
 
 func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (result string, err error) {
+	if r.toolFilter != nil && !r.toolFilter(name) {
+		return "", fmt.Errorf("tool '%s' is disabled by active agent policy", name)
+	}
+
 	// Executor-level read-only enforcement: catches direct Execute calls that
 	// never pass through GateAction (sub-agents and other non-loop callers).
 	// lsp_fix/lsp_rename mutate files, so they are read-only-blocked too.
@@ -722,15 +753,14 @@ func (r *Registry) SubRegistry() *Registry {
 
 // ReadFileTool
 type ReadFileTool struct {
-	// knowledgeStore is wired by SetKnowledgeStore so every read captures a
-	// whole-file structural index into the Smart Context Graph even when only
-	// a span/shrinkwrap/head is returned to the model. Nil disables capture.
 	knowledgeStore *store.Store
+	mu             sync.Mutex
+	lastOffset     map[string]int
 }
 
 func (t *ReadFileTool) Name() string { return "read_file" }
 func (t *ReadFileTool) Description() string {
-	return "Read file contents with optional line range or AST shrinkwrap mode"
+	return "Read file contents with optional line range or AST shrinkwrap mode. On large files, repeated calls automatically page through the file."
 }
 func (t *ReadFileTool) Parameters() map[string]any {
 	return map[string]any{
@@ -760,45 +790,6 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	// project-relative form when the absolute one does not exist.
 	args.Path = resolvePath(args.Path)
 
-	// Semantic tool-result cache: repeated reads of the same span (or the same
-	// shrinkwrap) return instantly instead of re-reading disk. Invalidated on write.
-	readKey := "read_file:" + args.Path + fmt.Sprintf("|%d|%d|%v", args.StartLine, args.EndLine, args.Shrinkwrap)
-	if hit, ok := toolResultCache.Get("read_file", readKey); ok {
-		return hit, nil
-	}
-
-	// Native guard: never read secrets (.env, keys) or heavy dirs
-	// (node_modules, vendor, ...) into the LLM context.
-	if err := GuardFile(args.Path); err != nil {
-		return "", err
-	}
-
-	data, err := os.ReadFile(args.Path)
-	if err != nil {
-		return "", err
-	}
-
-	lines := strings.Split(string(data), "\n")
-
-	// Whole-file structural capture for the Smart Context Graph. This read may
-	// return only a span / shrinkwrap / head preview, but we index the ENTIRE
-	// file's symbols (line ranges) and store them — so future sessions know
-	// every symbol's position and never lose context to a force-cut. Runs
-	// async with recover(): zero added read latency. extractSymbols is run
-	// inside UpdateKnowledge from the full content, so positions cover all
-	// lines even when the model only ever saw a slice.
-	if t.knowledgeStore != nil {
-		resolved := args.Path
-		lang := detectFileLanguage(resolved)
-		full := string(data)
-		go func(p, content string) {
-			defer func() { recover() }()
-			recordTurnFile(ctx, p)
-			neighbors := neighborsFromTurn(ctx, p)
-			_ = t.knowledgeStore.UpdateKnowledge(knowledgeKey(p), lang, content, neighbors, nil)
-		}(resolved, full)
-	}
-
 	// Range read (start_line/end_line): stream ONLY the requested span from disk
 	// instead of loading the whole file into memory (P3). Essential for huge files
 	// and keeps the round cheap — the model should prefer this over full reads.
@@ -815,8 +806,38 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		if rerr != nil {
 			return "", rerr
 		}
-		toolResultCache.Put("read_file", readKey, span, "file:"+args.Path)
+		t.mu.Lock()
+		if t.lastOffset != nil {
+			delete(t.lastOffset, args.Path)
+		}
+		t.mu.Unlock()
 		return span, nil
+	}
+
+	// Native guard: never read secrets (.env, keys) or heavy dirs
+	// (node_modules, vendor, ...) into the LLM context.
+	if err := GuardFile(args.Path); err != nil {
+		return "", err
+	}
+
+	data, err := os.ReadFile(args.Path)
+	if err != nil {
+		return "", err
+	}
+
+	lines := strings.Split(string(data), "\n")
+
+	// Whole-file structural capture for the Smart Context Graph.
+	if t.knowledgeStore != nil {
+		resolved := args.Path
+		lang := detectFileLanguage(resolved)
+		full := string(data)
+		go func(p, content string) {
+			defer func() { recover() }()
+			recordTurnFile(ctx, p)
+			neighbors := neighborsFromTurn(ctx, p)
+			_ = t.knowledgeStore.UpdateKnowledge(knowledgeKey(p), lang, content, neighbors, nil)
+		}(resolved, full)
 	}
 
 	// Explicit AST shrinkwrap: an optional whole-file structural overview for
@@ -826,20 +847,12 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		compressed := bcontext.ShrinkwrapAST(string(data), args.Path)
 		if len(lines) > 150 {
 			out := CapOutput(fmt.Sprintf("%s\n\n[AST shrinkwrap view of %d lines — function bodies omitted. Use read_file with start_line/end_line for specific bodies.]", compressed, len(lines)))
-			toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
 			return out, nil
 		}
 		out := CapOutput(compressed)
-		toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
 		return out, nil
 	}
 
-	// Lean-by-default for large files (P2): dumping a whole big file into context
-	// makes the model ingest code it usually only needs one span of. For files over
-	// 150 lines we return a short head preview plus actionable guidance — the model
-	// targets the exact span with read_file(start_line/end_line), or requests a
-	// structural overview with read_file(shrinkwrap:true). Files <=150 lines are
-	// still returned in full (cheap).
 	var jsonWarning string
 	if strings.HasSuffix(strings.ToLower(args.Path), ".json") {
 		if err := ValidateJSONNoDuplicateKeys(string(data)); err != nil {
@@ -847,19 +860,32 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		}
 	}
 
-	if len(lines) > 150 {
-		headN := 60
-		if len(lines) < headN {
-			headN = len(lines)
+	// For massive files (>1,000 lines) without explicit start_line:
+	// Automatically page through the file on successive calls so the model
+	// never gets stuck in a loop reading the same initial chunk.
+	if len(lines) > 1000 {
+		t.mu.Lock()
+		if t.lastOffset == nil {
+			t.lastOffset = make(map[string]int)
 		}
-		head := strings.Join(lines[:headN], "\n")
-		out := fmt.Sprintf("%s[File %s has %d lines — showing first %d as a preview. Use read_file(start_line/end_line) for the exact span; or read_file(shrinkwrap:true) for a structural (signatures/types) overview. Use code_locate to find symbols across the project.]\n\n%s", jsonWarning, args.Path, len(lines), headN, head)
-		toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
-		return out, nil
+		offset := t.lastOffset[args.Path]
+		pageSize := 1000
+		if offset >= len(lines) {
+			offset = 0 // loop wrapped
+		}
+		end := offset + pageSize
+		if end > len(lines) {
+			end = len(lines)
+		}
+		t.lastOffset[args.Path] = end
+		t.mu.Unlock()
+
+		chunk := strings.Join(lines[offset:end], "\n")
+		out := fmt.Sprintf("%s[File %s has %d lines — showing lines %d to %d. (Calling read_file again without start_line will auto-page to next lines, or specify start_line/end_line directly. Use code_locate or grep to find symbols across the project.)]\n\n%s", jsonWarning, args.Path, len(lines), offset+1, end, chunk)
+		return CapOutput(out), nil
 	}
 
 	out := jsonWarning + CapOutput(string(data))
-	toolResultCache.Put("read_file", readKey, out, "file:"+args.Path)
 	return out, nil
 }
 

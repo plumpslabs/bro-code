@@ -51,9 +51,26 @@ func TestSpecAndTournamentMessageHandlers(t *testing.T) {
 	}
 
 	// 4. Test tournamentResultMsg
-	tournMsg := "TOURNAMENT:\nFix pooling\n---\n### 🥊 Candidate-Alpha\nPassed all tests with 2 line diff."
+	tournMsg := "TOURNAMENT:\nFix pooling\n---\n### 🥊 Candidate-Alpha (Minimal Surgical Fix)\nTarget: pool.go:L45\nProposed Patch: add mutex.Lock()\n\n---\n\n### 🥊 Candidate-Beta (Defensive Robust Refactor)\nTarget: pool.go:L10-L80\nProposed Patch: implement ChannelPool wrapper\n\n---\n\n### ⚖️ ARBITER DECISION MATRIX"
 	m.Update(tournamentResultMsg(tournMsg))
 	if m.status != "Ready" {
 		t.Errorf("expected status 'Ready', got %q", m.status)
+	}
+
+	// 5. Test resolveTournamentSelection
+	enhancedAlpha := resolveTournamentSelection("Apply Alpha", m.messages)
+	if !strings.Contains(enhancedAlpha, "Candidate-Alpha") || !strings.Contains(enhancedAlpha, "mutex.Lock()") {
+		t.Fatalf("expected enhanced prompt for Candidate-Alpha, got: %s", enhancedAlpha)
+	}
+
+	enhancedBeta := resolveTournamentSelection("Apply Beta", m.messages)
+	if !strings.Contains(enhancedBeta, "Candidate-Beta") || !strings.Contains(enhancedBeta, "ChannelPool wrapper") {
+		t.Fatalf("expected enhanced prompt for Candidate-Beta, got: %s", enhancedBeta)
+	}
+
+	// 6. Test extractRecentSessionContext
+	recentCtx := extractRecentSessionContext(m.messages, 5)
+	if !strings.Contains(recentCtx, "Fix pooling") {
+		t.Fatalf("expected recent session context to contain tournament topic, got: %s", recentCtx)
 	}
 }

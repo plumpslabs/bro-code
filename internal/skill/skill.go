@@ -27,13 +27,30 @@ type Loader struct {
 	skills []Skill
 }
 
-// NewLoader initializes skill discovery across project (.brocode/skills) and home locations (~/.config/brocode/skills).
+// NewLoader initializes skill discovery across project (.brocode/skills) and global (~/.config/brocode/skills) locations.
+// Project-specific skills take precedence over global skills with the same name.
 func NewLoader(workspaceDir string) *Loader {
+	return NewLoaderWithDirs(workspaceDir, GlobalSkillsDir())
+}
+
+// NewLoaderWithDirs initializes skill discovery across explicit project and global locations.
+func NewLoaderWithDirs(workspaceDir, globalDir string) *Loader {
 	l := &Loader{}
-	l.scanDir(filepath.Join(workspaceDir, ".brocode", "skills"))
+	if workspaceDir != "" {
+		l.scanDir(filepath.Join(workspaceDir, ".brocode", "skills"))
+	}
+
+	if globalDir != "" {
+		l.scanDir(globalDir)
+	}
 
 	home, _ := os.UserHomeDir()
-	l.scanDir(filepath.Join(home, ".config", "brocode", "skills"))
+	if home != "" && globalDir != "" {
+		legacy := filepath.Join(home, ".brocode", "skills")
+		if legacy != globalDir {
+			l.scanDir(legacy)
+		}
+	}
 	return l
 }
 
@@ -48,6 +65,9 @@ func (l *Loader) scanDir(dirPath string) {
 			if data, err := os.ReadFile(skillFile); err == nil {
 				content := string(data)
 				name, desc := parseFrontmatter(content, entry.Name())
+				if l.hasSkill(name) {
+					continue
+				}
 				l.skills = append(l.skills, Skill{
 					Name:        name,
 					Description: desc,
@@ -58,6 +78,15 @@ func (l *Loader) scanDir(dirPath string) {
 			}
 		}
 	}
+}
+
+func (l *Loader) hasSkill(name string) bool {
+	for _, s := range l.skills {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // All returns every loaded skill (used to inject the full skill list into

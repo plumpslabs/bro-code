@@ -428,12 +428,19 @@ type Engine struct {
 	askHandler func(question string, options []string) (string, error)
 	// exploreQuery caches the MINER's file-path context for warm-start relevance filtering.
 	exploreQuery string
+	// agentPrompt carries custom instructions from an active CustomAgent.
+	agentPrompt string
 	// earlyExitOnError stops executing remaining tools in a round if a
 	// mutating tool (write_file, edit_file, bash) fails — the model often
 	// proceeds to depend on a result it just got, so a failed edit/write/bash
 	// usually means downstream calls will error too. Cutting them saves ~2-5
 	// rounds of error spam per failure.
 	earlyExitOnError bool
+}
+
+// SetAgentPrompt sets the custom instructions for the active custom agent.
+func (e *Engine) SetAgentPrompt(p string) {
+	e.agentPrompt = p
 }
 
 // SetHooks wires a lifecycle hooks manager. Nil disables hooks.
@@ -840,6 +847,18 @@ func (e *Engine) CostSummary() string {
 		return "No LLM usage recorded yet this session."
 	}
 	return e.usage.Summary()
+}
+
+// UsageTracker returns the engine's session usage tracker.
+func (e *Engine) UsageTracker() *UsageTracker {
+	return e.usage
+}
+
+// SetUsageTracker shares an existing usage tracker with this engine.
+func (e *Engine) SetUsageTracker(u *UsageTracker) {
+	if u != nil {
+		e.usage = u
+	}
 }
 
 // SessionCostUSD returns the total estimated spend so far (for the footer).
@@ -1774,7 +1793,12 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						}
 						return msg, nil
 					}
-					guardMsg := fmt.Sprintf("⚠️ [LOOP GUARD]: You already called '%s' with these exact arguments earlier in this turn (call #%d). The result is ALREADY in your conversation context above. Do NOT re-run the same tool call — synthesize what you already gathered or proceed with next steps.", tc.Name, callCount)
+					guardMsg := fmt.Sprintf("⚠️ [LOOP GUARD]: You already called '%s' with these exact arguments earlier in this turn (call #%d). The result is ALREADY in your conversation context above. Do NOT re-run the same tool call with identical arguments.", tc.Name, callCount)
+					if tc.Name == "read_file" {
+						guardMsg += " If you need to read further in this file, you MUST provide 'start_line' (e.g. start_line: 250) and 'end_line', or use 'grep' / 'code_locate' to find the target function directly."
+					} else {
+						guardMsg += " Synthesize what you already gathered or proceed with next steps."
+					}
 					if onUpdate != nil {
 						onUpdate(e.state, fmt.Sprintf("⚠️ Loop detected: '%s' repeated %d× — blocking redundant call", tc.Name, callCount))
 					}
@@ -2387,6 +2411,7 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 		PreflightAuto: e.preflightAutoFix,
 		PlanMode:      e.planMode,
 		ActivePlan:    activePlanStr,
+		AgentPrompt:   e.agentPrompt,
 		Tuning:        e.tuning,
 	}
 	if e.mem != nil {
@@ -3369,31 +3394,31 @@ func formatToolCallInfo(name, argsJSON string) string {
 		}
 		if name == "write_file" {
 			path, _ := m["path"].(string)
-			return fmt.Sprintf("✍️  write_file %s", shortenPath(path))
+			return fmt.Sprintf("✍️ write_file %s", shortenPath(path))
 		}
 		if name == "delete_file" {
 			path, _ := m["path"].(string)
-			return fmt.Sprintf("🗑️  delete_file %s", shortenPath(path))
+			return fmt.Sprintf("🗑️ delete_file %s", shortenPath(path))
 		}
 		if name == "read_file" {
 			path, _ := m["path"].(string)
 			if s, ok := m["start_line"].(float64); ok && s > 0 {
-				return fmt.Sprintf("📖  read_file %s:L%d", shortenPath(path), int(s))
+				return fmt.Sprintf("📖 read_file %s:L%d", shortenPath(path), int(s))
 			}
-			return fmt.Sprintf("📖  read_file %s", shortenPath(path))
+			return fmt.Sprintf("📖 read_file %s", shortenPath(path))
 		}
 		if path, ok := m["path"].(string); ok && path != "" {
-			return fmt.Sprintf("🔧  %s %s", name, shortenPath(path))
+			return fmt.Sprintf("🔧 %s %s", name, shortenPath(path))
 		}
 		if pattern, ok := m["pattern"].(string); ok && pattern != "" {
-			return fmt.Sprintf("🔧  %s %s", name, pattern)
+			return fmt.Sprintf("🔧 %s %s", name, pattern)
 		}
 		if cmd, ok := m["command"].(string); ok && cmd != "" {
 			firstLine := strings.TrimSpace(strings.Split(cmd, "\n")[0])
 			if len(firstLine) > 50 {
 				firstLine = firstLine[:47] + "…"
 			}
-			return fmt.Sprintf("⚙️  %s %s", name, firstLine)
+			return fmt.Sprintf("⚙️ %s %s", name, firstLine)
 		}
 	}
 	return name

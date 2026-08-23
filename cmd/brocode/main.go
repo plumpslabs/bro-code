@@ -32,6 +32,12 @@ func main() {
 		os.Exit(0)
 	}
 
+	// `brocode update` — Self-update to latest release
+	if len(os.Args) > 1 && (os.Args[1] == "update" || os.Args[1] == "upgrade") {
+		runUpdateCommand()
+		os.Exit(0)
+	}
+
 	// `brocode mcp list|add|remove` — MCP config management without the TUI.
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		runMCPCommand(os.Args[2:])
@@ -463,3 +469,30 @@ func singleLine(s string, max int) string {
 	}
 	return s
 }
+
+func runUpdateCommand() {
+	fmt.Printf("🔍 Checking for updates (current: %s)...\n", version.Version)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	latest, hasUpdate, err := version.CheckLatestVersion(ctx, true)
+	if err != nil {
+		fmt.Printf("❌ Failed to check for updates: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !hasUpdate {
+		fmt.Printf("✨ You are already on the latest version of BroCode (%s)!\n", version.Version)
+		return
+	}
+
+	fmt.Printf("🚀 Found new release %s! Downloading and updating...\n", latest)
+	msg, err := version.SelfUpdate(ctx, latest)
+	if err != nil {
+		fmt.Printf("❌ Update failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println(msg)
+}
+

@@ -25,6 +25,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/glamour"
+	"github.com/plumpslabs/bro-code/internal/agent"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/hooks"
 	"github.com/plumpslabs/bro-code/internal/learn"
@@ -43,6 +44,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/subagent"
 	"github.com/plumpslabs/bro-code/internal/tokens"
 	"github.com/plumpslabs/bro-code/internal/tool"
+	"github.com/plumpslabs/bro-code/internal/version"
 	"golang.org/x/term"
 )
 
@@ -222,6 +224,10 @@ type Model struct {
 	// + auto-extract on compaction). Built once per session, persisted to
 	// .brocode/memory.md.
 	memStore *memory.Store
+
+	// agentLoader discovers custom agents and modes (.brocode/agents and ~/.config/brocode/agents).
+	agentLoader *agent.Loader
+	activeAgent *agent.CustomAgent
 
 	// Cancelation function for active LLM turn / tool execution
 	cancelTurn context.CancelFunc
@@ -541,8 +547,13 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 	// Reset active recommendations on fresh user prompt
 	m.activeRecommendations = nil
 
+	execQuery := userQuery
+	if enhanced := resolveTournamentSelection(userQuery, m.messages); enhanced != "" {
+		execQuery = enhanced
+	}
+
 	runTurnCmd := func() tea.Msg {
-		res, err := m.engine.RunTurn(ctx, userQuery, func(state loop.LoopState, info string) {
+		res, err := m.engine.RunTurn(ctx, execQuery, func(state loop.LoopState, info string) {
 			if m.quitting {
 				return
 			}
@@ -624,8 +635,34 @@ func phaseBadge(s loop.LoopState) string {
 // startsWithEmoji reports whether the first rune is a symbol/emoji glyph
 // (the message already carries its own visual marker, so skip the badge).
 func startsWithEmoji(s string) bool {
-	r, _ := utf8.DecodeRuneInString(s)
+	r, _ := utf8.DecodeRuneInString(strings.TrimSpace(s))
 	return r >= 0x2000
+}
+
+// normalizeEmojiSpacing ensures that leading emojis have clean 1-space separation.
+func normalizeEmojiSpacing(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	if r >= 0x2000 {
+		rest := s[size:]
+		if len(rest) > 0 {
+			r2, size2 := utf8.DecodeRuneInString(rest)
+			if r2 == 0xfe0f || r2 == 0xfe0e {
+				size += size2
+				rest = s[size:]
+			}
+		}
+		emoji := s[:size]
+		trimmedRest := strings.TrimLeft(rest, " ")
+		if trimmedRest != "" {
+			return emoji + " " + trimmedRest
+		}
+		return emoji
+	}
+	return s
 }
 
 // diagnoseResultMsg carries the output of an async /diagnose project scan.
@@ -809,6 +846,7 @@ func NewApp(
 	cwd, _ := os.Getwd()
 	m.globalIndex = search.BuildGlobalIndex(cwd)
 	m.tools.Register(&tool.CodeLocateTool{Index: m.globalIndex})
+	m.tools.Register(&tool.CodeSliceTool{Index: m.globalIndex})
 	m.tools.Register(&tool.BlastRadiusTool{Index: m.globalIndex})
 	m.tools.Register(&tool.CheckpointTool{})
 	m.tools.Register(&tool.RunTestsTool{Plan: loop.TestCommandPlan})
@@ -945,6 +983,15 @@ func (m *Model) rebuildEngine() {
 			m.scoutMgr.Runner.Model = m.activeModel
 			m.scoutMgr.Runner.ContextWindow = m.contextWindow()
 			m.scoutMgr.Runner.CheapModel = m.swarmCheapModel()
+			m.scoutMgr.Runner.UsageTracker = m.engine.UsageTracker()
+			m.scoutMgr.Runner.StreamHandler = func(delta string) {
+				if m.quitting {
+					return
+				}
+				if m.prog != nil {
+					m.prog.Send(streamChunkMsg(delta))
+				}
+			}
 			m.scoutMgr.Runner.Ask = func(question string, opts []string) (string, error) {
 				results, err := m.ask.Ask(context.Background(), []tool.AskQuestion{
 					{
@@ -967,6 +1014,15 @@ func (m *Model) rebuildEngine() {
 		m.scoutMgr.Runner.Model = m.activeModel
 		m.scoutMgr.Runner.ContextWindow = m.contextWindow()
 		m.scoutMgr.Runner.CheapModel = m.swarmCheapModel()
+		m.scoutMgr.Runner.UsageTracker = m.engine.UsageTracker()
+		m.scoutMgr.Runner.StreamHandler = func(delta string) {
+			if m.quitting {
+				return
+			}
+			if m.prog != nil {
+				m.prog.Send(streamChunkMsg(delta))
+			}
+		}
 	}
 	if m.projectCtx == nil {
 		// Build the compact project overview once (tree + AGENTS/CLAUDE/README
@@ -984,18 +1040,14 @@ func (m *Model) rebuildEngine() {
 		m.usage = repo.NewUsage(cwd)
 		m.repoMap = repo.BuildMap(cwd, m.usage)
 	}
-	m.engine.SetRepoMap(m.repoMap.String())
-	// Smart scope pre-selection: pass the full file list so the engine can
-	// rank files by relevance to the user's prompt and focus exploration.
-	m.engine.SetScopeFiles(repo.ListProjectFiles(cwd))
-	// Detected stack (go/node/ts/...) with evidence files biases the skill
-	// catalog toward the repo and renders a one-line STACK hint ("STACK: go
-	// (go.mod, main.go)") in the system prompt.
-	stackHints := make([]prompt.Stack, 0, len(m.repoMap.Stacks))
-	for _, s := range m.repoMap.Stacks {
-		stackHints = append(stackHints, prompt.Stack{Name: s.Name, Files: s.Files})
+	if m.repoMap != nil {
+		m.engine.SetRepoMap(m.repoMap.String())
+		stackHints := make([]prompt.Stack, 0, len(m.repoMap.Stacks))
+		for _, s := range m.repoMap.Stacks {
+			stackHints = append(stackHints, prompt.Stack{Name: s.Name, Files: s.Files})
+		}
+		m.engine.SetDetectedStacks(stackHints)
 	}
-	m.engine.SetDetectedStacks(stackHints)
 	// The free-gateway (opencode CLI) loop runs with the gateway's own system
 	// prompt, so its model would never see the native intelligence layer
 	// (repo map, memory, project overview). Inject it into the CLI prompt so
@@ -1021,12 +1073,24 @@ func (m *Model) rebuildEngine() {
 			m.prog.Send(fileDiffMsg{path: path, diff: diff})
 		}
 	})
-	// Auto-install the embedded default skill pack (.brocode/skills), then
-	// advertise the full catalog (name + description only) so the engine's
-	// prompt builder can relevance-filter it as the catalog grows. Skills are
-	// the general, tool-agnostic standard (never .opencode/ config in the repo).
-	skill.EnsureDefaultsInstalled(cwd)
+	// Auto-install the embedded default skill pack into the global config root (~/.config/brocode/skills),
+	// keeping repos clean and unpolluted while providing access to the full catalog.
+	skill.EnsureGlobalDefaultsInstalled()
 	m.engine.SetSkillCatalog(skillEntries(cwd))
+
+	// Custom Agents & Modes (.brocode/agents/*.md and ~/.config/brocode/agents/*.md)
+	if m.agentLoader == nil {
+		m.agentLoader = agent.NewLoader(cwd)
+	}
+	if m.activeAgent != nil {
+		m.engine.SetAgentPrompt(m.activeAgent.Prompt)
+		m.tools.SetToolFilter(m.activeAgent.IsToolAllowed)
+		m.tools.SetCommandFilter(m.activeAgent.CheckCommand)
+	} else {
+		m.engine.SetAgentPrompt("")
+		m.tools.SetToolFilter(nil)
+		m.tools.SetCommandFilter(nil)
+	}
 	// Runtime tuning surface (~/.config/brocode/tuning.json): block/rule
 	// toggles + skill-catalog budgets for the system prompt. Missing/corrupt
 	// file falls back to defaults — tuning never breaks a run.
@@ -1085,10 +1149,14 @@ func (m *Model) rebuildEngine() {
 	// routing policy comes from config (auto / confirm / primary_only).
 	m.engine.SetPrimaryIdentity(m.activeProvider.Info.ID, m.activeProvider.Info.Protocol)
 	m.engine.SetFallbackPolicy(m.cfg.FallbackPolicy)
-	// User-defined lifecycle hooks (.brocode/hooks.json) fire at turn
+	// User-defined lifecycle hooks (.brocode/hooks.json and active custom agents) fire at turn
 	// start/end/error and around tool calls. Loaded lazily on first engine
 	// build; engine is rebuilt on model switches but hooks are cheap to reload.
-	m.engine.SetHooks(hooks.Load(cwd))
+	hk := hooks.Load(cwd)
+	if m.activeAgent != nil {
+		hk.AddHooks(m.activeAgent.ToHooks())
+	}
+	m.engine.SetHooks(hk)
 	m.engine.SetScoutManager(m.scoutMgr)
 	// Model routing (P3): route frequent low-stakes compaction summarization to a
 	// cheaper model so the premium model is reserved for synthesis. Opt-in via
@@ -1161,8 +1229,23 @@ func skillEntries(workspaceDir string) []prompt.SkillEntry {
 	return entries
 }
 
+type versionCheckResultMsg struct {
+	latest    string
+	hasUpdate bool
+}
+
+func checkUpdateCmd() tea.Msg {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	latest, hasUpdate, err := version.CheckLatestVersion(ctx, false)
+	if err == nil && hasUpdate {
+		return versionCheckResultMsg{latest: latest, hasUpdate: true}
+	}
+	return nil
+}
+
 func (m Model) Init() tea.Cmd {
-	return m.promptInput.Focus()
+	return tea.Batch(m.promptInput.Focus(), checkUpdateCmd)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1239,6 +1322,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (tool calls, warnings, scouts) keep that glyph.
 		if badge := phaseBadge(msg.state); badge != "" && !startsWithEmoji(str) {
 			str = badge + " " + str
+		} else {
+			str = normalizeEmojiSpacing(str)
 		}
 		// When transitioning to tool execution (StateActing), commit the streamed
 		// assistant text for this iteration as its own distinct block with vertical line border.
@@ -1251,14 +1336,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendMessages(stamp)
 			m.pendingStream = ""
 			m.streaming = false
-		}
-		// When tools execute, record a live process block in the chat stream for read/search tools.
-		// File mutations (edit_file/write_file/delete_file) are handled by upsertDiffMessage (DIFF/CREATE/DELETE bars).
-		if msg.state == loop.StateActing && (strings.HasPrefix(msg.info, "📖") || strings.HasPrefix(msg.info, "🔧") || strings.HasPrefix(msg.info, "⚙️") || strings.HasPrefix(msg.info, "📡") || strings.HasPrefix(msg.info, "🧪") || strings.HasPrefix(msg.info, "✍️") || strings.HasPrefix(msg.info, "🗑️")) {
-			procMsg := "PROCESS:\n" + strings.TrimSpace(msg.info)
-			if len(m.messages) == 0 || m.messages[len(m.messages)-1] != procMsg {
-				m.appendMessages(procMsg)
-			}
 		}
 
 		m.status = str
@@ -1454,6 +1531,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tournamentResultMsg:
 		m.appendNote(string(msg))
 		m.status = "Ready"
+
+	case repairResultMsg:
+		m.appendNote(string(msg))
+		m.status = "Ready"
+
+	case versionCheckResultMsg:
+		if msg.hasUpdate {
+			m.appendNote(fmt.Sprintf("✨ New version available: **%s** → **%s**! Type `/update` to upgrade instantly.", version.Version, msg.latest))
+		}
 
 	case diagnoseFixMsg:
 		diag := string(msg)
@@ -1715,8 +1801,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "ctrl+u":
+			// If user is typing in the input box, clear the entire input prompt (cross-platform standard readline)
+			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk && m.promptInput.Value() != "" {
+				m.promptInput.Reset()
+				m.autocomplete = AutocompleteState{}
+				return m, nil
+			}
 			m.logViewport.HalfPageUp()
 			return m, nil
+
+		case "alt+backspace", "ctrl+backspace", "ctrl+delete", "alt+delete":
+			// Wipe the input prompt immediately on Mac/Windows word/line delete shortcuts
+			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk && m.promptInput.Value() != "" {
+				m.promptInput.Reset()
+				m.autocomplete = AutocompleteState{}
+				return m, nil
+			}
 
 		case "ctrl+d":
 			m.logViewport.HalfPageDown()
@@ -1864,6 +1964,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.showConnect {
 				m.connectPrev()
+				return m, nil
+			}
+
+			// If user is typing and no turn is running, ESC clears the input bar immediately
+			if !m.turnRunning && m.promptInput.Value() != "" {
+				m.promptInput.Reset()
+				m.autocomplete = AutocompleteState{}
 				return m, nil
 			}
 
@@ -2352,7 +2459,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 - **` + "`BUILDER`" + `** *(Default)* — Autonomous coding agent with full read, write, edit, & run tools
 - **` + "`PLANNER`" + `** — Read-only architecture & strategy agent
 - **` + "`MINER`" + `** — Read-only knowledge mining agent that persists facts to memory`
-		m.appendMessages("HELP:\n" + helpContent)
+		m.appendNote("HELP:\n" + helpContent)
 
 	case "/miner":
 		// Jump straight into MINER mode so the next prompt is a knowledge
@@ -2360,19 +2467,19 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.mode = "MINER"
 		m.engine.SetMode(m.mode)
 		m.persistMode()
-		m.appendMessages("MODE:MINER\n⛏️ MINER mode active — explore the codebase and I'll persist verified knowledge (architecture, build commands, conventions, decisions, gotchas) into project memory. Shift+Tab to switch back to BUILDER.")
+		m.appendNote("MODE:MINER\n⛏️ MINER mode active — explore the codebase and I'll persist verified knowledge (architecture, build commands, conventions, decisions, gotchas) into project memory. Shift+Tab to switch back to BUILDER.")
 
 	case "/builder":
 		m.mode = "BUILDER"
 		m.engine.SetMode(m.mode)
 		m.persistMode()
-		m.appendMessages("MODE:BUILDER\n🔨 BUILDER mode active — autonomous coding agent with full read, write, edit, and execution capabilities.")
+		m.appendNote("MODE:BUILDER\n🔨 BUILDER mode active — autonomous coding agent with full read, write, edit, and execution capabilities.")
 
 	case "/planner":
 		m.mode = "PLANNER"
 		m.engine.SetMode(m.mode)
 		m.persistMode()
-		m.appendMessages("MODE:PLANNER\n📋 PLANNER mode active — read-only architecture and strategy agent.")
+		m.appendNote("MODE:PLANNER\n📋 PLANNER mode active — read-only architecture and strategy agent.")
 
 	case "/mode":
 		if len(parts) > 1 {
@@ -2381,33 +2488,40 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				m.mode = target
 				m.engine.SetMode(m.mode)
 				m.persistMode()
-				m.appendMessages(fmt.Sprintf("MODE:%s\n✅ Mode switched to %s", m.mode, m.mode))
+				m.appendNote(fmt.Sprintf("MODE:%s\n✅ Mode switched to %s", m.mode, m.mode))
 				return m, nil
 			}
 		}
-		m.appendMessages("Usage: /mode <builder|planner|miner> (or toggle with Shift+Tab)")
+		m.appendNote("Usage: /mode <builder|planner|miner> (or toggle with Shift+Tab)")
 
 	case "/plan":
 		cwd, _ := os.Getwd()
 		if len(parts) > 1 && (parts[1] == "archive" || parts[1] == "clear" || parts[1] == "reset") {
 			archPath, err := plan.ArchiveCurrentPlan(cwd)
 			if err != nil {
-				m.appendMessages(fmt.Sprintf("⚠️ Failed to archive plan: %v (no active plan in .brocode/current_plan.md)", err))
+				m.appendNote("PLAN:\n" + fmt.Sprintf("⚠️ **Failed to archive plan:** %v\n\n*(No active plan found in `.brocode/current_plan.md`)*", err))
 			} else {
-				m.appendNote(fmt.Sprintf("📦 Plan archived to %s", archPath))
+				relPath := archPath
+				if rel, err := filepath.Rel(cwd, archPath); err == nil {
+					relPath = rel
+				}
+				m.appendNote("PLAN:\n" + fmt.Sprintf("📦 **Plan archived successfully!**\n\nSaved to: `%s`\n\n💡 Current active plan has been cleared. Switch to **PLANNER** (`Shift+Tab`) to draft a fresh goal.", relPath))
 			}
 			return m, nil
 		}
 		curPlan, err := plan.LoadCurrentPlan(cwd)
 		if err != nil || curPlan == nil || len(curPlan.Steps) == 0 {
-			m.appendMessages("ℹ️ No active plan found in `.brocode/current_plan.md`.\nSwitch to PLANNER mode (Shift+Tab or `/planner`) to draft an execution plan.")
+			m.appendNote("PLAN:\n" + "ℹ️ **No active plan found in `.brocode/current_plan.md`**\n\nSwitch to **PLANNER** mode (`Shift+Tab` or `/planner`) to draft an execution plan for your next feature or bugfix.")
 		} else {
-			m.appendMessages("PLAN:\n" + plan.RenderMarkdownPlan(curPlan))
+			m.appendNote("PLAN:\n" + plan.RenderMarkdownPlan(curPlan))
 		}
 
 	case "/memory":
 		if m.memStore != nil {
 			s := m.memStore.List()
+			if strings.TrimSpace(s) == "" {
+				s = "ℹ️ No long-term project memory entries recorded yet.\n\nSwitch to **MINER** mode (`Shift+Tab` or `/miner`) to explore and persist verified architecture, conventions, and decisions to `.brocode/memory.md`."
+			}
 			if m.memStore.Path() != "" {
 				s += "\n\n📍 *" + m.memStore.Path() + "*"
 			}
@@ -2426,24 +2540,28 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
-			m.appendMessages("⚠️ Subagent runner is not initialized for /ask.")
+			m.appendNote("⚠️ Subagent runner is not initialized for /ask.")
 			return m, nil
 		}
-		m.appendMessages("CMD:/ask\n" + query)
+		m.appendNote("CMD:/ask\n" + query)
 		m.status = fmt.Sprintf("Answering: %s...", truncatePrompt(query))
 		m.turnStart = time.Now()
 		runner := m.scoutMgr.Runner
+		recentCtx := extractRecentSessionContext(m.messages, 4)
 		askPrompt := fmt.Sprintf(
-			"You are an expert codebase answering assistant. The user is asking:\n\n"+
+			"%s"+
+				"You are an expert codebase answering assistant. The user is asking:\n\n"+
 				"\"%s\"\n\n"+
 				"Instructions:\n"+
 				"1. Be helpful, perceptive, and interpret informal phrasing or typos intelligently.\n"+
-				"2. Search and inspect the actual repository using codebase tools (code_locate, grep, read_file, glob) to find relevant code, models, services, functions, and configs related to their question.\n"+
-				"3. Provide a clear, direct, and concise explanation with exact file paths and code references.\n"+
-				"4. Anti-loop efficiency: Once you locate the relevant functions/schemas, synthesize and output your answer directly instead of repeatedly reading file slices in small chunks.\n"+
-				"5. Do NOT complain about typos or phrasing — interpret their intent and explain what exists in the codebase.\n"+
-				"6. Do NOT edit or modify any files.",
-			query,
+				"2. Language: Formulate your answer in the user's language (e.g. Bahasa Indonesia).\n"+
+				"3. Working Directory: You are ALREADY in the project repository root. Do NOT attempt to run 'cd' or switch directories.\n"+
+				"4. Search and inspect the actual repository using codebase tools (code_locate, grep, read_file, glob) to find relevant code, models, services, functions, and configs.\n"+
+				"5. If git history or diffs are requested (e.g. comparing before/after changes), execute read-only git commands directly (e.g. 'git log -n 10 --oneline', 'git diff HEAD~1', 'git show HEAD') without using 'cd'.\n"+
+				"6. Provide a clear, direct, and structured explanation citing exact file paths and code references.\n"+
+				"7. Anti-loop efficiency: Once you locate the relevant functions/schemas, synthesize and output your answer directly instead of repeatedly reading file slices in small chunks.\n"+
+				"8. Do NOT edit or modify any files.",
+			recentCtx, query,
 		)
 		prog := m.prog
 		return m, tea.Batch(tickCmd(), func() tea.Msg {
@@ -2463,14 +2581,14 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "/spec":
 		feature := strings.TrimSpace(strings.TrimPrefix(cmd, "/spec"))
 		if feature == "" {
-			m.appendMessages("Usage: `/spec <feature description>`\nDraft a structured Architectural Blueprint Specification Contract (ADR, endpoints, data models, blast radius) before writing code.\n\nExample: `/spec Multi-channel Webhook Dispatcher`")
+			m.appendNote("Usage: `/spec <feature description>`\nDraft a structured Architectural Blueprint Specification Contract (ADR, endpoints, data models, blast radius) before writing code.\n\nExample: `/spec Multi-channel Webhook Dispatcher`")
 			return m, nil
 		}
 		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
-			m.appendMessages("⚠️ Subagent runner is not initialized for /spec.")
+			m.appendNote("⚠️ Subagent runner is not initialized for /spec.")
 			return m, nil
 		}
-		m.appendMessages("CMD:/spec\n" + feature)
+		m.appendNote("CMD:/spec\n" + feature)
 		m.status = fmt.Sprintf("Drafting spec: %s...", truncatePrompt(feature))
 		m.turnStart = time.Now()
 		return m, executeSpecCommand(m.scoutMgr.Runner, feature, m.prog)
@@ -2478,24 +2596,217 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "/tournament":
 		task := strings.TrimSpace(strings.TrimPrefix(cmd, "/tournament"))
 		if task == "" {
-			m.appendMessages("Usage: `/tournament <bug or complex task>`\nRuns 2 parallel candidate agents with distinct solving strategies to find the cleanest, verified solution.\n\nExample: `/tournament Fix race condition in connection pooling`")
+			m.appendNote("Usage: `/tournament <bug or complex task>`\nRuns 2 parallel candidate agents with distinct solving strategies to find the cleanest, verified solution.\n\nExample: `/tournament Fix race condition in connection pooling`")
 			return m, nil
 		}
 		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
-			m.appendMessages("⚠️ Subagent runner is not initialized for /tournament.")
+			m.appendNote("⚠️ Subagent runner is not initialized for /tournament.")
 			return m, nil
 		}
-		m.appendMessages("CMD:/tournament\n" + task)
+		m.appendNote("CMD:/tournament\n" + task)
 		m.status = fmt.Sprintf("Running tournament: %s...", truncatePrompt(task))
 		m.turnStart = time.Now()
 		return m, executeTournamentCommand(m.scoutMgr.Runner, task, m.prog)
 
+	case "/update", "/upgrade":
+		m.appendNote("🔍 Checking for updates...")
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		latest, hasUpdate, err := version.CheckLatestVersion(ctx, true)
+		if err != nil {
+			m.appendNote(fmt.Sprintf("❌ Update check failed: %v", err))
+			return m, nil
+		}
+		if !hasUpdate {
+			m.appendNote(fmt.Sprintf("✨ You are already on the latest version of BroCode (%s)!", version.Version))
+			return m, nil
+		}
+		m.appendNote(fmt.Sprintf("🚀 Found new version `%s`! Upgrading in place...", latest))
+		msg, err := version.SelfUpdate(ctx, latest)
+		if err != nil {
+			m.appendNote(fmt.Sprintf("❌ Upgrade failed: %v\n\nYou can manually upgrade with:\n• Windows: `irm https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.ps1 | iex`\n• macOS/Linux: `curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash`", err))
+			return m, nil
+		}
+		m.appendNote(msg + "\n👉 Please restart BroCode to run the new version.")
+		return m, nil
+
+	case "/repair":
+		errCtx := strings.TrimSpace(strings.TrimPrefix(cmd, "/repair"))
+		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
+			m.appendNote("⚠️ Subagent runner is not initialized for /repair.")
+			return m, nil
+		}
+		m.appendNote("CMD:/repair\n" + errCtx)
+		m.status = "Pipeline Doctor: Diagnosing & fixing failures..."
+		m.turnStart = time.Now()
+		return m, executeRepairCommand(m.scoutMgr.Runner, errCtx, m.prog)
+
+	case "/diff":
+		targetPath := strings.TrimSpace(strings.TrimPrefix(cmd, "/diff"))
+		w := m.width
+		if w <= 0 {
+			w = 100
+		}
+		diffOut := GenerateSessionDiffSummary(targetPath, w)
+		m.appendNote(diffOut)
+		return m, nil
+
+	case "/worktree":
+		parts := strings.Fields(strings.TrimPrefix(cmd, "/worktree"))
+		cwd, _ := os.Getwd()
+		wm := tool.NewWorktreeManager(cwd)
+
+		if len(parts) == 0 {
+			list, err := wm.ListWorktrees()
+			if err != nil || len(list) == 0 {
+				m.appendNote("🌿 GIT WORKTREES\nNo isolated background worktrees active.\n\nUsage: `/worktree <task description>` to run an autonomous task in an isolated branch.\nSub-commands:\n• `/worktree list`\n• `/worktree merge <branch>`\n• `/worktree clean`")
+				return m, nil
+			}
+			var sb strings.Builder
+			sb.WriteString("🌿 ACTIVE GIT WORKTREES:\n\n")
+			for _, wt := range list {
+				sb.WriteString(fmt.Sprintf("• **%s** (Branch: `%s`)\n  Path: `%s`\n\n", filepath.Base(wt.Directory), wt.Branch, wt.Directory))
+			}
+			sb.WriteString("👉 Merge a finished worktree with `/worktree merge <branch>` or delete with `/worktree clean`.")
+			m.appendNote(sb.String())
+			return m, nil
+		}
+
+		sub := strings.ToLower(parts[0])
+		switch sub {
+		case "list":
+			list, _ := wm.ListWorktrees()
+			var sb strings.Builder
+			sb.WriteString("🌿 ACTIVE GIT WORKTREES:\n\n")
+			for _, wt := range list {
+				sb.WriteString(fmt.Sprintf("• **%s** (Branch: `%s`)\n  Path: `%s`\n\n", filepath.Base(wt.Directory), wt.Branch, wt.Directory))
+			}
+			m.appendNote(sb.String())
+			return m, nil
+
+		case "merge":
+			if len(parts) < 2 {
+				m.appendNote("Usage: `/worktree merge <branch-name>`")
+				return m, nil
+			}
+			branch := parts[1]
+			out, err := wm.MergeWorktree(branch)
+			if err != nil {
+				m.appendNote(fmt.Sprintf("❌ Merge failed: %v\nOutput:\n%s", err, out))
+			} else {
+				m.appendNote(fmt.Sprintf("✅ Successfully merged branch `%s` into active workspace!", branch))
+			}
+			return m, nil
+
+		case "clean":
+			worktreeRoot := filepath.Join(cwd, ".brocode", "worktrees")
+			_ = os.RemoveAll(worktreeRoot)
+			m.appendNote("🧹 Cleaned up all isolated worktrees in `.brocode/worktrees/`.")
+			return m, nil
+
+		default:
+			task := strings.Join(parts, " ")
+			if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
+				m.appendNote("⚠️ Subagent runner is not initialized for /worktree.")
+				return m, nil
+			}
+			wtDir, branch, err := wm.CreateWorktree(task)
+			if err != nil {
+				m.appendNote(fmt.Sprintf("❌ Failed to create worktree: %v", err))
+				return m, nil
+			}
+			m.appendNote(fmt.Sprintf("🌿 Spawned isolated worktree: `%s` (Branch: `%s`)\nStarting background agent...", wtDir, branch))
+			m.status = fmt.Sprintf("Running isolated worktree task: %s...", truncatePrompt(task))
+			m.turnStart = time.Now()
+
+			// Run subagent inside the worktree directory
+			return m, tea.Batch(tickCmd(), func() tea.Msg {
+				ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+				defer cancel()
+				subTask := subagent.SubAgent{
+					ID:        "worktree_" + branch,
+					Task:      fmt.Sprintf("Work in directory %s to implement: %s", wtDir, task),
+					Mode:      "BUILDER",
+					TargetDir: wtDir,
+					Mutates:   true,
+				}
+				answers, rErr := m.scoutMgr.Runner.RunMany(ctx, []subagent.SubAgent{subTask}, false, nil)
+				if rErr != nil || len(answers) == 0 {
+					return ephemeralAskResultMsg(fmt.Sprintf("❌ Worktree task failed: %v", rErr))
+				}
+				return ephemeralAskResultMsg(fmt.Sprintf("WORKTREE TASK FINISHED:\n%s\n---\n✅ Branch: `%s`\nType `/worktree merge %s` to merge into main workspace.", answers[0], branch, branch))
+			})
+		}
+
+	case "/agents":
+		cwd, _ := os.Getwd()
+		loader := agent.NewLoader(cwd)
+		list := loader.All()
+		if len(list) == 0 {
+			m.appendNote("🤖 CUSTOM AGENTS\nNo custom agents found.\n\nCreate custom agents in `.brocode/agents/*.md` (project) or `~/.config/brocode/agents/*.md` (global).\n\nExample file `.brocode/agents/auditor.md`:\n```markdown\n---\nname: auditor\ndescription: Security Auditor\nmode: PLANNER\ntools:\n  allow: [read_file, grep, code_locate]\n---\nAudit security and code quality...\n```")
+			return m, nil
+		}
+		var sb strings.Builder
+		sb.WriteString("🤖 CUSTOM AGENTS & MODES:\n\n")
+		for _, ag := range list {
+			src := "global (~/.config/brocode/agents)"
+			if ag.IsProject {
+				src = "project (.brocode/agents)"
+			}
+			active := ""
+			if m.activeAgent != nil && strings.EqualFold(m.activeAgent.Name, ag.Name) {
+				active = " 🟢 [ACTIVE]"
+			}
+			fmt.Fprintf(&sb, "• **%s**%s [%s]\n  %s\n  Mode: %s | Source: %s\n\n",
+				ag.Name, active, ag.Description, truncatePrompt(ag.Prompt), ag.Mode, src)
+		}
+		sb.WriteString("👉 Activate an agent with `/agent <name>` (or `/agent reset` to return to default).")
+		m.appendNote(sb.String())
+		return m, nil
+
+	case "/agent":
+		agentName := strings.TrimSpace(strings.TrimPrefix(cmd, "/agent"))
+		if agentName == "" {
+			if m.activeAgent != nil {
+				m.appendNote(fmt.Sprintf("🟢 Active Custom Agent: **%s** (%s)\nMode: %s\nPath: %s\n\nType `/agent reset` to deactivate.",
+					m.activeAgent.Name, m.activeAgent.Description, m.activeAgent.Mode, m.activeAgent.Path))
+			} else {
+				m.appendNote("No custom agent currently active.\n\nUsage: `/agent <name>` or `/agent reset`\nList all available agents with `/agents`.")
+			}
+			return m, nil
+		}
+		if agentName == "reset" || agentName == "clear" || agentName == "off" || agentName == "none" {
+			m.activeAgent = nil
+			m.rebuildEngine()
+			m.appendNote("⚪ Custom agent deactivated. Reverted to standard " + m.mode + " mode.")
+			return m, nil
+		}
+
+		cwd, _ := os.Getwd()
+		if m.agentLoader == nil {
+			m.agentLoader = agent.NewLoader(cwd)
+		}
+		targetAg := m.agentLoader.Find(agentName)
+		if targetAg == nil {
+			m.appendNote(fmt.Sprintf("❌ Custom agent %q not found.\n\nType `/agents` to view all available custom agents in project and global locations.", agentName))
+			return m, nil
+		}
+
+		m.activeAgent = targetAg
+		if targetAg.Mode != "" {
+			m.mode = targetAg.Mode
+		}
+		m.rebuildEngine()
+		m.appendNote(fmt.Sprintf("🟢 Switched to Custom Agent: **%s**\nDescription: %s\nMode: %s\nDirectives: Loaded from `%s`",
+			targetAg.Name, targetAg.Description, targetAg.Mode, targetAg.Path))
+		return m, nil
+
 	case "/lsp":
-		m.appendMessages("LSP:\n" + m.lspStatus())
+		m.appendNote("LSP:\n" + m.lspStatus())
 
 	case "/diagnose":
 		if m.lspMgr == nil {
-			m.appendMessages("⚠️ LSP not initialized.")
+			m.appendNote("LSP:\n⚠️ LSP not initialized.")
 			return m, nil
 		}
 		fixMode := len(parts) > 1 && strings.TrimSpace(parts[1]) == "fix"
@@ -2506,7 +2817,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tickCmd(), func() tea.Msg {
 			out, err := lsp.ScanDiagnostics(context.Background(), cwd)
 			if err != nil {
-				return diagnoseResultMsg("❌ Diagnose failed: " + err.Error())
+				return diagnoseResultMsg("LSP:\n❌ Diagnose failed: " + err.Error())
 			}
 			if fixMode {
 				return diagnoseFixMsg(out)
@@ -2517,7 +2828,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 
 	case "/lsp-install":
 		if m.lspMgr == nil {
-			m.appendMessages("⚠️ LSP not initialized.")
+			m.appendNote("LSP:\n⚠️ Language Server Protocol (LSP) manager is not initialized.")
 			return m, nil
 		}
 		lang := ""
@@ -2527,26 +2838,26 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		hints := m.lspMgr.InstallHints()
 		if lang != "" {
 			if _, ok := hints[lang]; !ok {
-				m.appendMessages("⚠️ No install needed for " + lang + " (already installed or unknown).")
+				m.appendNote("LSP:\n⚠️ No install needed for `" + lang + "` (already installed or unknown language).")
 				return m, nil
 			}
 			hints = map[string]string{lang: hints[lang]}
 		}
 		if len(hints) == 0 {
-			m.appendMessages("✅ All language servers are installed.")
+			m.appendNote("LSP:\n✅ All language servers are already installed and active.")
 			return m, nil
 		}
 		var sb strings.Builder
-		sb.WriteString("⬇️ Installing language servers...")
+		sb.WriteString("⬇️ **Installing language servers...**\n\n")
 		for l, c := range hints {
-			sb.WriteString(fmt.Sprintf("\n  %-10s %s", l, c))
+			sb.WriteString(fmt.Sprintf("- **%s**: `%s`\n", l, c))
 		}
-		m.appendNote(sb.String())
+		m.appendNote("LSP:\n" + sb.String())
 		m.status = "Installing language servers..."
 		m.turnStart = time.Now()
 		lsp := m.lspMgr
 		return m, tea.Batch(tickCmd(), func() tea.Msg {
-			return diagnoseResultMsg(runLSPInstalls(lsp, lang))
+			return diagnoseResultMsg("LSP:\n" + runLSPInstalls(lsp, lang))
 		})
 
 	case "/mcp":
@@ -2569,10 +2880,10 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				m.sessionsViewport.GotoTop()
 				m.showSessions = true
 			} else {
-				m.appendMessages("❌ Failed to list sessions: " + err.Error())
+				m.appendNote("ERROR: ❌ Failed to list sessions: " + err.Error())
 			}
 		} else {
-			m.appendMessages("⚠️ Session store not initialized.")
+			m.appendNote("ERROR: ⚠️ Session store not initialized.")
 		}
 
 	case "/new":
@@ -2584,7 +2895,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 		m.context = bcontext.NewManager(newSessID, st, m.contextWindow())
 		m.rebuildEngine()
-		m.messages = []string{fmt.Sprintf("✅ Started new session: %s", newSessID)}
+		m.messages = []string{fmt.Sprintf("MODE:BUILDER\n✅ **Started fresh session:** `%s`\n\nActive chat context has been reset to zero.", newSessID)}
 
 	case "/models":
 		m.showModels = true
@@ -2608,7 +2919,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.showDebug = true
 
 	case "/clear":
-		m.messages = []string{"⚡ Chat history cleared."}
+		m.messages = []string{"MODE:BUILDER\n⚡ **Chat history cleared.** Ready for next prompt."}
 
 	case "/workspace", "/repos":
 		cwd, _ := os.Getwd()
@@ -2628,14 +2939,14 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			}
 		}
 		sb.WriteString("\n*Tips:* Subagents and tools can target specific repos using `target_dir: \"<repo_name>\"`.")
-		m.appendMessages("WORKSPACE:\n" + sb.String())
+		m.appendNote("WORKSPACE:\n" + sb.String())
 
 	case "/undo":
 		count := tool.RestoreAllSnapshots()
 		if count > 0 {
-			m.appendMessages(fmt.Sprintf("UNDO:\n↩️ Successfully restored %d file(s) back to pre-turn snapshot.", count))
+			m.appendNote(fmt.Sprintf("UNDO:\n↩️ Successfully restored %d file(s) back to pre-turn snapshot.", count))
 		} else {
-			m.appendMessages("UNDO:\n⚠️ No live snapshots available to roll back (no files were modified in the active turn).")
+			m.appendNote("UNDO:\n⚠️ No live snapshots available to roll back (no files were modified in the active turn).")
 		}
 
 	case "/model":
@@ -2648,27 +2959,27 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				m.switchProviderAndModel(pID, m.activeModel)
 			} else {
 				m.activeModel = target
-				m.appendMessages(fmt.Sprintf("✅ Model switched to %s", m.activeModel))
+				m.appendNote(fmt.Sprintf("MODE:%s\n✅ Model switched to `%s`", m.mode, m.activeModel))
 				m.rebuildEngine()
 			}
 		} else {
-			m.appendMessages("Usage: /model <provider>/<model> or /model <model_name>")
+			m.appendNote("MODE:" + m.mode + "\n**Usage:** `/model <provider>/<model>` or `/model <model_name>`\n\n**Examples:**\n- `/model openai/gpt-4o`\n- `/model gemini/gemini-2.5-pro`\n- `/model claude-3-5-sonnet`")
 		}
 
 	case "/report":
 		if m.context == nil || m.context.Store() == nil {
-			m.appendMessages("⚠️ Session store is not initialized.")
+			m.appendNote("REPORT:\n⚠️ Session store is not initialized.")
 			return m, nil
 		}
 		r, err := report.Build(m.context.Store(), m.context.SessionID())
 		if err != nil {
-			m.appendMessages(fmt.Sprintf("⚠️ Failed to build session report: %v", err))
+			m.appendNote(fmt.Sprintf("REPORT:\n⚠️ Failed to build session report: %v", err))
 			return m, nil
 		}
 		if len(parts) > 1 && (parts[1] == "--json" || parts[1] == "-j" || parts[1] == "json" || parts[1] == "export") {
 			jsonData, err := r.RenderJSON()
 			if err != nil {
-				m.appendMessages(fmt.Sprintf("⚠️ Failed to format JSON report: %v", err))
+				m.appendNote(fmt.Sprintf("REPORT:\n⚠️ Failed to format JSON report: %v", err))
 				return m, nil
 			}
 			outPath := "report.json"
@@ -2676,13 +2987,13 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				outPath = parts[2]
 			}
 			if err := os.WriteFile(outPath, []byte(jsonData), 0o644); err != nil {
-				m.appendMessages(fmt.Sprintf("⚠️ Failed to write %s: %v", outPath, err))
+				m.appendNote(fmt.Sprintf("REPORT:\n⚠️ Failed to write %s: %v", outPath, err))
 			} else {
-				m.appendMessages(fmt.Sprintf("REPORT:\n📊 Privacy-safe session report exported to `%s` (%d bytes).\n\nReady to share with community / devs for benchmarking & optimization!", outPath, len(jsonData)))
+				m.appendNote(fmt.Sprintf("REPORT:\n📊 Privacy-safe session report exported to `%s` (%d bytes).\n\nReady to share with community / devs for benchmarking & optimization!", outPath, len(jsonData)))
 			}
 			return m, nil
 		}
-		m.appendMessages("REPORT:\n" + r.RenderMarkdown())
+		m.appendNote("REPORT:\n" + r.RenderMarkdown())
 	}
 	return m, nil
 }
@@ -3827,10 +4138,10 @@ func (m *Model) buildLogChrome() (string, int) {
 			d := time.Since(m.turnStart)
 			elapsed = fmt.Sprintf("  ⏱ %d:%02d", int(d.Minutes()), int(d.Seconds())%60)
 		}
-		sb.WriteString(spinnerStyle.Render(frame) + " " + m.status + elapsed + "\n")
+		sb.WriteString(spinnerStyle.Render(frame) + "  " + normalizeEmojiSpacing(m.status) + elapsed + "\n")
 		actStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 		for _, act := range m.activity {
-			sb.WriteString(actStyle.Render("  · "+act) + "\n")
+			sb.WriteString(actStyle.Render("  · "+normalizeEmojiSpacing(act)) + "\n")
 		}
 		sb.WriteString("\n")
 	} else {
@@ -4472,7 +4783,11 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 	// Active Execution Plan (/plan):
 	if strings.HasPrefix(msg, "PLAN:\n") {
 		content := strings.TrimPrefix(msg, "PLAN:\n")
-		return renderBorderedCard("📋 ACTIVE EXECUTION PLAN", "(.brocode/current_plan.md)", content, "💡 Next: Switch to BUILDER (Shift+Tab) to execute or type `/plan archive` to clear.", "81", width)
+		footer := "💡 Next: Switch to BUILDER (Shift+Tab) to execute or type `/plan archive` to clear."
+		if strings.Contains(content, "Plan archived successfully!") || strings.Contains(content, "No active plan found") {
+			footer = ""
+		}
+		return renderBorderedCard("📋 EXECUTION PLAN & ROADMAP", "(.brocode/current_plan.md)", content, footer, "81", width)
 	}
 
 	// Commands & Cheatsheet (/help):
@@ -4661,4 +4976,87 @@ func renderBorderedCard(title, subtitle, body, footer, colorCode string, width i
 		res += "\n\n" + dimStyle.Render(footer)
 	}
 	return cardStyle.Render(res)
+}
+
+// resolveTournamentSelection detects if a prompt is applying a candidate from a
+// recent tournament (e.g. "Apply Beta") and enriches the execution prompt with
+// that candidate's exact root cause analysis, target files, and proposed patch.
+func resolveTournamentSelection(query string, messages []string) string {
+	q := strings.TrimSpace(strings.ToLower(query))
+	target := ""
+	if strings.Contains(q, "apply alpha") || strings.Contains(q, "pilih alpha") || strings.Contains(q, "terapkan alpha") {
+		target = "Candidate-Alpha"
+	} else if strings.Contains(q, "apply beta") || strings.Contains(q, "pilih beta") || strings.Contains(q, "terapkan beta") {
+		target = "Candidate-Beta"
+	}
+	if target == "" {
+		return ""
+	}
+
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if strings.HasPrefix(msg, "TOURNAMENT:\n") {
+			body := strings.TrimPrefix(msg, "TOURNAMENT:\n")
+			startMarker := "### 🥊 " + target
+			startIdx := strings.Index(body, startMarker)
+			if startIdx >= 0 {
+				candidateSection := body[startIdx:]
+				if endIdx := strings.Index(candidateSection, "### ⚖️"); endIdx >= 0 {
+					candidateSection = candidateSection[:endIdx]
+				} else if nextCand := strings.Index(candidateSection, "### 🥊"); nextCand > 0 {
+					candidateSection = candidateSection[:nextCand]
+				}
+				candidateSection = strings.TrimSpace(candidateSection)
+				return fmt.Sprintf(
+					"Goal: Execute %s's verified patch and fix from the tournament.\n\n"+
+						"Language: Automatically detect and mirror the user's conversation language in your explanations and final summary (e.g. Bahasa Indonesia, English).\n\n"+
+						"Verified Analysis & Proposal from %s:\n"+
+						"%s\n\n"+
+						"Action Required:\n"+
+						"1. Locate and inspect the target file(s) and specific line(s) specified in the proposal above.\n"+
+						"2. Apply the fix using edit_file (or write_file).\n"+
+						"3. Summarize the changes made clearly in the user's language.",
+					target, target, candidateSection,
+				)
+			}
+		}
+	}
+	return ""
+}
+
+// extractRecentSessionContext extracts concise context from recent turns so isolated subagents
+// (like /ask) understand contextual references (e.g. "masalah tadi", "before after fix ini").
+func extractRecentSessionContext(messages []string, maxCount int) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	var snippets []string
+	count := 0
+	for i := len(messages) - 1; i >= 0 && count < maxCount; i-- {
+		msg := messages[i]
+		if strings.HasPrefix(msg, "YOU:\n") {
+			body := strings.TrimPrefix(msg, "YOU:\n")
+			snippets = append([]string{"- User: " + truncatePrompt(body)}, snippets...)
+			count++
+		} else if strings.HasPrefix(msg, "BROCODE:") {
+			parts := strings.SplitN(msg, "\n", 2)
+			if len(parts) > 1 {
+				snippets = append([]string{"- Assistant: " + truncatePrompt(parts[1])}, snippets...)
+				count++
+			}
+		} else if strings.HasPrefix(msg, "TOURNAMENT:\n") {
+			parts := strings.SplitN(msg, "\n", 2)
+			if len(parts) > 1 {
+				snippets = append([]string{"- Tournament Task: " + truncatePrompt(parts[1])}, snippets...)
+				count++
+			}
+		} else if strings.HasPrefix(msg, "CMD:/") {
+			snippets = append([]string{"- Command: " + truncatePrompt(msg)}, snippets...)
+			count++
+		}
+	}
+	if len(snippets) == 0 {
+		return ""
+	}
+	return "Active Conversation Context (for resolving references like 'itu', 'masalah tadi', or recent fixes):\n" + strings.Join(snippets, "\n") + "\n\n"
 }
