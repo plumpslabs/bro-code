@@ -2609,31 +2609,29 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m, executeTournamentCommand(m.scoutMgr.Runner, task, m.prog)
 
 	case "/update", "/upgrade":
-		m.appendNote("🔍 Checking for updates...")
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		latest, hasUpdate, err := version.CheckLatestVersion(ctx, true)
-		if err != nil {
-			m.appendNote(fmt.Sprintf("❌ Update check failed: %v", err))
-			return m, nil
-		}
-		if !hasUpdate {
-			m.appendNote(fmt.Sprintf("✨ You are already on the latest version of BroCode (%s)!", version.Version))
-			return m, nil
-		}
-		m.appendNote(fmt.Sprintf("🚀 Found new version `%s`! Upgrading in place...", latest))
-		msg, err := version.SelfUpdate(ctx, latest)
-		if err != nil {
-			m.appendNote(fmt.Sprintf("❌ Upgrade failed: %v\n\nYou can manually upgrade with:\n• Windows: `irm https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.ps1 | iex`\n• macOS/Linux: `curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash`", err))
-			return m, nil
-		}
-		m.appendNote(msg + "\n👉 Please restart BroCode to run the new version.")
-		return m, nil
+		m.status = "🚀 Checking for updates & self-updating in background..."
+		m.turnStart = time.Now()
+		return m, tea.Batch(tickCmd(), func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			latest, hasUpdate, err := version.CheckLatestVersion(ctx, true)
+			if err != nil {
+				return ephemeralAskResultMsg(fmt.Sprintf("UPDATE:\n❌ Update check failed: %v", err))
+			}
+			if !hasUpdate {
+				return ephemeralAskResultMsg(fmt.Sprintf("UPDATE:\n✨ You are already on the latest version of BroCode (**%s**)!\n\nNo upgrade is needed at this time.", version.Version))
+			}
+			msg, err := version.SelfUpdate(ctx, latest)
+			if err != nil {
+				return ephemeralAskResultMsg(fmt.Sprintf("UPDATE:\n❌ Upgrade failed: %v\n\nYou can manually upgrade with:\n• Windows: `irm https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.ps1 | iex`\n• macOS/Linux: `curl -fsSL https://raw.githubusercontent.com/plumpslabs/bro-code/main/scripts/install.sh | bash`", err))
+			}
+			return ephemeralAskResultMsg(fmt.Sprintf("UPDATE:\n%s\n\n👉 Please restart BroCode to run version **%s**.", msg, latest))
+		})
 
 	case "/repair":
 		errCtx := strings.TrimSpace(strings.TrimPrefix(cmd, "/repair"))
 		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
-			m.appendNote("⚠️ Subagent runner is not initialized for /repair.")
+			m.appendNote("REPAIR:\n⚠️ Subagent runner is not initialized for /repair.")
 			return m, nil
 		}
 		m.appendNote("CMD:/repair\n" + errCtx)
@@ -2659,16 +2657,15 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		if len(parts) == 0 {
 			list, err := wm.ListWorktrees()
 			if err != nil || len(list) == 0 {
-				m.appendNote("🌿 GIT WORKTREES\nNo isolated background worktrees active.\n\nUsage: `/worktree <task description>` to run an autonomous task in an isolated branch.\nSub-commands:\n• `/worktree list`\n• `/worktree merge <branch>`\n• `/worktree clean`")
+				m.appendNote("WORKTREE:\nNo isolated background worktrees active.\n\nUsage: `/worktree <task description>` to run an autonomous task in an isolated branch.\n\nSub-commands:\n• `/worktree list` — List all active worktree branches\n• `/worktree merge <branch>` — Merge worktree branch to main\n• `/worktree clean` — Remove all isolated worktrees")
 				return m, nil
 			}
 			var sb strings.Builder
-			sb.WriteString("🌿 ACTIVE GIT WORKTREES:\n\n")
 			for _, wt := range list {
 				sb.WriteString(fmt.Sprintf("• **%s** (Branch: `%s`)\n  Path: `%s`\n\n", filepath.Base(wt.Directory), wt.Branch, wt.Directory))
 			}
 			sb.WriteString("👉 Merge a finished worktree with `/worktree merge <branch>` or delete with `/worktree clean`.")
-			m.appendNote(sb.String())
+			m.appendNote("WORKTREE:\n" + sb.String())
 			return m, nil
 		}
 
@@ -2676,46 +2673,49 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		switch sub {
 		case "list":
 			list, _ := wm.ListWorktrees()
+			if len(list) == 0 {
+				m.appendNote("WORKTREE:\nNo active isolated worktrees found.")
+				return m, nil
+			}
 			var sb strings.Builder
-			sb.WriteString("🌿 ACTIVE GIT WORKTREES:\n\n")
 			for _, wt := range list {
 				sb.WriteString(fmt.Sprintf("• **%s** (Branch: `%s`)\n  Path: `%s`\n\n", filepath.Base(wt.Directory), wt.Branch, wt.Directory))
 			}
-			m.appendNote(sb.String())
+			m.appendNote("WORKTREE:\n" + sb.String())
 			return m, nil
 
 		case "merge":
 			if len(parts) < 2 {
-				m.appendNote("Usage: `/worktree merge <branch-name>`")
+				m.appendNote("WORKTREE:\nUsage: `/worktree merge <branch-name>`")
 				return m, nil
 			}
 			branch := parts[1]
 			out, err := wm.MergeWorktree(branch)
 			if err != nil {
-				m.appendNote(fmt.Sprintf("❌ Merge failed: %v\nOutput:\n%s", err, out))
+				m.appendNote(fmt.Sprintf("WORKTREE:\n❌ Merge failed: %v\nOutput:\n%s", err, out))
 			} else {
-				m.appendNote(fmt.Sprintf("✅ Successfully merged branch `%s` into active workspace!", branch))
+				m.appendNote(fmt.Sprintf("WORKTREE:\n✅ Successfully merged branch `%s` into active workspace!", branch))
 			}
 			return m, nil
 
 		case "clean":
 			worktreeRoot := filepath.Join(cwd, ".brocode", "worktrees")
 			_ = os.RemoveAll(worktreeRoot)
-			m.appendNote("🧹 Cleaned up all isolated worktrees in `.brocode/worktrees/`.")
+			m.appendNote("WORKTREE:\n🧹 Cleaned up all isolated worktrees in `.brocode/worktrees/`.")
 			return m, nil
 
 		default:
 			task := strings.Join(parts, " ")
 			if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
-				m.appendNote("⚠️ Subagent runner is not initialized for /worktree.")
+				m.appendNote("WORKTREE:\n⚠️ Subagent runner is not initialized for /worktree.")
 				return m, nil
 			}
 			wtDir, branch, err := wm.CreateWorktree(task)
 			if err != nil {
-				m.appendNote(fmt.Sprintf("❌ Failed to create worktree: %v", err))
+				m.appendNote(fmt.Sprintf("WORKTREE:\n❌ Failed to create worktree: %v", err))
 				return m, nil
 			}
-			m.appendNote(fmt.Sprintf("🌿 Spawned isolated worktree: `%s` (Branch: `%s`)\nStarting background agent...", wtDir, branch))
+			m.appendNote(fmt.Sprintf("WORKTREE:\n🌿 Spawned isolated worktree: `%s` (Branch: `%s`)\n\nStarting background agent in sandbox...", wtDir, branch))
 			m.status = fmt.Sprintf("Running isolated worktree task: %s...", truncatePrompt(task))
 			m.turnStart = time.Now()
 
@@ -2732,22 +2732,105 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				}
 				answers, rErr := m.scoutMgr.Runner.RunMany(ctx, []subagent.SubAgent{subTask}, false, nil)
 				if rErr != nil || len(answers) == 0 {
-					return ephemeralAskResultMsg(fmt.Sprintf("❌ Worktree task failed: %v", rErr))
+					return ephemeralAskResultMsg(fmt.Sprintf("WORKTREE:\n❌ Worktree task failed: %v", rErr))
 				}
-				return ephemeralAskResultMsg(fmt.Sprintf("WORKTREE TASK FINISHED:\n%s\n---\n✅ Branch: `%s`\nType `/worktree merge %s` to merge into main workspace.", answers[0], branch, branch))
+				return ephemeralAskResultMsg(fmt.Sprintf("WORKTREE:\n%s\n---\n✅ Branch: `%s`\nType `/worktree merge %s` to merge into main workspace.", answers[0], branch, branch))
 			})
 		}
+
+	case "/search-key", "/search":
+		arg := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(cmd, "/search-key"), "/search"))
+		if arg == "" {
+			st := provider.GetSearchProviderStatus()
+			if st.PrimaryProvider != "free" {
+				maskedPrimary := st.PrimaryKey
+				if len(maskedPrimary) > 8 {
+					maskedPrimary = maskedPrimary[:4] + "..." + maskedPrimary[len(maskedPrimary)-4:]
+				}
+				if st.SecondaryProvider != "" {
+					maskedSecondary := st.SecondaryKey
+					if len(maskedSecondary) > 8 {
+						maskedSecondary = maskedSecondary[:4] + "..." + maskedSecondary[len(maskedSecondary)-4:]
+					}
+					m.appendNote(fmt.Sprintf("SEARCH:\n• **Mode**: Multi-Tier AI Web Search (Active Cascade)\n• **Primary Provider**: %s (`%s`)\n• **Fallback Provider**: %s (`%s`)\n• **Fallback 2**: Zero-Config Free Engine (DuckDuckGo)\n• **Footer Badge**: `%s`\n\n👉 **Management Commands**:\n• Change primary: `/search-key <key>`\n• Reset to Free Mode: `/search-key clear`", strings.ToUpper(st.PrimaryProvider), maskedPrimary, strings.ToUpper(st.SecondaryProvider), maskedSecondary, strings.TrimPrefix(st.Badge, " · ")))
+				} else {
+					quotaInfo := "1,000 Free Searches/Month (tavily.com)"
+					if st.PrimaryProvider == "exa" {
+						quotaInfo = "Exa Neural Search API (exa.ai)"
+					}
+					m.appendNote(fmt.Sprintf("SEARCH:\n• **Provider**: %s\n• **API Key**: `%s`\n• **Mode**: Dedicated High-Speed AI Web Search\n• **Quota**: %s\n• **Footer Badge**: `%s`\n\n👉 **Management Commands**:\n• Set Tavily key: `/search-key tvly-xxxx` (or `/search-key tavily <key>`)\n• Set Exa key: `/search-key exa-xxxx` (or `/search-key exa <key>`)\n• Reset to Free Mode: `/search-key clear`", strings.ToUpper(st.PrimaryProvider), maskedPrimary, quotaInfo, strings.TrimPrefix(st.Badge, " · ")))
+				}
+			} else {
+				m.appendNote("SEARCH:\n• **Current Status**: Zero-Config Free Mode (DuckDuckGo HTML / Lite / Wikipedia)\n\n👉 **Want dedicated, instant web search with 1,000 free searches/month?**\n1. Sign up for free at **https://tavily.com** (no credit card needed)\n2. Copy your API key (starts with `tvly-...`)\n3. Run: `/search-key tvly-xxxxxxxxxxxx`\n\nBroCode will save it permanently to `~/.config/brocode/config.json` and display `🌐:Tavily` in the bottom status bar!\n\n*(Also supports Exa AI via `/search-key exa <key>` or `/search-key exa-xxxx`)*")
+			}
+			return m, nil
+		}
+
+		lower := strings.ToLower(arg)
+		if lower == "clear" || lower == "reset" || lower == "delete" || lower == "remove" {
+			_ = provider.SaveSearchKey("")
+			m.appendNote("SEARCH:\n🧹 **Search Key Cleared & Removed!**\n\nBroCode has switched to **Zero-Config Free Search Mode** (`🌐:Free`).")
+			return m, nil
+		}
+
+		parts := strings.Fields(arg)
+		prov := ""
+		key := arg
+		if len(parts) == 2 && (strings.EqualFold(parts[0], "tavily") || strings.EqualFold(parts[0], "exa")) {
+			prov = strings.ToLower(parts[0])
+			key = parts[1]
+		}
+
+		if err := provider.SaveSearchProviderKey(prov, key); err != nil {
+			m.appendNote(fmt.Sprintf("SEARCH:\n❌ Failed to save search key: %v", err))
+			return m, nil
+		}
+		_, activeProv := provider.GetActiveSearchKey()
+		if activeProv == "" {
+			activeProv = "tavily"
+		}
+		m.appendNote(fmt.Sprintf("SEARCH:\n✅ **Web Search Provider Configured Successfully!**\n\n• **Provider**: %s\n• **Status**: Active & Persisted to `~/.config/brocode/config.json`\n• **Bottom Bar**: `🌐:%s` (Active)\n\nBroCode web search is now configured for high-speed documentation and web research!", strings.ToUpper(activeProv), strings.Title(activeProv)))
+		return m, nil
+
+	case "/context7-key", "/c7-key", "/context7":
+		arg := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(cmd, "/context7-key"), "/c7-key"), "/context7"))
+		if arg == "" {
+			k := provider.GetActiveContext7Key()
+			if k != "" {
+				masked := k
+				if len(k) > 8 {
+					masked = k[:4] + "..." + k[len(k)-4:]
+				}
+				m.appendNote(fmt.Sprintf("CONTEXT7:\n• **Provider**: Context7 Official Docs API (Native REST)\n• **API Key**: `%s`\n• **Status**: Active & Verified\n• **Docs Cascade**: Layer 1 (Local/AST) ➔ Layer 2 (Context7) ➔ Layer 3 (Web Search)\n\n👉 **Management Commands**:\n• Change key: `/context7-key <new-key>`\n• Remove key: `/context7-key clear`", masked))
+			} else {
+				m.appendNote("CONTEXT7:\n• **Current Status**: Unconfigured (Using Web Search Fallback)\n\n👉 **Want instant, up-to-date official library documentation (Next.js, Tailwind, FastAPI, etc.)?**\n1. Sign up for free at **https://context7.com**\n2. Copy your API key (or use dashboard token)\n3. Run: `/context7-key c7_xxxxxxxxxxxx`\n\nBroCode will save it permanently to `~/.config/brocode/config.json` for zero-latency, verified docs resolution!")
+			}
+			return m, nil
+		}
+
+		lower := strings.ToLower(arg)
+		if lower == "clear" || lower == "reset" || lower == "delete" || lower == "remove" {
+			_ = provider.SaveContext7Key("")
+			m.appendNote("CONTEXT7:\n🧹 **Context7 API Key Cleared & Removed!**\n\nBroCode documentation lookup will fall back to Web Search.")
+			return m, nil
+		}
+
+		if err := provider.SaveContext7Key(arg); err != nil {
+			m.appendNote(fmt.Sprintf("CONTEXT7:\n❌ Failed to save Context7 API key: %v", err))
+			return m, nil
+		}
+		m.appendNote("CONTEXT7:\n✅ **Context7 API Key Configured Successfully!**\n\n• **Mode**: Native High-Speed REST Client (Zero Node.js overhead)\n• **Status**: Active & Persisted to `~/.config/brocode/config.json`\n• **Tool**: `doc_lookup` (Automatic 3-Tier Docs Cascade)\n\nBroCode is now ready to query official documentation directly!")
+		return m, nil
 
 	case "/agents":
 		cwd, _ := os.Getwd()
 		loader := agent.NewLoader(cwd)
 		list := loader.All()
 		if len(list) == 0 {
-			m.appendNote("🤖 CUSTOM AGENTS\nNo custom agents found.\n\nCreate custom agents in `.brocode/agents/*.md` (project) or `~/.config/brocode/agents/*.md` (global).\n\nExample file `.brocode/agents/auditor.md`:\n```markdown\n---\nname: auditor\ndescription: Security Auditor\nmode: PLANNER\ntools:\n  allow: [read_file, grep, code_locate]\n---\nAudit security and code quality...\n```")
+			m.appendNote("AGENTS:\nNo custom agents found.\n\nCreate custom agents in `.brocode/agents/*.md` (project) or `~/.config/brocode/agents/*.md` (global).\n\nExample file `.brocode/agents/auditor.md`:\n```markdown\n---\nname: auditor\ndescription: Security Auditor\nmode: PLANNER\ntools:\n  allow: [read_file, grep, code_locate]\n---\nAudit security and code quality...\n```")
 			return m, nil
 		}
 		var sb strings.Builder
-		sb.WriteString("🤖 CUSTOM AGENTS & MODES:\n\n")
 		for _, ag := range list {
 			src := "global (~/.config/brocode/agents)"
 			if ag.IsProject {
@@ -2761,7 +2844,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 				ag.Name, active, ag.Description, truncatePrompt(ag.Prompt), ag.Mode, src)
 		}
 		sb.WriteString("👉 Activate an agent with `/agent <name>` (or `/agent reset` to return to default).")
-		m.appendNote(sb.String())
+		m.appendNote("AGENTS:\n" + sb.String())
 		return m, nil
 
 	case "/agent":
@@ -4250,14 +4333,17 @@ func (m *Model) buildLogChrome() (string, int) {
 		}
 	}
 
+	// Live Web Search provider badge (supports single and multi-tier)
+	searchBadge := provider.GetSearchProviderStatus().Badge
+
 	// Lead icon: dynamic animated loader while busy/running, fire emoji when ready
 	leadIcon := "🔥"
 	if m.turnRunning || (m.status != "Ready" && m.status != "Failed") {
 		leadIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true).Render(spinnerFrames[m.spinnerIdx%len(spinnerFrames)])
 	}
 
-	footerBanner := fmt.Sprintf("%s %s · P:%s · M:%s · S:%s · %s%s",
-		leadIcon, modeBadgeStyle.Render(m.mode), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge)
+	footerBanner := fmt.Sprintf("%s %s · P:%s · M:%s · S:%s · %s%s%s",
+		leadIcon, modeBadgeStyle.Render(m.mode), m.activeProvider.Info.Name, m.activeModel, sessID, tokenStyle.Render(tokensStr), lspBadge, searchBadge)
 
 	helpStr := " ENTER send · Alt+Enter newline · Tab mode · ↑/↓ history · PgUp/PgDn scroll · Ctrl+P pager · Ctrl+Y copy · Ctrl+M mouse · /help "
 	if m.width >= 120 {
@@ -4836,6 +4922,42 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 	if strings.HasPrefix(msg, "UNDO:\n") {
 		content := strings.TrimPrefix(msg, "UNDO:\n")
 		return renderBorderedCard("↩️ TIME-TRAVEL SHADOW ROLLBACK", "(Reverted File Edits)", content, "", "208", width)
+	}
+
+	// Web Search Configuration (/search-key, /search):
+	if strings.HasPrefix(msg, "SEARCH:\n") {
+		content := strings.TrimPrefix(msg, "SEARCH:\n")
+		return renderBorderedCard("🌐 WEB SEARCH ENGINE", "(Research & Documentation)", content, "", "33", width)
+	}
+
+	// Context7 Documentation Engine (/context7-key, /context7):
+	if strings.HasPrefix(msg, "CONTEXT7:\n") {
+		content := strings.TrimPrefix(msg, "CONTEXT7:\n")
+		return renderBorderedCard("📚 CONTEXT7 & DOCS RESOLVER", "(Native REST API)", content, "", "141", width)
+	}
+
+	// Git Worktree Sandbox (/worktree):
+	if strings.HasPrefix(msg, "WORKTREE:\n") {
+		content := strings.TrimPrefix(msg, "WORKTREE:\n")
+		return renderBorderedCard("🌿 GIT WORKTREE SANDBOX", "(Isolated Agent Workspaces)", content, "", "70", width)
+	}
+
+	// Custom Agents & Modes (/agents):
+	if strings.HasPrefix(msg, "AGENTS:\n") {
+		content := strings.TrimPrefix(msg, "AGENTS:\n")
+		return renderBorderedCard("🤖 CUSTOM AGENTS & MODES", "(.brocode/agents/*.md)", content, "", "99", width)
+	}
+
+	// Pipeline Doctor (/repair):
+	if strings.HasPrefix(msg, "REPAIR:\n") {
+		content := strings.TrimPrefix(msg, "REPAIR:\n")
+		return renderBorderedCard("🩺 PIPELINE DOCTOR & SELF-REPAIR", "(Build & Test Fixer)", content, "", "196", width)
+	}
+
+	// Autonomous Self-Updater (/update):
+	if strings.HasPrefix(msg, "UPDATE:\n") {
+		content := strings.TrimPrefix(msg, "UPDATE:\n")
+		return renderBorderedCard("🚀 BROCODE AUTO-UPDATER", "(Release Channel)", content, "", "86", width)
 	}
 
 	// Mode Switch Alert:

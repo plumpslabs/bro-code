@@ -46,6 +46,9 @@ type AppConfig struct {
 	// "auto" (default), "confirm" (ask before cross-vendor fallback), or
 	// "primary_only" (never fall back).
 	FallbackPolicy string `json:"fallback_policy,omitempty"`
+	SearchKey      string `json:"search_key,omitempty"`      // Tavily or Exa API key
+	SearchProvider string `json:"search_provider,omitempty"` // "tavily" or "exa"
+	Context7Key    string `json:"context7_key,omitempty"`    // Context7 Documentation API key
 }
 
 // GlobalConfigPath returns the user's global config file path (machine-written
@@ -174,6 +177,18 @@ func mergeBroCodeConfig(cfg AppConfig, path string) AppConfig {
 	}
 	if c.DefaultModel != "" {
 		cfg.DefaultModel = c.DefaultModel
+	}
+	if c.FallbackPolicy != "" {
+		cfg.FallbackPolicy = c.FallbackPolicy
+	}
+	if c.SearchKey != "" {
+		cfg.SearchKey = c.SearchKey
+	}
+	if c.SearchProvider != "" {
+		cfg.SearchProvider = c.SearchProvider
+	}
+	if c.Context7Key != "" {
+		cfg.Context7Key = c.Context7Key
 	}
 	maps.Copy(cfg.Providers, c.Providers)
 	return cfg
@@ -616,4 +631,128 @@ func dedupeProvidersByBaseURL(cfg AppConfig) AppConfig {
 		delete(cfg.Providers, id)
 	}
 	return cfg
+}
+
+// SearchProviderStatus describes configured search providers and multi-tier fallback order.
+type SearchProviderStatus struct {
+	PrimaryProvider   string // "tavily", "exa", or "free"
+	PrimaryKey        string
+	SecondaryProvider string
+	SecondaryKey      string
+	Badge             string // " · 🌐:Free", " · 🌐:Tavily", " · 🌐:Exa", " · 🌐:Tavily+Exa"
+}
+
+// GetSearchProviderStatus computes the active and fallback search configuration.
+func GetSearchProviderStatus() SearchProviderStatus {
+	tavilyKey := os.Getenv("TAVILY_API_KEY")
+	exaKey := os.Getenv("EXA_API_KEY")
+
+	cfg := LoadConfig()
+	if cfg.SearchKey != "" {
+		if strings.EqualFold(cfg.SearchProvider, "exa") || strings.HasPrefix(cfg.SearchKey, "exa-") {
+			if exaKey == "" {
+				exaKey = cfg.SearchKey
+			}
+		} else {
+			if tavilyKey == "" {
+				tavilyKey = cfg.SearchKey
+			}
+		}
+	}
+
+	if tavilyKey != "" && exaKey != "" {
+		return SearchProviderStatus{
+			PrimaryProvider:   "tavily",
+			PrimaryKey:        tavilyKey,
+			SecondaryProvider: "exa",
+			SecondaryKey:      exaKey,
+			Badge:             " · 🌐:Tavily+Exa",
+		}
+	}
+	if tavilyKey != "" {
+		return SearchProviderStatus{
+			PrimaryProvider: "tavily",
+			PrimaryKey:      tavilyKey,
+			Badge:           " · 🌐:Tavily",
+		}
+	}
+	if exaKey != "" {
+		return SearchProviderStatus{
+			PrimaryProvider: "exa",
+			PrimaryKey:      exaKey,
+			Badge:           " · 🌐:Exa",
+		}
+	}
+	return SearchProviderStatus{
+		PrimaryProvider: "free",
+		Badge:           " · 🌐:Free",
+	}
+}
+
+// GetActiveSearchKey retrieves the active web search API key and provider ("tavily" or "exa").
+// Priority:
+// 1. Environment variable TAVILY_API_KEY / EXA_API_KEY
+// 2. Saved key in AppConfig (~/.config/brocode/config.json)
+func GetActiveSearchKey() (key string, providerName string) {
+	st := GetSearchProviderStatus()
+	if st.PrimaryProvider == "free" {
+		return "", ""
+	}
+	return st.PrimaryKey, st.PrimaryProvider
+}
+
+// SaveSearchKey saves the search API key to global ~/.config/brocode/config.json with auto provider detection.
+func SaveSearchKey(key string) error {
+	return SaveSearchProviderKey("", key)
+}
+
+// SaveSearchProviderKey saves a specific search provider's key (e.g. "tavily" or "exa") to ~/.config/brocode/config.json.
+func SaveSearchProviderKey(providerName, key string) error {
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	key = strings.TrimSpace(key)
+	cfg := LoadConfig()
+
+	if providerName == "clear" || providerName == "reset" || providerName == "delete" || key == "clear" || key == "delete" || (providerName == "" && key == "") {
+		cfg.SearchKey = ""
+		cfg.SearchProvider = ""
+		return SaveGlobalConfig(cfg)
+	}
+
+	if providerName == "" {
+		if strings.HasPrefix(key, "tvly-") {
+			providerName = "tavily"
+		} else if strings.HasPrefix(key, "exa-") {
+			providerName = "exa"
+		} else {
+			providerName = "tavily"
+		}
+	}
+
+	cfg.SearchKey = key
+	cfg.SearchProvider = providerName
+	return SaveGlobalConfig(cfg)
+}
+
+// GetActiveContext7Key retrieves the active Context7 API key.
+// Priority:
+// 1. Environment variable CONTEXT7_API_KEY
+// 2. Saved key in AppConfig (~/.config/brocode/config.json)
+func GetActiveContext7Key() string {
+	if k := os.Getenv("CONTEXT7_API_KEY"); k != "" {
+		return k
+	}
+	cfg := LoadConfig()
+	return cfg.Context7Key
+}
+
+// SaveContext7Key saves or clears the Context7 API key in ~/.config/brocode/config.json.
+func SaveContext7Key(key string) error {
+	key = strings.TrimSpace(key)
+	cfg := LoadConfig()
+	if key == "clear" || key == "reset" || key == "delete" || key == "remove" {
+		cfg.Context7Key = ""
+	} else {
+		cfg.Context7Key = key
+	}
+	return SaveGlobalConfig(cfg)
 }

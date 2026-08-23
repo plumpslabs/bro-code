@@ -36,11 +36,14 @@ var builderRules = []Rule{
    • outline of large file (>500 lines) → code_outline (functions, classes, lines)
    • find text / regex inside files     → grep
    • find files by name/pattern         → glob
-   • "code that does X" (semantic)      → search_code`,
+   • "code that does X" (semantic)      → search_code
+   • library / framework official docs  → doc_lookup (official verified docs via Context7 / 3-tier docs cascade)
+   • general web search / news / blogs  → web_search (Tavily/Exa/Free cascade)
+   • read web URL content directly      → fetch_url (DOM pruning markdown reader)`,
 	},
 	{
 		ID:   "b3",
-		Text: `3. EXPLORE BEFORE ANSWERING: form a hypothesis, then verify it with ONE batched round of targeted reads (code_locate/grep/glob/read_file). Never answer from memory — read the real code and verify your claims. If a result is unhelpful, adapt; do NOT re-run the same narrow search.`,
+		Text: `3. EXPLORE BEFORE ANSWERING: form a hypothesis, then verify it with ONE batched round of targeted reads (code_locate/grep/glob/read_file/doc_lookup). Never answer from memory — read the real code or official docs and verify your claims. If a result is unhelpful, adapt; do NOT re-run the same narrow search.`,
 	},
 	{
 		ID:   "b3b",
@@ -48,7 +51,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID:   "b4",
-		Text: `4. INTENT DISCOVERY, TYPO RESILIENCE & LANGUAGE MIRRORING: Always respond and converse in the SAME language as the user's input (e.g. Bahasa Indonesia, English). If the user writes in Indonesian (formal or informal), formulate your thoughts, explanations, plans, and final answers in Bahasa Indonesia (code identifiers and syntax stay English). Ground your work in real code evidence (What → Why → How). Be resilient to common developer typos and Indonesian colloquialisms (e.g. "perbiakan" → "perbaikan/fix", "rsc/rersceh" → "research", "modualr" → "modular", "prubhn" → "perubahan", "tmbhn" → "tambahan"). Infer the most plausible engineering intent within the repo's actual domain rather than taking typos literally. If minor non-critical ambiguity exists, record your assumption clearly in the response and proceed rather than halting the user for trivia. For major architectural tradeoffs or destructive operations, call ask_user with clear multiple-choice options.`,
+		Text: `4. INTENT DISCOVERY, TYPO RESILIENCE & DOCS LOOKUP: Always respond and converse in the SAME language as the user's input (e.g. Bahasa Indonesia, English). If the user writes in Indonesian (formal or informal), formulate your thoughts, explanations, plans, and final answers in Bahasa Indonesia (code identifiers and syntax stay English). Ground your work in real code evidence (What → Why → How). Be resilient to developer shorthand and Indonesian typos (e.g. "coba [ki context 7" / "pki context7" → use 'doc_lookup' via Context7, "rsc/rersceh" → "research", "perbiakan" → "perbaikan/fix", "modualr" → "modular", "prubhn" → "perubahan"). When the user asks to look up library documentation or check APIs with Context7, IMMEDIATELY invoke 'doc_lookup' with the library name and specific query. For minor non-critical ambiguity, proceed with best inference; for destructive actions, call ask_user.`,
 	},
 	{
 		ID:   "b5",

@@ -57,8 +57,12 @@ var BuiltinSlashCommands = []AutocompleteItem{
 	{Value: "/workspace", Label: "/workspace", Desc: "Manage multi-repo workspace & repos"},
 	{Value: "/clear", Label: "/clear", Desc: "Clear chat history screen"},
 	{Value: "/new", Label: "/new", Desc: "Start a new conversation session"},
-	{Value: "/mcp", Label: "/mcp", Desc: "List Model Context Protocol tools"},
-	{Value: "/mcp-reload", Label: "/mcp-reload", Desc: "Reload MCP configuration"},
+	{Value: "/search-key", Label: "/search-key", Desc: "Configure web search API key (Tavily/Exa) for documentation research"},
+	{Value: "/context7-key", Label: "/context7-key", Desc: "Configure Context7 API key for native official library documentation"},
+	{Value: "/diff", Label: "/diff", Desc: "Side-by-side visual diff viewer for modified files"},
+	{Value: "/repair", Label: "/repair", Desc: "Autonomous pipeline repair doctor for build/test failures"},
+	{Value: "/worktree", Label: "/worktree", Desc: "Git worktree sandboxing for isolated agent experiments"},
+	{Value: "/update", Label: "/update", Desc: "Check and perform autonomous in-place self-update"},
 	{Value: "/debug-context", Label: "/debug-context", Desc: "Dump active context tokens"},
 }
 

@@ -1835,6 +1835,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 				}
 
+				// Marginal Information Gain Guard: Prevent over-searching and infinite web research loops
+				if tc.Name == "web_search" || tc.Name == "fetch_url" {
+					if callCount >= 3 {
+						infoGuard := fmt.Sprintf("💡 [INFORMATION SATURATION]: You have performed %d web searches/fetches in this turn. You have accumulated sufficient context. Stop querying external sources and proceed directly to synthesizing your technical answer or implementing the required code.", callCount)
+						if onUpdate != nil {
+							onUpdate(e.state, "💡 Information saturation reached — instructing model to synthesize")
+						}
+						pending[i] = pendingTool{tc: tc, output: infoGuard}
+						continue
+					}
+				}
+
 				// Permission gate: risky bash commands ask the user for approval
 				// (Allow once / Always allow / Deny) via the interactive modal.
 				approved, reason, gerr := e.tools.GateAction(ctx, tc)

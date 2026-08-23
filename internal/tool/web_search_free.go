@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,9 +13,9 @@ import (
 )
 
 var (
-	ddgResultLinkRe    = regexp.MustCompile(`(?s)<a[^>]+class="result__url"[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
-	ddgSnippetRe       = regexp.MustCompile(`(?s)<a[^>]+class="result__snippet"[^>]*>(.*?)</a>`)
-	htmlTagStripRe     = regexp.MustCompile(`<[^>]+>`)
+	ddgResultLinkRe     = regexp.MustCompile(`(?s)<a[^>]+(?:class="result__url"|class="result-link")[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
+	ddgSnippetRe        = regexp.MustCompile(`(?s)<(?:a|td)[^>]+(?:class="result__snippet"|class="result-snippet")[^>]*>(.*?)</(?:a|td)>`)
+	htmlTagStripRe      = regexp.MustCompile(`<[^>]+>`)
 	duckDuckGoURLUnwrap = regexp.MustCompile(`uddg=([^&]+)`)
 )
 
@@ -24,7 +25,7 @@ type WebSearchResult struct {
 	Snippet string `json:"snippet,omitempty"`
 }
 
-// FreeWebSearch queries DuckDuckGo's public HTML endpoint as a zero-config fallback.
+// FreeWebSearch queries public search endpoints with multi-tier fallback (DuckDuckGo HTML -> Lite -> Wikipedia).
 // It requires NO API key and runs with pure standard library HTTP + regex parsing.
 func FreeWebSearch(ctx context.Context, query string, maxResults int) ([]WebSearchResult, error) {
 	if maxResults <= 0 {
@@ -34,15 +35,40 @@ func FreeWebSearch(ctx context.Context, query string, maxResults int) ([]WebSear
 		maxResults = 10
 	}
 
-	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// 1. Try DuckDuckGo HTML endpoint
+	res, err := queryDDG(ctx, "https://html.duckduckgo.com/html/", query, maxResults)
+	if err == nil && len(res) > 0 {
+		return res, nil
+	}
+
+	// 2. Try DuckDuckGo Lite endpoint (often bypasses ISP blocks)
+	res, err = queryDDG(ctx, "https://lite.duckduckgo.com/lite/", query, maxResults)
+	if err == nil && len(res) > 0 {
+		return res, nil
+	}
+
+	// 3. Fallback to Wikipedia OpenSearch for technical concepts/docs
+	wikiRes, wikiErr := queryWikipedia(ctx, query, maxResults)
+	if wikiErr == nil && len(wikiRes) > 0 {
+		return wikiRes, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("public search connection error: %w", err)
+	}
+	return nil, nil
+}
+
+func queryDDG(ctx context.Context, endpoint, query string, maxResults int) ([]WebSearchResult, error) {
+	tctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 
 	formData := url.Values{}
 	formData.Set("q", query)
 	formData.Set("b", "")
-	formData.Set("kl", "wt-wt") // Worldwide
+	formData.Set("kl", "wt-wt")
 
-	req, err := http.NewRequestWithContext(tctx, http.MethodPost, "https://html.duckduckgo.com/html/", strings.NewReader(formData.Encode()))
+	req, err := http.NewRequestWithContext(tctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -53,28 +79,28 @@ func FreeWebSearch(ctx context.Context, query string, maxResults int) ([]WebSear
 
 	resp, err := httpClientSearch.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("public search connection error: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("public search endpoint returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
 		return nil, err
 	}
-	html := string(bodyBytes)
+	return parseDDGHTML(string(bodyBytes), maxResults), nil
+}
 
-	// Extract result titles & links
-	linkMatches := ddgResultLinkRe.FindAllStringSubmatch(html, maxResults*2)
-	snippetMatches := ddgSnippetRe.FindAllStringSubmatch(html, maxResults*2)
+func parseDDGHTML(html string, maxResults int) []WebSearchResult {
+	linkMatches := ddgResultLinkRe.FindAllStringSubmatch(html, maxResults*3)
+	snippetMatches := ddgSnippetRe.FindAllStringSubmatch(html, maxResults*3)
 
 	var results []WebSearchResult
 	for i, m := range linkMatches {
 		rawURL := m[1]
-		// Unwrap DuckDuckGo tracking redirect if present
 		if unwrap := duckDuckGoURLUnwrap.FindStringSubmatch(rawURL); len(unwrap) > 1 {
 			if decoded, err := url.QueryUnescape(unwrap[1]); err == nil && decoded != "" {
 				rawURL = decoded
@@ -107,6 +133,51 @@ func FreeWebSearch(ctx context.Context, query string, maxResults int) ([]WebSear
 			break
 		}
 	}
+	return results
+}
 
+func queryWikipedia(ctx context.Context, query string, maxResults int) ([]WebSearchResult, error) {
+	tctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+
+	u := fmt.Sprintf("https://en.wikipedia.org/w/api.php?action=opensearch&search=%s&limit=%d&namespace=0&format=json", url.QueryEscape(query), maxResults)
+	req, err := http.NewRequestWithContext(tctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "BroCode-Assistant/1.0")
+
+	resp, err := httpClientSearch.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("wikipedia status %d", resp.StatusCode)
+	}
+
+	var data []any
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil || len(data) < 4 {
+		return nil, fmt.Errorf("invalid wikipedia response format")
+	}
+
+	titles, _ := data[1].([]any)
+	snippets, _ := data[2].([]any)
+	urls, _ := data[3].([]any)
+
+	var results []WebSearchResult
+	for i := 0; i < len(urls); i++ {
+		tStr, _ := titles[i].(string)
+		sStr, _ := snippets[i].(string)
+		uStr, _ := urls[i].(string)
+		if uStr != "" {
+			results = append(results, WebSearchResult{
+				Title:   tStr,
+				URL:     uStr,
+				Snippet: sStr,
+			})
+		}
+	}
 	return results, nil
 }

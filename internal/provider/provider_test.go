@@ -395,6 +395,69 @@ func TestPersistedDuplicatePruned(t *testing.T) {
 	}
 }
 
+func TestSaveAndGetActiveSearchKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TAVILY_API_KEY", "")
+	t.Setenv("EXA_API_KEY", "")
+
+	// 1. Initially empty
+	key, prov := GetActiveSearchKey()
+	if key != "" || prov != "" {
+		t.Fatalf("expected empty initially, got key=%q prov=%q", key, prov)
+	}
+
+	// 2. Save Tavily Key
+	if err := SaveSearchKey("tvly-abcdef123456"); err != nil {
+		t.Fatalf("SaveSearchKey failed: %v", err)
+	}
+
+	key, prov = GetActiveSearchKey()
+	if key != "tvly-abcdef123456" || prov != "tavily" {
+		t.Fatalf("expected tavily key, got key=%q prov=%q", key, prov)
+	}
+
+	// 3. Clear Key
+	if err := SaveSearchKey(""); err != nil {
+		t.Fatalf("SaveSearchKey clear failed: %v", err)
+	}
+	key, prov = GetActiveSearchKey()
+	if key != "" || prov != "" {
+		t.Fatalf("expected empty after clear, got key=%q prov=%q", key, prov)
+	}
+}
+
+func TestSaveAndGetActiveContext7Key(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CONTEXT7_API_KEY", "")
+
+	// 1. Initially empty
+	key := GetActiveContext7Key()
+	if key != "" {
+		t.Fatalf("expected empty initially, got %q", key)
+	}
+
+	// 2. Save Context7 Key
+	if err := SaveContext7Key("c7_test_987654321"); err != nil {
+		t.Fatalf("SaveContext7Key failed: %v", err)
+	}
+
+	key = GetActiveContext7Key()
+	if key != "c7_test_987654321" {
+		t.Fatalf("expected saved key, got %q", key)
+	}
+
+	// 3. Clear Key
+	if err := SaveContext7Key("clear"); err != nil {
+		t.Fatalf("SaveContext7Key clear failed: %v", err)
+	}
+	key = GetActiveContext7Key()
+	if key != "" {
+		t.Fatalf("expected empty after clear, got %q", key)
+	}
+}
+
 func TestOpenCodeImportDisabled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -188,6 +188,7 @@ func NewRegistry() *Registry {
 	r.Register(&CodeImpactTool{})
 	r.Register(&RefactorClusterTool{})
 	r.Register(&BlastRadiusTool{})
+	r.Register(&DocLookupTool{})
 	return r
 }
 
@@ -1755,8 +1756,12 @@ var (
 	collapseNLRegex   = regexp.MustCompile(`\n{3,}`)
 )
 
-// htmlToText extracts readable text from an HTML document.
+// htmlToText extracts clean, readable Markdown from an HTML document using DOM tree pruning.
 func htmlToText(raw string) string {
+	md, err := ExtractCleanMarkdownFromHTML(raw)
+	if err == nil && strings.TrimSpace(md) != "" {
+		return md
+	}
 	s := stripScriptsRegex.ReplaceAllString(raw, "")
 	s = stripStylesRegex.ReplaceAllString(s, "")
 	s = stripTagsRegex.ReplaceAllString(s, "")
@@ -1771,7 +1776,7 @@ type FetchURLTool struct{}
 
 func (t *FetchURLTool) Name() string { return "fetch_url" }
 func (t *FetchURLTool) Description() string {
-	return "Fetch a URL and return its readable text content (documentation, error pages, API docs, etc.)"
+	return "Fetch a URL and return its readable clean Markdown content (documentation, error pages, API docs, etc.) with boilerplate stripped."
 }
 func (t *FetchURLTool) Parameters() map[string]any {
 	return map[string]any{
@@ -1792,40 +1797,21 @@ func (t *FetchURLTool) Execute(ctx context.Context, argsJSON string) (string, er
 		return "", err
 	}
 
-	if !strings.HasPrefix(args.URL, "http://") && !strings.HasPrefix(args.URL, "https://") {
-		return "", fmt.Errorf("only http(s) URLs are supported")
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, args.URL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "BroCode/1.0")
-	resp, err := httpClientFetch.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("HTTP %d %s", resp.StatusCode, resp.Status)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	cleanContent, err := FetchAndCleanURL(ctx, args.URL)
 	if err != nil {
 		return "", err
 	}
 
-	text := htmlToText(string(body))
 	maxChars := args.MaxChars
 	if maxChars <= 0 {
 		maxChars = 20000
 	} else if maxChars > 100000 {
 		maxChars = 100000
 	}
-	if r := []rune(text); len(r) > maxChars {
-		text = string(r[:maxChars]) + fmt.Sprintf("\n… [truncated, %d more chars]", len(r)-maxChars)
+	if r := []rune(cleanContent); len(r) > maxChars {
+		cleanContent = string(r[:maxChars]) + fmt.Sprintf("\n… [truncated, %d more chars]", len(r)-maxChars)
 	}
-	return text, nil
+	return cleanContent, nil
 }
 
 // GitTool runs git commands with built-in atomic commit staging and read-only queries.
@@ -1971,8 +1957,16 @@ func (t *WebSearchTool) Execute(ctx context.Context, argsJSON string) (string, e
 		num = 10
 	}
 
+	activeKey, activeProv := provider.GetActiveSearchKey()
 	apiKey := os.Getenv("EXA_API_KEY")
 	tavilyKey := os.Getenv("TAVILY_API_KEY")
+	if activeKey != "" {
+		if activeProv == "tavily" {
+			tavilyKey = activeKey
+		} else if activeProv == "exa" {
+			apiKey = activeKey
+		}
+	}
 
 	// 1. If Exa key is provided, use Exa API
 	if apiKey != "" {
@@ -2065,10 +2059,10 @@ func (t *WebSearchTool) Execute(ctx context.Context, argsJSON string) (string, e
 		}
 	}
 
-	// 3. Fallback: Zero-Config Free Web Search (DuckDuckGo Lite)
+	// 3. Fallback: Zero-Config Free Web Search (DuckDuckGo HTML / Lite / Wikipedia)
 	freeResults, err := FreeWebSearch(ctx, args.Query, num)
 	if err != nil {
-		return "", fmt.Errorf("web search failed: %w", err)
+		return "", fmt.Errorf("web search failed: %w\n\n💡 Tip: BroCode uses free web search by default. For dedicated high-speed search with 1,000 free queries/month, get a free key at https://tavily.com and run: /search-key tvly-xxxx", err)
 	}
 	if len(freeResults) == 0 {
 		return "No results found.", nil
@@ -2136,4 +2130,47 @@ func (t *ReviewChangesTool) Execute(ctx context.Context, argsJSON string) (strin
 		return fmt.Sprintf("User rolled back the changes (%d files restored).", n), nil
 	}
 	return "User approved the changes.", nil
+}
+
+// DocLookupTool retrieves official framework/library documentation using native Context7 API and web fallback.
+type DocLookupTool struct{}
+
+func (t *DocLookupTool) Name() string { return "doc_lookup" }
+func (t *DocLookupTool) Description() string {
+	return "Lookup official, verified documentation for any library, package, or framework (e.g. 'nextjs', 'fastapi', 'tailwind', 'pydantic', 'prisma', 'gorilla/mux') with semantic query via Context7 and docs resolution cascade."
+}
+func (t *DocLookupTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"library": map[string]any{
+				"type":        "string",
+				"description": "The name of the library, package, or framework (e.g., 'react', 'tailwind', 'gin-gonic/gin', 'express', 'langchain').",
+			},
+			"query": map[string]any{
+				"type":        "string",
+				"description": "The specific feature, API, or question to look up in the documentation (e.g., 'middleware configuration', 'auth headers', 'streaming response').",
+			},
+		},
+		"required": []string{"library"},
+	}
+}
+
+func (t *DocLookupTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Library string `json:"library"`
+		Query   string `json:"query"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(args.Library) == "" {
+		return "", fmt.Errorf("library parameter is required")
+	}
+
+	docs, source, err := FetchUnifiedDocs(ctx, args.Library, args.Query)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("📚 Documentation for **%s** (%s):\n\n%s", args.Library, source, docs), nil
 }
