@@ -257,6 +257,7 @@ func NewApp(
 	ti.DynamicHeight = true
 	ti.MinHeight = 1
 	ti.MaxHeight = 8
+	ti.SetHeight(1)
 	// ENTER sends the prompt (handled by the app); Alt+Enter inserts a newline.
 	ti.KeyMap.InsertNewline.SetKeys("alt+enter")
 

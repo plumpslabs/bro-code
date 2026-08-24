@@ -363,8 +363,6 @@ func (m *Model) buildLogChrome() (string, int) {
 			sb.WriteString(actStyle.Render("  · "+normalizeEmojiSpacing(act)) + "\n")
 		}
 		sb.WriteString("\n")
-	} else {
-		sb.WriteString("\n\n")
 	}
 
 	// Queued prompts: shown live above the input, never as history rows. In
