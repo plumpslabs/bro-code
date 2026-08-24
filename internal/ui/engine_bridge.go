@@ -426,6 +426,13 @@ func NewApp(
 
 	m.modelOptions = provider.DiscoverModels(cfg)
 	m.modelListCache = nil
+	m.lastLiveModelsVersion = provider.LiveModelsVersion()
+
+	// If global index is still building or live models haven't arrived yet,
+	// show a spinner so the user knows something is happening.
+	if (m.globalIndex != nil && !m.globalIndex.IsReady()) || m.lastLiveModelsVersion == 0 {
+		m.status = "Initializing..."
+	}
 	m.rebuildEngine()
 	m.initialized = true
 	return m
@@ -716,5 +723,5 @@ func checkUpdateCmd() tea.Msg {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.promptInput.Focus(), checkUpdateCmd)
+	return tea.Batch(m.promptInput.Focus(), checkUpdateCmd, liveModelsRefreshCmd(), tickCmd(), startupReadinessCheckCmd())
 }

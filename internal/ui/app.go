@@ -33,6 +33,33 @@ func tickCmd() tea.Cmd {
 	})
 }
 
+// liveModelsRefreshMsg fires periodically to re-read the live models cache
+// and update m.modelOptions so providers whose background /models fetch
+// completes after startup (OpenRouter, custom gateways) appear in the
+// model picker without requiring a /models modal reopen.
+type liveModelsRefreshMsg struct{}
+
+// liveModelsRefreshCmd polls every 5 seconds for live model updates.
+// It stops automatically once the background fetch has populated the cache
+// (detected via LiveModelsVersion) and the UI has refreshed at least once.
+func liveModelsRefreshCmd() tea.Cmd {
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+		return liveModelsRefreshMsg{}
+	})
+}
+
+// startupReadinessCheckCmd polls periodically to detect when background
+// initialization (global index build, live model fetch) has completed.
+func startupReadinessCheckCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return startupReadinessCheckMsg{}
+	})
+}
+
+type startupReadinessCheckMsg struct{}
+
+
+
 // Model defines the Bubble Tea v2 TUI state.
 type Model struct {
 	width          int
@@ -155,6 +182,11 @@ type Model struct {
 	// history.
 	trimNoticeShown bool
 	initialized     bool
+
+	// lastLiveModelsVersion tracks the liveModelsCache generation at the time
+	// modelOptions was last refreshed, so the periodic poll only re-runs
+	// DiscoverModels when the background fetch has actually populated new data.
+	lastLiveModelsVersion int64
 
 	// renderedH remembers the log viewport height from the last re-render so
 	// the parking logic can re-park the scroll when the viewport SHRINKS (the

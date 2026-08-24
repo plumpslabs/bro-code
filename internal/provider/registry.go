@@ -573,7 +573,18 @@ type ModelEntry struct {
 var (
 	liveModelsCacheMu sync.RWMutex
 	liveModelsCache   = make(map[string][]string)
+	// liveModelsVersion is bumped every time the background fetch completes,
+	// so callers can detect when the cache has been updated without polling.
+	liveModelsVersion int64
 )
+
+// LiveModelsVersion returns the current cache generation counter.
+// Callers can compare snapshots to detect when live models have arrived.
+func LiveModelsVersion() int64 {
+	liveModelsCacheMu.RLock()
+	defer liveModelsCacheMu.RUnlock()
+	return liveModelsVersion
+}
 
 // DiscoverModels returns all models from detected providers using configured/builtin
 // defaults and cached live models for instant (<1ms) non-blocking startup.
@@ -616,6 +627,7 @@ func DiscoverModels(cfg AppConfig) map[string][]string {
 					recordLiveContextLimits(d.Info.ID, liveLimits)
 					liveModelsCacheMu.Lock()
 					liveModelsCache[d.Info.ID] = fetched
+					liveModelsVersion++
 					liveModelsCacheMu.Unlock()
 				}
 			}

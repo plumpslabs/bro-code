@@ -66,6 +66,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
 		return m, tickCmd()
 
+	case liveModelsRefreshMsg:
+		// Periodic poll: re-run DiscoverModels to pick up live models that
+		// arrived in the background cache since the last refresh (OpenRouter,
+		// custom gateways, etc.). Stops once the cache version hasn't changed
+		// for 30 seconds (all fetches settled).
+		v := provider.LiveModelsVersion()
+		if v != m.lastLiveModelsVersion {
+			m.modelOptions = provider.DiscoverModels(m.cfg)
+			m.modelListCache = nil
+			m.lastLiveModelsVersion = v
+			return m, liveModelsRefreshCmd()
+		}
+		return m, nil
+
+	case startupReadinessCheckMsg:
+		// Poll until background init completes, then transition to Ready.
+		if m.status != "Initializing..." {
+			return m, nil
+		}
+		indexDone := m.globalIndex == nil || m.globalIndex.IsReady()
+		modelsDone := m.lastLiveModelsVersion > 0
+		if indexDone && modelsDone {
+			m.status = "Ready"
+			return m, nil
+		}
+		return m, startupReadinessCheckCmd()
+
 	case stepProgressMsg:
 		if strings.HasPrefix(msg.info, "DIFF:\n") {
 			body := strings.TrimPrefix(msg.info, "DIFF:\n")

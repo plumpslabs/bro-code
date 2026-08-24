@@ -563,35 +563,42 @@ func ParseModelJSON(input string) ([]string, map[string]CustomModel, error) {
 	return models, detail, nil
 }
 
+// preserveFromDisk reads the current config file and merges non-empty
+// properties into cfg so that critical fields (search key, context7 key,
+// fallback policy) are never silently clobbered by a partial in-memory
+// config from the wizard or model-switch operations.
+func preserveFromDisk(cfg AppConfig) AppConfig {
+	p := GlobalConfigPath()
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return cfg
+	}
+	var disk AppConfig
+	if json.Unmarshal([]byte(stripJSONComments(string(raw))), &disk) != nil {
+		// Malformed file: cannot safely preserve fields — return cfg unchanged.
+		// The caller's in-memory state takes precedence over a corrupted file.
+		return cfg
+	}
+	if cfg.SearchKey == "" && disk.SearchKey != "" {
+		cfg.SearchKey = disk.SearchKey
+	}
+	if cfg.SearchProvider == "" && disk.SearchProvider != "" {
+		cfg.SearchProvider = disk.SearchProvider
+	}
+	if cfg.Context7Key == "" && disk.Context7Key != "" {
+		cfg.Context7Key = disk.Context7Key
+	}
+	if cfg.FallbackPolicy == "" && disk.FallbackPolicy != "" {
+		cfg.FallbackPolicy = disk.FallbackPolicy
+	}
+	return cfg
+}
+
 // SaveGlobalConfig saves config to global path (~/.config/brocode/config.json)
 // safely with field preservation: search/context7 keys on disk are never
 // clobbered by partial in-memory configs.
 func SaveGlobalConfig(cfg AppConfig) error {
-	p := GlobalConfigPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
-		return err
-	}
-
-	// Preservation safeguard: merge non-empty disk properties if cfg has them empty
-	// (prevents model/provider switch operations from accidentally overwriting search/docs keys).
-	if raw, err := os.ReadFile(p); err == nil {
-		var disk AppConfig
-		if json.Unmarshal([]byte(stripJSONComments(string(raw))), &disk) == nil {
-			if cfg.SearchKey == "" && disk.SearchKey != "" {
-				cfg.SearchKey = disk.SearchKey
-			}
-			if cfg.SearchProvider == "" && disk.SearchProvider != "" {
-				cfg.SearchProvider = disk.SearchProvider
-			}
-			if cfg.Context7Key == "" && disk.Context7Key != "" {
-				cfg.Context7Key = disk.Context7Key
-			}
-			if cfg.FallbackPolicy == "" && disk.FallbackPolicy != "" {
-				cfg.FallbackPolicy = disk.FallbackPolicy
-			}
-		}
-	}
-
+	cfg = preserveFromDisk(cfg)
 	return writeGlobalConfigDirect(cfg)
 }
 
@@ -757,6 +764,9 @@ func SaveSearchProviderKey(providerName, key string) error {
 		}
 	}
 
+	// Preserve disk-only fields (context7 key, fallback policy) first,
+	// then apply our changes on top — avoids the redundant re-apply pattern.
+	cfg = preserveFromDisk(cfg)
 	cfg.SearchKey = key
 	cfg.SearchProvider = providerName
 	return writeGlobalConfigDirect(cfg)
@@ -778,6 +788,9 @@ func GetActiveContext7Key() string {
 func SaveContext7Key(key string) error {
 	key = strings.TrimSpace(key)
 	cfg := LoadConfig()
+	// Preserve disk-only fields (search key, fallback policy) first,
+	// then apply our changes on top — avoids the redundant re-apply pattern.
+	cfg = preserveFromDisk(cfg)
 	if key == "clear" || key == "reset" || key == "delete" || key == "remove" {
 		cfg.Context7Key = ""
 	} else {

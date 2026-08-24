@@ -33,25 +33,49 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 - **` + "`/ask <question>`" + `** — Ephemeral Codebase QA: Ask questions without polluting context
 - **` + "`/spec <feature>`" + `** — Spec-First Gate: Draft an architectural blueprint contract before coding
 - **` + "`/tournament <task>`" + `** — Multi-Candidate Solver: Run 2 parallel candidate agents on difficult bugs
+- **` + "`/repair`" + `** — AI-Powered Error Repair: Auto-fix type errors & warnings from diagnostics
 - **` + "`/plan`" + `** — Inspect active plan checklist (` + "`/plan archive`" + ` to archive)
 - **` + "`/undo`" + `** — Time-Travel Rollback: Revert all file changes made in the last turn
+- **` + "`/diff`" + `** — Show file diff (` + "`/diff <path>`" + ` for specific file)
 - **` + "`/diagnose`" + `** — Scan project for type errors/warnings (` + "`/diagnose fix`" + ` to auto-fix)
+- **` + "`/trace`" + `** — Code Provenance: Trace who/what introduced a change (` + "`/trace <commit>`" + `)
 - **` + "`/cost`" + `** — Live token usage & spend telemetry (USD & IDR)
 
 ### ⚙️ Sessions & Configuration
-- **` + "`/models`" + `** — Interactive model picker (` + "`/model <id>`" + ` to switch)
+- **` + "`/models`" + `** — Interactive model picker
+- **` + "`/model <id>`" + `** — Quick model switch (e.g. ` + "`/model deepseek-v4-flash-free`" + `)
 - **` + "`/connect`" + `** — 2-step API Key & provider setup wizard
 - **` + "`/sessions`" + `**, **` + "`/history`" + `** — Switch or manage past sessions
 - **` + "`/memory`" + `** — Inspect cross-session project memory
-- **` + "`/mcp`" + `** — Manage connected MCP servers & tools
-- **` + "`/lsp`" + `** — Code intelligence status (` + "`/lsp-install`" + ` to install missing servers)
+- **` + "`/mcp`" + `** — Manage connected MCP servers & tools (` + "`/mcp-reload`" + ` to refresh)
+- **` + "`/lsp`" + `** — Code intelligence status (` + "`/lsp-install`" + ` to install servers)
 - **` + "`/workspace`" + `** — Inspect multi-repo workspace structure
+- **` + "`/search-key`" + `** — Set web search API key (Tavily/Exa)
+- **` + "`/context7-key`" + `** — Set Context7 documentation API key
+- **` + "`/agents`" + `** — List custom agents (` + "`/agent <name>`" + ` to switch)
+- **` + "`/worktree`" + `** — Git worktree management for parallel branches
+- **` + "`/report`" + `** — Export session report (` + "`/report <session>`" + `)
 - **` + "`/clear`" + `**, **` + "`/new`" + `** — Clear chat or start fresh session
+- **` + "`/update`" + `** — Self-update to latest version
 
 ### 🔀 Modes (Toggle with ` + "`Shift+Tab`" + `)
 - **` + "`BUILDER`" + `** *(Default)* — Autonomous coding agent with full read, write, edit, & run tools
+- **` + "`/builder`" + `** — Switch to Builder mode
 - **` + "`PLANNER`" + `** — Read-only architecture & strategy agent
-- **` + "`MINER`" + `** — Read-only knowledge mining agent that persists facts to memory`
+- **` + "`/planner`" + `** — Switch to Planner mode
+- **` + "`MINER`" + `** — Read-only knowledge mining agent that persists facts to memory
+- **` + "`/miner`" + `** — Switch to Miner mode
+
+### 🎹 Keybindings
+- **` + "`Shift+Tab`" + `** — Toggle mode (BUILDER/PLANNER/MINER)
+- **` + "`Ctrl+K`" + `** / **` + "`Alt+K`" + `** — Prompt queue management
+- **` + "`Ctrl+P`" + `** — Pager (full-screen answer viewer)
+- **` + "`Ctrl+F`" + `** — Toggle file change diff expansion
+- **` + "`Ctrl+Y`" + `** — Copy last answer to clipboard
+- **` + "`Ctrl+M`" + `** — Toggle mouse mode (scroll/select)
+- **` + "`Tab`" + `** — Autocomplete file mentions
+- **` + "`Alt+Enter`" + `** — Insert newline in prompt
+- **` + "`PgUp`" + `** / **` + "`PgDn`" + `** — Scroll chat history`
 		m.appendNote("HELP:\n" + helpContent)
 
 	case "/miner":

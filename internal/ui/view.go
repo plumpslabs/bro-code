@@ -96,9 +96,9 @@ func (m *Model) View() tea.View {
 				wasAtBottom := m.logViewport.AtBottom()
 				m.logViewport.SetContent(log)
 				if key != m.renderedKey || m.renderedH == 0 {
-					// If the user has scrolled up to read history while the agent is running,
-					// preserve the user's scroll position instead of snapping back to bottom.
-					if wasAtBottom || !m.turnRunning {
+					// Only auto-scroll when the user is already at the bottom.
+					// Never yank the viewport away from a user who is reading history.
+					if wasAtBottom {
 						m.parkLogAfterNewContent(log, vpHeight, contentWidth)
 					}
 				}
@@ -350,14 +350,18 @@ func (m *Model) buildLogChrome() (string, int) {
 	// enters the conversation history (that's what made process rows pile
 	// up above the answer and hide the user's prompt).
 	if (m.turnRunning || (m.status != "Ready" && m.status != "Failed")) && !m.showModels && !m.showSessions && !m.showConnect && !m.showDebug && !m.showMCP {
-		spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
 		frame := spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
 		elapsed := ""
 		if !m.turnStart.IsZero() {
 			d := time.Since(m.turnStart)
 			elapsed = fmt.Sprintf("  ⏱ %d:%02d", int(d.Minutes()), int(d.Seconds())%60)
 		}
-		sb.WriteString(spinnerStyle.Render(frame) + "  " + normalizeEmojiSpacing(m.status) + elapsed + "\n")
+		if m.status == "Initializing..." {
+			sb.WriteString(normalizeEmojiSpacing(m.status) + "\n")
+		} else {
+			spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+			sb.WriteString(spinnerStyle.Render(frame) + "  " + normalizeEmojiSpacing(m.status) + elapsed + "\n")
+		}
 		actStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 		for _, act := range m.activity {
 			sb.WriteString(actStyle.Render("  · "+normalizeEmojiSpacing(act)) + "\n")
@@ -480,7 +484,7 @@ func (m *Model) buildLogChrome() (string, int) {
 
 	// Lead icon: dynamic animated loader while busy/running, fire emoji when ready
 	leadIcon := "🔥"
-	if m.turnRunning || (m.status != "Ready" && m.status != "Failed") {
+	if m.turnRunning {
 		leadIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true).Render(spinnerFrames[m.spinnerIdx%len(spinnerFrames)])
 	}
 
