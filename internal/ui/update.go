@@ -28,7 +28,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.historyKey = ""
 		m.renderedHistory = ""
 		if m.width > 0 {
-			m.promptInput.SetWidth(m.width - 4)
+			pw := m.width - 12
+			if pw < 10 {
+				pw = 10
+			}
+			m.promptInput.SetWidth(pw)
 			m.logViewport.SetWidth(m.width)
 			m.askViewport.SetWidth(m.width - 8)
 			// Connect wizard inputs need an explicit width too, otherwise the

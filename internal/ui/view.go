@@ -51,7 +51,7 @@ func (m *Model) View() tea.View {
 		// as the content while it fits, capped at the screen once it overflows.
 		logLines := 0
 		if log != "" {
-			logLines = strings.Count(log, "\n") + 1
+			logLines = lipgloss.Height(log)
 		}
 
 		if m.width > 0 {
@@ -362,6 +362,8 @@ func (m *Model) buildLogChrome() (string, int) {
 		for _, act := range m.activity {
 			sb.WriteString(actStyle.Render("  · "+normalizeEmojiSpacing(act)) + "\n")
 		}
+		sb.WriteString("\n")
+	} else {
 		sb.WriteString("\n")
 	}
 
