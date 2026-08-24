@@ -264,6 +264,9 @@ func ReRankDocs(ctx context.Context, query string, results []bm25Result, e *Embe
 		sc[i] = scored{res: results[i], sim: Cosine(qvec[0], v)}
 	}
 	sort.Slice(sc, func(i, j int) bool { return sc[i].sim > sc[j].sim })
+	if len(sc) > limit {
+		sc = sc[:limit]
+	}
 
 	out := make([]bm25Result, len(sc))
 	for i := range sc {

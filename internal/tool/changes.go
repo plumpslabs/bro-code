@@ -82,7 +82,7 @@ func DeduplicateChanges(ch []FileChange) []FileChange {
 	deduped := make([]FileChange, 0, len(order))
 	for _, p := range order {
 		agg := byPath[p]
-		merged := agg.last
+		var merged FileChange
 		switch {
 		case agg.last.Action == "deleted":
 			merged = FileChange{Path: p, Action: "deleted", Old: agg.first.Old}
@@ -217,7 +217,7 @@ func CumulativeChangeDiff(path string) string {
 	if first == nil {
 		return ""
 	}
-	merged := *last
+	var merged FileChange
 	switch {
 	case last.Action == "deleted":
 		merged = FileChange{Path: last.Path, Action: "deleted", Old: last.Old}

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +21,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/prompt"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/repo"
+	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/skill"
 	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/tokens"
@@ -69,33 +69,7 @@ type AgentTurn struct {
 	Answer    string              `json:"answer,omitempty"`
 }
 
-// Fallback is an alternative adapter+model pair tried when the primary
-// provider fails (automatic model routing).
-type Fallback struct {
-	// ID is a stable provider identity (e.g. "groq", "opencode") used for
-	// health tracking in the adaptive router.
-	ID string
-	// Protocol is the wire protocol ("anthropic" / "openai-compatible"), used
-	// by the "confirm" fallback policy to ask only when the fallback is a
-	// different vendor than the primary.
-	Protocol string
-	Adapter  provider.ProviderAdapter
-	Model    string
-}
 
-// FallbackPolicy controls automatic model routing when the primary provider
-// fails mid-turn.
-const (
-	// FallbackAuto (default): retry the primary once on transient errors, then
-	// route to the next healthy fallback, skipping providers in cooldown.
-	FallbackAuto = "auto"
-	// FallbackConfirm asks the user before serving a fallback from a DIFFERENT
-	// vendor than the primary; same-vendor fallbacks route automatically.
-	FallbackConfirm = "confirm"
-	// FallbackPrimaryOnly never falls back — a primary failure ends the turn
-	// with an error.
-	FallbackPrimaryOnly = "primary_only"
-)
 
 // defaultModelCallTimeout bounds a single LLM call. Without it a slow/free
 // provider can hang the whole turn for minutes with no feedback (the engine
@@ -333,6 +307,8 @@ type Engine struct {
 	// the edited file path — lets the UI refresh the session-wide symbol index
 	// so code_locate stays current instead of serving a stale session-start view.
 	onFileEdited func(path string)
+	// globalIndex is the persistent codebase-wide symbol + reference index
+	globalIndex *search.GlobalIndex
 	// onChange, when set, is called after a write/edit tool succeeds with the file
 	// path and the unified diff of what changed — lets the UI render a live
 	// red/green diff entry in the chat as each edit lands, not just a collapsed
@@ -465,11 +441,7 @@ func (e *Engine) SetScoutManager(sm ScoutDrainer) {
 	e.scouts = sm
 }
 
-// SetCompactModel routes compaction summarization to a (cheaper) model. Empty
-// keeps it on the main synthesis model.
-func (e *Engine) SetCompactModel(m string) {
-	e.compactModel = m
-}
+
 
 // SetLearner attaches the self-improving control layer. It immediately applies
 // the learned compaction ratio so the session starts with the tuned threshold
@@ -512,272 +484,7 @@ func (e *Engine) LearnerStats() string {
 	return e.learner.Stats()
 }
 
-// SetToolDescBudget caps each tool description to n characters in the request
-// (0 = send full descriptions). A lean tool surface frees window space.
-func (e *Engine) SetToolDescBudget(n int) {
-	if n < 0 {
-		n = 0
-	}
-	e.toolDescBudget = n
-}
 
-// Tool-only budget: a model that keeps calling tools without answering is
-// nudged EARLY (so a rabbit-hole exploration like "search the schema for more
-// models" is cut before it burns a dollar of tokens) and aborted shortly
-// after. A few rounds of pure tool calls is plenty for most tasks (a big
-// monorepo overview, an LSP-warning sweep); the first reminder lands early so
-// the agent answers instead of reading itself in circles.
-const (
-	// toolWarnRounds — first "stop and answer" reminder.
-	toolWarnRounds = 6
-	// toolFinalWarnRounds — second, firmer warning.
-	toolFinalWarnRounds = 8
-	// maxToolOnlyRounds — abort once a spinning model stalls. Still well below
-	// the 25-iteration cap.
-	maxToolOnlyRounds = 14
-	// maxToolOnlyAbsolute — unconditional abort even for a model that keeps
-	// discovering new files (freedom is bounded, never infinite). 16 leaves
-	// room for the final-warning pattern (ONE last targeted read, then the
-	// answer) to complete instead of being cut right after the read.
-	maxToolOnlyAbsolute = 16
-	// finalWarnHardStop — after the FINAL WARNING the model may make at most this
-	// many more tool rounds before it is forced to synthesize. The warning is
-	// otherwise toothless: the model kept reading "one more section" forever.
-	finalWarnHardStop = 2
-	// exploredWarnCap — once the agent has read this many DISTINCT files/paths in
-	// a row without answering, accelerate the final warning. Reading several
-	// files for a codebase task is normal exploration, but unbounded reading is capped.
-	exploredWarnCap = 12
-)
-
-// CalculateAdaptiveToolBudget dynamically scales the tool budget based on
-// prompt complexity, active mode, and task keywords (Fase 2.2).
-// complexityTier classifies a task's effort by prompt signals so the engine
-// budgets iterations proportionally — a one-line typo fix must not be granted
-// the same 25-round runway as a cross-module refactor. Deterministic and free
-// (no LLM): keyword + length signals, matching the spirit of rule b7
-// (PROPORTIONALITY). The autonomous extension path still rescues a
-// misclassified task, so a wrong tier never traps a genuinely big task.
-type complexityTier int
-
-const (
-	tierSimple complexityTier = iota
-	tierMedium
-	tierComplex
-)
-
-// classifyTaskComplexity scores a user query into simple / medium / complex.
-func classifyTaskComplexity(query string) complexityTier {
-	p := strings.ToLower(strings.TrimSpace(query))
-	words := len(strings.Fields(p))
-
-	simpleHits := 0
-	for _, kw := range []string{"typo", "rename", "explain", "what does", "why does", "what is", "why is", "format", "comment", "spelling", "fix the doc"} {
-		if strings.Contains(p, kw) {
-			simpleHits++
-		}
-	}
-	complexHits := 0
-	for _, kw := range []string{"refactor", "migrate", "migration", "audit", "architecture", "implement", "feature", "rewrite", "integrate", "add support", "end-to-end", "multi-file", "multiple files", "schema", "cross-module", "monorepo"} {
-		if strings.Contains(p, kw) {
-			complexHits++
-		}
-	}
-
-	// Multi-part task lists (bulleted/numbered lines) signal real scope.
-	multiPart := strings.Contains(p, "\n-") || strings.Contains(p, "\n*") || strings.Contains(p, "\n1.")
-
-	switch {
-	case complexHits >= 2 || (complexHits >= 1 && words >= 25) || (complexHits >= 1 && multiPart):
-		return tierComplex
-	case (simpleHits >= 2 && complexHits == 0) || (simpleHits >= 1 && words <= 8 && complexHits == 0):
-		return tierSimple
-	default:
-		return tierMedium
-	}
-}
-
-// iterationsForComplexity maps a task tier to its per-turn iteration budget.
-// Simple tasks get a tight runway (finish fast, no ceremony); complex tasks
-// keep the historical 25; the autonomous extension still adds +15 on top when
-// the model proves the task needs more room.
-func iterationsForComplexity(t complexityTier) int {
-	switch t {
-	case tierSimple:
-		return 10
-	case tierComplex:
-		return 25
-	default:
-		return 16
-	}
-}
-
-// explorationBudget returns the adaptive warn, final warn, and absolute caps
-// based on the active mode (PLANNER/MINER vs BUILDER) and prompt complexity.
-func (e *Engine) explorationBudget() (warnRounds, finalWarnRounds, maxAbsolute, exploredCap int) {
-	mode := e.Mode()
-	prompt := e.context.LastUserPrompt()
-	tier := classifyTaskComplexity(prompt)
-
-	if mode == "PLANNER" || mode == "MINER" {
-		// Deep research & architectural discovery modes need wider runway.
-		if tier == tierComplex {
-			return 14, 18, 24, 25
-		}
-		return 10, 14, 20, 18
-	}
-
-	// BUILDER mode: keep standard coding turns snappy and focused on shipping edits.
-	if tier == tierComplex {
-		return 10, 14, 18, 18
-	}
-	return toolWarnRounds, toolFinalWarnRounds, maxToolOnlyAbsolute, exploredWarnCap
-}
-
-func CalculateAdaptiveToolBudget(prompt string, mode string) int {
-	base := 16
-	if mode == "MINER" || mode == "PLANNER" {
-		base = 20
-	}
-	p := strings.ToLower(prompt)
-	words := len(strings.Fields(p))
-	if words > 30 || strings.Contains(p, "refactor") || strings.Contains(p, "audit") || strings.Contains(p, "migrate") || strings.Contains(p, "architecture") || strings.Contains(p, "fix") {
-		base += 6
-	}
-	if base > 28 {
-		return 28
-	}
-	if base < 10 {
-		return 10
-	}
-	return base
-}
-
-// maxParallelReadOnlyTools caps how many read-only tools execute concurrently
-// in one round. Read-only calls are stateless, so parallel execution cuts
-// multi-read rounds from ~N×latency to ~N/cap×latency — the biggest per-turn
-// speedup available without changing model behavior. The cap keeps a 20-tool
-// batch from hammering the disk, the network, or the LSP server at once.
-const maxParallelReadOnlyTools = 4
-
-// isParallelReadOnly reports whether a tool is safe to execute concurrently:
-// read-only, stateless, no interactive prompt, no session-affecting side
-// effects. Everything else (write_file, edit_file, delete_file, bash,
-// ask_user, git, undo, review_changes, memory) stays sequential so side
-// effects and user prompts keep their order.
-func isParallelReadOnly(name string) bool {
-	switch name {
-	case "read_file", "list_dir", "grep", "glob", "search_code", "fetch_url", "web_search", "doc_lookup":
-		return true
-	}
-	return false
-}
-
-// isMutatingTool reports whether a tool has filesystem/process side effects
-// that warrant early-exit-on-error (a failure here usually invalidates
-// downstream calls in the same round).
-func isMutatingTool(name string) bool {
-	switch name {
-	case "write_file", "edit_file", "delete_file", "bash", "git", "undo",
-		"create_directory", "rename_file", "lsp_autofix":
-		return true
-	}
-	return false
-}
-
-// SetProjectContext injects a compact structural overview of the project into
-// every turn's system prompt (see search.BuildProjectContext). Empty disables.
-func (e *Engine) SetProjectContext(pc string) {
-	e.projectCtx = pc
-}
-
-// SetSkillCatalog injects the installed skill catalog (name + description
-// only; the model loads each SKILL.md itself). Empty disables the skills
-// block. The catalog is relevance-filtered by the prompt builder when it
-// exceeds the tuning threshold.
-func (e *Engine) SetSkillCatalog(entries []prompt.SkillEntry) {
-	e.skillsEntries = entries
-}
-
-// SetTuning replaces the runtime tuning surface (block/rule toggles, skill
-// catalog budgets). Nil keeps the defaults.
-func (e *Engine) SetTuning(t *prompt.Tuning) {
-	if t != nil {
-		e.tuning = t
-	}
-}
-
-// SetDetectedStacks wires the repo's detected languages (with evidence files)
-// so the prompt builder can render a STACK hint and bias the skill-catalog
-// ranking toward the repo.
-func (e *Engine) SetDetectedStacks(stacks []prompt.Stack) {
-	e.stacks = stacks
-}
-
-// skillForRead returns the catalog name of the skill whose SKILL.md a read_file
-// call targets, or "" when the path is not a known skill file. Matching is
-// suffix-based so both relative (.brocode/skills/go-workflow/SKILL.md) and
-// absolute read paths resolve to the same skill.
-func (e *Engine) skillForRead(path string) string {
-	if len(e.skillsEntries) == 0 {
-		return ""
-	}
-	clean := filepath.ToSlash(strings.TrimSpace(path))
-	if filepath.Base(clean) != "SKILL.md" {
-		return ""
-	}
-	for _, s := range e.skillsEntries {
-		if s.Path == "" {
-			continue
-		}
-		rel := filepath.ToSlash(s.Path)
-		if strings.HasSuffix(clean, rel) || strings.HasSuffix(clean, "/"+s.Name+"/SKILL.md") {
-			return s.Name
-		}
-	}
-	return ""
-}
-
-// SetRepoMap injects the deterministic project map (entry points, structure,
-// hot files by usage) into every turn's system prompt. Empty disables.
-func (e *Engine) SetRepoMap(rm string) {
-	e.repoMap = rm
-}
-
-// SetScopeFiles injects the full project file list for smart scope
-// pre-selection: given a user prompt, ScoreFiles() ranks files by relevance
-// so BroCode can focus exploration on the most likely targets instead of
-// scanning the entire workspace. Empty disables.
-func (e *Engine) SetScopeFiles(files []string) {
-	e.repoFiles = files
-}
-
-// SetMemoryStore wires the cross-session project memory. When set, a
-// warm-start excerpt of past sessions' learnings is injected into the system
-// prompt, and compaction summaries are auto-merged back into memory.
-func (e *Engine) SetMemoryStore(st *memory.Store) {
-	e.mem = st
-	// Auto-prune stale memory facts (>30 days old) to keep the memory file
-	// focused on the current project state. Cheap (single file read), runs once
-	// per session. Non-blocking: errors are silently ignored.
-	if st != nil {
-		go st.PruneStale()
-	}
-}
-
-// SetKnowledgeStore wires the Smart Context Graph backend. When set, the engine
-// queries it at turn-start for relevance-ranked file hints and injects them
-// as a "SMART CONTEXT" block in the system prompt — helping the agent avoid
-// re-scanning files it has already analyzed in prior sessions.
-func (e *Engine) SetKnowledgeStore(st *store.Store) {
-	e.knowledge = st
-	// Best-effort prune of stale knowledge entries on session start. Cheap
-	// (single indexed DELETE with WHERE) and safe to run synchronously —
-	// avoids a goroutine race window during turn-one system prompt build.
-	if st != nil {
-		_, _ = st.PruneKnowledge()
-	}
-}
 
 // SetUsageRecorder wires a callback that receives the files the model touched
 // each turn (read, searched, edited) so usage can persist across sessions.
@@ -789,6 +496,11 @@ func (e *Engine) SetUsageRecorder(fn func(paths []string)) {
 // so the host can keep session-scoped caches (e.g. the symbol index) fresh.
 func (e *Engine) SetOnFileEdited(fn func(path string)) {
 	e.onFileEdited = fn
+}
+
+// SetGlobalIndex registers the session-wide symbol and reference index for blast radius analysis.
+func (e *Engine) SetGlobalIndex(index *search.GlobalIndex) {
+	e.globalIndex = index
 }
 
 // SetOnChange wires a callback invoked whenever a write/edit tool succeeds, with
@@ -872,43 +584,7 @@ func (e *Engine) SessionCostUSD() float64 {
 	return e.usage.TotalCost()
 }
 
-// AddFallback registers a fallback provider+model tried on primary failure.
-func (e *Engine) AddFallback(fb Fallback) {
-	e.fallbacks = append(e.fallbacks, fb)
-}
 
-// SetPrimaryIdentity tells the router which provider is the active primary and
-// its wire protocol, so health tracking keys correctly and the "confirm"
-// policy can distinguish cross-vendor fallbacks.
-func (e *Engine) SetPrimaryIdentity(id, protocol string) {
-	e.primaryID = id
-	e.primaryProtocol = protocol
-}
-
-// SetFallbackPolicy sets the routing policy (FallbackAuto / FallbackConfirm /
-// FallbackPrimaryOnly). The default is FallbackAuto.
-func (e *Engine) SetFallbackPolicy(policy string) {
-	if policy == "" {
-		policy = FallbackAuto
-	}
-	e.fallbackPolicy = policy
-}
-
-// FallbackCount returns how many turns a fallback provider has served.
-func (e *Engine) FallbackCount() int {
-	return e.fallbackCount
-}
-
-// PrimaryCooldownRemaining reports how long the primary provider is currently
-// cooling down from recent failures (0 when healthy). While positive, the
-// router skips the primary and goes straight to a healthy fallback.
-func (e *Engine) PrimaryCooldownRemaining() time.Duration {
-	if e.health == nil {
-		return 0
-	}
-	_, rem := e.health.inCooldown(e.primaryID)
-	return rem
-}
 
 // SetStreamHandler wires a callback receiving content deltas while the model
 // streams its answer. Nil disables streaming (adapters fall back to Complete).
@@ -2036,10 +1712,30 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 							if e.onFileEdited != nil && err == nil {
 								e.onFileEdited(p)
 							}
-							// Real-time post-edit LSP diagnostic hook (Gap 5)
+							// Real-time post-edit LSP diagnostic hook & Auto-dependency healing
 							if e.diagFn != nil && err == nil {
 								if lspDiag := e.diagFn(p); lspDiag != "" && !strings.HasPrefix(lspDiag, "No diagnostics") {
+									if healMsg, ok := AutoResolveDependencies(toolCtx, e.repoRoot, lspDiag); ok {
+										if onUpdate != nil {
+											onUpdate(e.state, "📦 "+healMsg)
+										}
+										if reDiag := e.diagFn(p); reDiag != "" && !strings.HasPrefix(reDiag, "No diagnostics") {
+											lspDiag = reDiag
+										} else {
+											lspDiag = healMsg + " (LSP diagnostics are now clean)"
+										}
+									}
 									out += "\n\n⚡ [REAL-TIME LSP DIAGNOSTIC]:\n" + lspDiag
+									pending[i].output = out
+								}
+
+								// Check blast radius downstream callers if globalIndex is available
+								if brokenCallers := CheckBlastRadiusImpact(toolCtx, e.repoRoot, p, e.diagFn, e.globalIndex); len(brokenCallers) > 0 {
+									out += "\n\n⚠️ [DOWNSTREAM BLAST RADIUS WARNING]: Editing exported symbols in " + filepath.Base(p) + " broke the following callers:\n"
+									for _, bc := range brokenCallers {
+										out += "  • " + bc + "\n"
+									}
+									out += "👉 Action required: Update callers in the same pass."
 									pending[i].output = out
 								}
 							}
@@ -2589,19 +2285,7 @@ func (e *Engine) toolsForMode(mode string) []provider.ToolDefinition {
 	return out
 }
 
-// LastFallbackModel returns the fallback model used in the most recent turn
-// ("" when the primary provider served it).
-func (e *Engine) LastFallbackModel() string {
-	return e.lastFallback
-}
 
-// LastFallbackReason returns the primary provider's error that triggered the
-// fallback in the most recent turn ("" when the primary served it). This is
-// how the UI tells the user WHY — e.g. a FreeBuff duration/queue limit or an
-// invalid model — rather than silently swapping providers.
-func (e *Engine) LastFallbackReason() string {
-	return e.lastFallbackReason
-}
 
 // recordExplored keeps a capped, de-duplicated list of files/directories the
 // model has touched this turn (read_file, list_dir, grep, glob, bash find).
@@ -3036,121 +2720,7 @@ func (e *Engine) complete(ctx context.Context, req provider.CompletionRequest) (
 	return e.completeWith(ctx, e.adapter, req)
 }
 
-// modelCompactionSummary asks the active model to write the structured 5-part
-// compaction summary from the messages that are about to be dropped. Returns
-// ok=false on any failure (network, bad JSON, empty) so the caller falls back
-// to the deterministic boilerplate summary — compaction must never break a turn.
-func (e *Engine) modelCompactionSummary(ctx context.Context) (bcontext.CompactionSummary, bool) {
-	msgs := e.context.Messages()
-	if len(msgs) == 0 {
-		return bcontext.CompactionSummary{}, false
-	}
 
-	// Compact() keeps the last 4 messages; summarize exactly what gets dropped.
-	keep := 4
-	if len(msgs) <= keep {
-		keep = 0
-	}
-	drop := msgs[:len(msgs)-keep]
-
-	transcript := compactionTranscript(drop)
-	if strings.TrimSpace(transcript) == "" {
-		return bcontext.CompactionSummary{}, false
-	}
-
-	prompt := "You are summarizing an ongoing software-agent conversation for context compaction. " +
-		"Below is the transcript that is about to be compacted away. Produce a concise structured summary " +
-		"that captures everything a continuing agent still needs to know. " +
-		"Respond with ONLY a JSON object (no markdown fences, no prose) using EXACTLY this schema:\n" +
-		"{\"goal\": string, \"files_touched\": [string], \"decisions_made\": [string], " +
-		"\"next_action\": string, \"constraints\": string, \"open_questions\": [string], " +
-		"\"last_known_state\": string}\n\n" +
-		"next_action = the single most useful next step for the continuing agent. " +
-		"constraints = hard rules it must not violate (verified facts, things already tried that failed, " +
-		"scope boundaries). Keep each field tight.\n\n" +
-		"TRANSCRIPT TO COMPACT:\n" + transcript
-
-	summCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
-
-	resp, err := e.adapter.Complete(summCtx, provider.CompletionRequest{
-		Model:       e.compactionModel(),
-		Messages:    []provider.Message{{Role: "user", Content: prompt}},
-		Temperature: 0.2,
-	})
-	if err != nil {
-		return bcontext.CompactionSummary{}, false
-	}
-	if resp == nil || strings.TrimSpace(resp.Content) == "" {
-		return bcontext.CompactionSummary{}, false
-	}
-
-	summary, ok := parseCompactionJSON(resp.Content)
-	if !ok {
-		return bcontext.CompactionSummary{}, false
-	}
-	if strings.TrimSpace(summary.Goal) == "" && strings.TrimSpace(summary.LastKnownState) == "" {
-		return bcontext.CompactionSummary{}, false
-	}
-	return summary, true
-}
-
-// compactionModel returns the model to use for compaction summarization: the
-// cheaper routing model when configured, otherwise the main synthesis model.
-func (e *Engine) compactionModel() string {
-	if e.compactModel != "" {
-		return e.compactModel
-	}
-	return e.model
-}
-
-// compactionTranscript renders the to-be-dropped messages as a bounded text
-// transcript so a summarizing model sees real context without re-bloating the
-// window we are trying to shrink.
-func compactionTranscript(msgs []provider.Message) string {
-	var sb strings.Builder
-	const maxTranscriptChars = 60000
-	for _, m := range msgs {
-		role := m.Role
-		if m.ToolCallID != "" {
-			role = "tool_result"
-		}
-		var part strings.Builder; part.WriteString(role);part.WriteString(": ")
-		if m.Content != "" {
-			part.WriteString(m.Content)
-		}
-		if len(m.ToolCalls) > 0 {
-			for _, tc := range m.ToolCalls {
-				fmt.Fprintf(&part, "\n  [tool_call %s(%s)]", tc.Name, tc.Arguments)
-			}
-		}
-		if sb.Len()+len(part.String()) > maxTranscriptChars {
-			sb.WriteString("\n...[transcript truncated for compaction]...")
-			break
-		}
-		sb.WriteString(part.String())
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-// parseCompactionJSON extracts a CompactionSummary from a model reply, tolerating
-// surrounding markdown fences and stray prose before/after the JSON object.
-func parseCompactionJSON(raw string) (bcontext.CompactionSummary, bool) {
-	start := strings.IndexByte(raw, '{')
-	if start < 0 {
-		return bcontext.CompactionSummary{}, false
-	}
-	end := strings.LastIndexByte(raw, '}')
-	if end < start {
-		return bcontext.CompactionSummary{}, false
-	}
-	var summary bcontext.CompactionSummary
-	if err := json.Unmarshal([]byte(raw[start:end+1]), &summary); err != nil {
-		return bcontext.CompactionSummary{}, false
-	}
-	return summary, true
-}
 
 func (e *Engine) completeWith(ctx context.Context, a provider.ProviderAdapter, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
 	// Snapshot the live handlers ONCE. Progressing adapters (e.g. the opencode
@@ -3246,140 +2816,7 @@ func (e *Engine) fitMessages(sysPrompt string) []provider.Message {
 	return res
 }
 
-// completeTurn runs a completion through the adaptive router. It returns the
-// response, plus the fallback model that served it ("" when the primary
-// answered). Routing policy (see FallbackPolicy): retry the primary once on
-// transient errors, skip providers in cooldown, and honor the user's
-// fallback policy. Every non-2xx/network outcome feeds the circuit breaker so
-// a chronically failing provider is skipped on later turns instead of burning
-// a full timeout each time.
-func (e *Engine) completeTurn(ctx context.Context, req provider.CompletionRequest, onUpdate TurnOutputHandler) (*provider.CompletionResponse, string, error) {
-	timeout := defaultModelCallTimeout
-	// Log that we are now blocking on the LLM so the activity log is never
-	// silent during a slow generation (otherwise it looks "stuck").
-	if onUpdate != nil {
-		onUpdate(e.state, fmt.Sprintf("⏳ %s: generating response…", req.Model))
-	}
 
-	// Fast path: the primary is cooling down from a recent failure — don't
-	// burn a full timeout on it again; go straight to the first healthy
-	// fallback. The cooldown is a hint, not a hard block: if nothing is
-	// available we still try the primary as a last resort.
-	if cd, _ := e.health.inCooldown(e.primaryID); cd {
-		if resp, fb, fbErr := e.tryFallbacks(ctx, req, onUpdate); resp != nil {
-			return resp, fb, nil
-		} else if fbErr != nil {
-			return nil, "", fbErr
-		}
-		// fall through → try the primary anyway
-	}
-
-	// Each attempt gets its OWN timeout so a single slow call can't hang the
-	// whole turn — on timeout we fall back to the next healthy model instead.
-	callCtx, callCancel := context.WithTimeout(ctx, timeout)
-	resp, err := e.complete(callCtx, req)
-	callCancel()
-	if err == nil {
-		e.health.recordSuccess(e.primaryID)
-		return resp, "", nil
-	}
-
-	primaryErr := err
-	e.health.recordFailure(e.primaryID)
-	if e.fallbackPolicy == FallbackPrimaryOnly {
-		return nil, "", primaryErr
-	}
-	// Surface a timeout clearly so the user knows we're re-routing, not frozen.
-	if errors.Is(err, context.DeadlineExceeded) && onUpdate != nil {
-		onUpdate(e.state, fmt.Sprintf("⚠️ %s timed out after %s — routing to fallback…", req.Model, timeout))
-	}
-
-	// A transient primary failure (stream stall, timeout, 429/5xx) deserves
-	// ONE retry on the same provider before switching models. Permanent errors
-	// (auth, invalid model, user ESC) are never retried.
-	if provider.IsRetryable(err) {
-		retryCtx, retryCancel := context.WithTimeout(ctx, timeout)
-		rresp, rerr := e.complete(retryCtx, req)
-		retryCancel()
-		if rerr == nil {
-			e.health.recordSuccess(e.primaryID)
-			return rresp, "", nil
-		}
-	}
-
-	// Primary still failing — route to the next healthy fallback.
-	e.lastFallbackReason = primaryErr.Error()
-	if resp, fb, fbErr := e.tryFallbacks(ctx, req, onUpdate); resp != nil {
-		return resp, fb, nil
-	} else if fbErr != nil {
-		return nil, "", fbErr
-	}
-	return nil, "", primaryErr
-}
-
-// tryFallbacks routes the completion to the first healthy fallback in
-// registration order, skipping providers currently in cooldown. Returns the
-// response plus the fallback model on success. fbErr is non-nil only when a
-// fallback was SELECTED but failed; (nil, "", nil) means nothing was tried
-// (no fallbacks, all in cooldown, or the confirm policy declined).
-func (e *Engine) tryFallbacks(ctx context.Context, req provider.CompletionRequest, onUpdate TurnOutputHandler) (resp *provider.CompletionResponse, fallbackModel string, fbErr error) {
-	var lastErr error
-	for _, fb := range e.fallbacks {
-		if cd, _ := e.health.inCooldown(fb.ID); cd {
-			continue
-		}
-		// Confirm policy: only ask when the fallback is a DIFFERENT vendor
-		// than the primary; same-vendor fallbacks (e.g. a sibling model on the
-		// same gateway) route automatically.
-		if e.fallbackPolicy == FallbackConfirm && fb.Protocol != "" && fb.Protocol != e.primaryProtocol {
-			ok, err := e.askFallbackConfirmation(fb.Model, fb.ID)
-			if err != nil {
-				return nil, "", err
-			}
-			if !ok {
-				return nil, "", nil // user declined → stop routing
-			}
-		}
-		fbReq := req
-		fbReq.Model = fb.Model
-		// Bound each fallback attempt so a slow fallback can't hang either.
-		fbCtx, fbCancel := context.WithTimeout(ctx, defaultModelCallTimeout)
-		fbResp, err := e.completeWith(fbCtx, fb.Adapter, fbReq)
-		fbCancel()
-		if err == nil {
-			e.health.recordSuccess(fb.ID)
-			e.lastFallback = fb.Model
-			e.fallbackCount++
-			if onUpdate != nil {
-				onUpdate(e.state, fmt.Sprintf("⚠️ Primary provider failed — using fallback model %s", fb.Model))
-			}
-			return fbResp, fb.Model, nil
-		}
-		e.health.recordFailure(fb.ID)
-		lastErr = err
-	}
-	if lastErr != nil {
-		return nil, "", lastErr
-	}
-	return nil, "", nil
-}
-
-// askFallbackConfirmation asks the user before routing to a fallback from a
-// different vendor than the primary. With no interactive layer wired it
-// defaults to allow, preserving the auto behavior.
-func (e *Engine) askFallbackConfirmation(model, _ string) (bool, error) {
-	if e.askHandler == nil {
-		return true, nil
-	}
-	ans, err := e.askHandler(fmt.Sprintf(
-		"⚠️ Primary provider (%s) failed. Route this turn to fallback model %s?",
-		e.primaryID, model,
-	), []string{"✅ Use fallback", "🚫 Stop this turn"})
-	if err != nil {
-		return false, err
-	}
-	return !strings.Contains(ans, "Stop") && !strings.Contains(ans, "Deny"), nil
-}
 
 // hookRun fires a lifecycle hook event with structured env data. Output is
 // returned so on-tool-call hooks can override tool results; other events

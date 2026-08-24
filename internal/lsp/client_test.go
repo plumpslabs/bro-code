@@ -262,31 +262,28 @@ func runFakeServer() {
 			uri, _ := doc["uri"].(string)
 			// Push diagnostics so the Diagnostics tool and ScanDiagnostics have
 			// something to show: one error and one deprecated-warning (tag 2).
-			go func() {
-				time.Sleep(5 * time.Millisecond)
-				notify(writer, "textDocument/publishDiagnostics", map[string]any{
-					"uri": uri,
-					"diagnostics": []map[string]any{
-						{
-							"range": map[string]any{
-								"start": map[string]any{"line": 0, "character": 0},
-								"end":   map[string]any{"line": 0, "character": 1},
-							},
-							"severity": 1,
-							"message":  "test diagnostic",
+			notify(writer, "textDocument/publishDiagnostics", map[string]any{
+				"uri": uri,
+				"diagnostics": []map[string]any{
+					{
+						"range": map[string]any{
+							"start": map[string]any{"line": 0, "character": 0},
+							"end":   map[string]any{"line": 0, "character": 1},
 						},
-						{
-							"range": map[string]any{
-								"start": map[string]any{"line": 1, "character": 0},
-								"end":   map[string]any{"line": 1, "character": 1},
-							},
-							"severity": 2,
-							"message":  "legacyFunc is deprecated, use newFunc",
-							"tags":     []int{2},
-						},
+						"severity": 1,
+						"message":  "test diagnostic",
 					},
-				})
-			}()
+					{
+						"range": map[string]any{
+							"start": map[string]any{"line": 1, "character": 0},
+							"end":   map[string]any{"line": 1, "character": 1},
+						},
+						"severity": 2,
+						"message":  "legacyFunc is deprecated, use newFunc",
+						"tags":     []int{2},
+					},
+				},
+			})
 		}
 	}
 
@@ -363,6 +360,9 @@ func fakeSpec(t *testing.T, lang string) {
 	t.Helper()
 	old := specs
 	t.Cleanup(func() { specs = old })
+	diagCache.Lock()
+	diagCache.entries = make(map[string]fileCacheEntry)
+	diagCache.Unlock()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

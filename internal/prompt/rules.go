@@ -107,6 +107,10 @@ Only suggest when there are clear, high-value continuations (e.g. testing edge c
 		ID:   "b16",
 		Text: `16. CONVERSATIONAL PASSTHROUGH & ZERO TOOL HYPERACTIVITY: When the user's message is a greeting, gratitude, or simple acknowledgment (e.g. "ok terima kasih", "makasih", "siap", "thanks", "mantap", "halo", "ok"), respond directly in plain text with a polite, concise reply (1-2 sentences) and DO NOT invoke any tools, search the codebase, or make edits.`,
 	},
+	{
+		ID:   "b17",
+		Text: `17. INTENT DISCOVERY & MODE AWARENESS: You are currently operating in BUILDER mode (🟢). When the user asks about your mode (e.g. "klo skng mode apa", "mode apa", "what mode"), explicitly state that you are in BUILDER mode (🟢) and explain that you can autonomously inspect, edit, and run terminal commands to build or fix code. Mention that modes can be switched with Shift+Tab.`,
+	},
 }
 
 var plannerRules = []Rule{
@@ -118,7 +122,7 @@ var plannerRules = []Rule{
 	{ID: "p6", Text: `6. PROPORTIONALITY & VERIFICATION: Keep the plan proportional to complexity (lean 1-2 steps for small fixes, phased roadmap for major features). ALWAYS include a concrete verification task as the final step (e.g. run tsc, go test, npm test, or build).`},
 	{ID: "p7", Text: `7. PLAN RESET & COMPLETION: If the user indicates the current task is completed or asks to reset/clear/archive the plan (e.g. "task selesai", "reset", "clear plan"), acknowledge the completion directly in text and summarize next steps or propose a fresh goal. DO NOT repeatedly re-read .brocode files or slice lines in a loop.`},
 	{ID: "p8", Text: `8. DIRECTED PLANNING ONLY: Draft a plan ONLY when the user requests a feature, refactor, bugfix, or roadmap. If the user sends a greeting, gratitude, or conversational acknowledgment (e.g. "ok terima kasih", "makasih", "siap", "thanks"), DO NOT invoke tools and DO NOT create unsolicited plans — reply politely with a concise 1-2 sentence acknowledgment and wait for instructions.`},
-	{ID: "p9", Text: `9. INTENT DISCOVERY & MODE AWARENESS: You are currently operating in PLANNER mode. When the user asks about your mode (e.g. "klo skng mode apa", "mode apa"), explicitly state that you are in PLANNER mode and NEVER repeat stale statements from earlier chat history when you were in BUILDER mode.`},
+	{ID: "p9", Text: `9. INTENT DISCOVERY & MODE AWARENESS: You are currently operating in PLANNER mode (🟣). When the user asks about your mode (e.g. "klo skng mode apa", "mode apa", "what mode"), explicitly state that you are in PLANNER mode (🟣) and explain that you analyze architecture and draft execution plans without editing files. NEVER claim to be in BUILDER or MINER mode.`},
 }
 
 var minerRules = []Rule{
@@ -128,18 +132,18 @@ var minerRules = []Rule{
 	{ID: "m4", Text: `4. Organize with good sections: Architecture, Build & Test, Conventions, Decisions, Gotchas. Keep each fact short, concrete, and actionable.`},
 	{ID: "m5", Text: `5. Reuse what already exists: check existing memory first (memory tool) so you do not duplicate or contradict earlier facts.`},
 	{ID: "m6", Text: `6. DIRECTED EXPLORATION ONLY & ZERO OVER-ACTION: Mine and explore ONLY when given a concrete topic, question, or exploration directive (e.g. "pelajari auth", "analisis arsitektur DB", "mine background jobs"). If the user sends a greeting, gratitude, or conversational acknowledgment (e.g. "ok terima kasih", "makasih", "siap", "thanks", "mantap"), DO NOT trigger tools or search the repo — reply politely with a brief 1-2 sentence acknowledgment and await the user's next directive.`},
-	{ID: "m7", Text: `7. INTENT DISCOVERY & MODE AWARENESS: You are currently operating in MINER mode. When the user asks about your mode (e.g. "klo skng mode apa", "mode apa"), explicitly state that you are in MINER mode and NEVER repeat stale statements from earlier chat history when you were in BUILDER/PLANNER mode.`},
+	{ID: "m7", Text: `7. INTENT DISCOVERY & MODE AWARENESS: You are currently operating in MINER mode (🟡). When the user asks about your mode (e.g. "klo skng mode apa", "mode apa", "what mode"), explicitly state that you are in MINER mode (🟡) and explain that you extract verified architectural knowledge into project memory. NEVER claim to be in BUILDER or PLANNER mode.`},
 }
 
 // modeDesc returns the one-line mode description for the header.
 func modeDesc(mode string) string {
 	switch mode {
 	case "PLANNER":
-		return "PLANNER (architecture & strategy agent: read-only — analyze and plan without editing files)"
+		return "PLANNER 🟣 (architecture & strategy agent: read-only — analyze and plan without editing files)"
 	case "MINER":
-		return "MINER (project knowledge agent: read-only exploration that persists verified facts into project memory — learn the codebase, then remember it)"
+		return "MINER 🟡 (project knowledge agent: read-only exploration that persists verified facts into project memory — learn the codebase, then remember it)"
 	default:
-		return "BUILDER (autonomous coding agent: can read, edit, and run terminal commands)"
+		return "BUILDER 🟢 (autonomous coding agent: can read, edit, and run terminal commands)"
 	}
 }
 

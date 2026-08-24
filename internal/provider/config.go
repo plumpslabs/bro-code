@@ -579,6 +579,8 @@ func SaveGlobalConfig(cfg AppConfig) error {
 		if json.Unmarshal([]byte(stripJSONComments(string(raw))), &disk) == nil {
 			if cfg.SearchKey == "" && disk.SearchKey != "" {
 				cfg.SearchKey = disk.SearchKey
+			}
+			if cfg.SearchProvider == "" && disk.SearchProvider != "" {
 				cfg.SearchProvider = disk.SearchProvider
 			}
 			if cfg.Context7Key == "" && disk.Context7Key != "" {

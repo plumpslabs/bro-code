@@ -95,4 +95,53 @@ func TestAdvancedCommandsInApp(t *testing.T) {
 	if !strings.Contains(lastMsg, "Key Cleared") {
 		t.Fatalf("expected c7 key cleared message, got: %s", lastMsg)
 	}
+
+	// 7. Test /trace and /provenance command
+	m.handleSlashCommand("/trace")
+	lastMsg = m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg, "PROVENANCE:") {
+		t.Fatalf("expected PROVENANCE output from /trace, got: %s", lastMsg)
+	}
 }
+
+func TestAllSlashCommandsDispatch(t *testing.T) {
+	cmds := []string{
+		"/help", "/h", "/?",
+		"/cost", "/tokens", "/usage",
+		"/mode", "/mode builder", "/mode planner", "/mode miner",
+		"/builder", "/plan", "/planner", "/mine", "/miner",
+		"/history",
+		"/clear",
+		"/diagnose",
+		"/spec build a user login authentication service",
+		"/tournament compare bubble sort and quick sort algorithms",
+		"/repair",
+		"/deps",
+		"/provenance",
+		"/verify",
+		"/copy", "/y",
+		"/mouse",
+		"/lsp",
+		"/skills",
+		"/memory",
+		"/ask what is Go interface?",
+		"/trace",
+		"/agent",
+		"/debug",
+	}
+
+	for _, c := range cmds {
+		t.Run(c, func(t *testing.T) {
+			m := newTestApp()
+			m.width = 120
+			m.height = 40
+			// Every slash command should dispatch without panicking or erroring unexpectedly
+			_, cmd := m.handleSlashCommand(c)
+			_ = cmd
+			if len(m.messages) == 0 {
+				t.Fatalf("command %q did not produce any message or state change", c)
+			}
+		})
+	}
+}
+
