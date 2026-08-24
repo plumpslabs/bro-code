@@ -791,21 +791,60 @@ func (m Model) renderSessionsModal() string {
 
 func (m Model) renderModelsModal() string {
 	var sb strings.Builder
-	sb.WriteString("=== Select AI Model (/models) ===\n")
+	items := m.getModelList()
+	if len(items) > 0 {
+		sb.WriteString(fmt.Sprintf("=== Select AI Model (/models) — %d/%d ===\n", m.modelsSel+1, len(items)))
+	} else {
+		sb.WriteString("=== Select AI Model (/models) ===\n")
+	}
+
 	if m.modelsQuery != "" {
-		sb.WriteString("Filter: " + m.modelsQuery + "▏\n\n")
+		sb.WriteString("Filter: " + m.modelsQuery + "▏ (type to filter, backspace to clear)\n\n")
 	} else {
 		sb.WriteString("Type to filter models...\n\n")
 	}
 
 	greenBadge := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
 	activeBadgeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	scrollHintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true)
 
-	items := m.getModelList()
 	if len(items) == 0 {
 		sb.WriteString("No models found matching filter.\n")
 	} else {
-		for idx, item := range items {
+		maxVisible := 8
+		if m.height > 20 {
+			maxVisible = m.height - 12
+			if maxVisible > 12 {
+				maxVisible = 12
+			}
+			if maxVisible < 5 {
+				maxVisible = 5
+			}
+		}
+
+		startIdx := 0
+		endIdx := len(items)
+		if len(items) > maxVisible {
+			startIdx = m.modelsSel - (maxVisible / 2)
+			if startIdx < 0 {
+				startIdx = 0
+			}
+			endIdx = startIdx + maxVisible
+			if endIdx > len(items) {
+				endIdx = len(items)
+				startIdx = endIdx - maxVisible
+				if startIdx < 0 {
+					startIdx = 0
+				}
+			}
+		}
+
+		if startIdx > 0 {
+			sb.WriteString(scrollHintStyle.Render(fmt.Sprintf("  ▲ ... (%d more models above)\n", startIdx)))
+		}
+
+		for idx := startIdx; idx < endIdx; idx++ {
+			item := items[idx]
 			cursor := "  "
 			if idx == m.modelsSel {
 				cursor = "❯ "
@@ -820,9 +859,13 @@ func (m Model) renderModelsModal() string {
 
 			sb.WriteString(fmt.Sprintf("%s %-28s (%s)%s\n", cursor, item.ModelName, provider.FriendlyName(item.ProviderID), statusTag))
 		}
+
+		if endIdx < len(items) {
+			sb.WriteString(scrollHintStyle.Render(fmt.Sprintf("  ▼ ... (%d more models below)\n", len(items)-endIdx)))
+		}
 	}
 
-	sb.WriteString("\n[↑/↓ navigate · ENTER apply · ESC close]")
+	sb.WriteString("\n[↑/↓ navigate (wrap-around) · ENTER apply · ESC close]")
 	style := lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2)
 	if m.width > 0 {
 		style = style.Width(m.width - 4)
@@ -841,28 +884,65 @@ func (m Model) renderConnectModal() string {
 
 	switch m.connectStep {
 	case 0:
-		sb.WriteString(stepStyle.Render("Step 1 — Select Provider") + "\n\n")
-		for i, p := range provider.BuiltinProviders {
+		total := len(provider.BuiltinProviders) + 1
+		sb.WriteString(fmt.Sprintf("%s — %d/%d\n\n", stepStyle.Render("Step 1 — Select Provider"), m.connectProviderSel+1, total))
+
+		maxVisible := 8
+		if m.height > 20 {
+			maxVisible = m.height - 12
+			if maxVisible > 10 {
+				maxVisible = 10
+			}
+			if maxVisible < 5 {
+				maxVisible = 5
+			}
+		}
+
+		startIdx := 0
+		endIdx := total
+		if total > maxVisible {
+			startIdx = m.connectProviderSel - (maxVisible / 2)
+			if startIdx < 0 {
+				startIdx = 0
+			}
+			endIdx = startIdx + maxVisible
+			if endIdx > total {
+				endIdx = total
+				startIdx = endIdx - maxVisible
+				if startIdx < 0 {
+					startIdx = 0
+				}
+			}
+		}
+
+		if startIdx > 0 {
+			sb.WriteString(hintStyle.Render(fmt.Sprintf("  ▲ ... (%d more providers above)\n", startIdx)))
+		}
+
+		for i := startIdx; i < endIdx; i++ {
 			cursor := "  "
 			if i == m.connectProviderSel {
 				cursor = "❯ "
 			}
 
-			badge := ""
-			if p.ID == m.activeProvider.Info.ID {
-				badge = greenStyle.Render(" [✓ active]")
-			} else if m.isProviderConfigured(p.ID, p.APIKeyEnvVar) {
-				badge = greenStyle.Render(" [✓ configured]")
+			if i < len(provider.BuiltinProviders) {
+				p := provider.BuiltinProviders[i]
+				badge := ""
+				if p.ID == m.activeProvider.Info.ID {
+					badge = greenStyle.Render(" [✓ active]")
+				} else if m.isProviderConfigured(p.ID, p.APIKeyEnvVar) {
+					badge = greenStyle.Render(" [✓ configured]")
+				}
+				sb.WriteString(fmt.Sprintf("%s %-25s (ID: %s)%s\n", cursor, p.Name, p.ID, badge))
+			} else {
+				sb.WriteString(fmt.Sprintf("%s %-25s\n", cursor, "✨ Custom Provider..."))
 			}
+		}
 
-			sb.WriteString(fmt.Sprintf("%s %-25s (ID: %s)%s\n", cursor, p.Name, p.ID, badge))
+		if endIdx < total {
+			sb.WriteString(hintStyle.Render(fmt.Sprintf("  ▼ ... (%d more providers below)\n", total-endIdx)))
 		}
-		cursor := "  "
-		if m.connectProviderSel == len(provider.BuiltinProviders) {
-			cursor = "❯ "
-		}
-		sb.WriteString(fmt.Sprintf("%s %-25s\n", cursor, "✨ Custom Provider..."))
-		sb.WriteString("\n" + hintStyle.Render("[↑/↓ navigate · ENTER select · ESC cancel]"))
+		sb.WriteString("\n" + hintStyle.Render("[↑/↓ navigate (wrap-around) · ENTER select · ESC cancel]"))
 
 	case 1:
 		if m.connectCustom {

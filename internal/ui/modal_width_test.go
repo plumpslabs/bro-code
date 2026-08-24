@@ -95,3 +95,66 @@ func TestAskModalNoOverflow(t *testing.T) {
 		t.Errorf("ask modal (custom): box width %d > 100\n%s", w, out)
 	}
 }
+
+// TestModelsModalSlidingWindowAndWrapAround verifies that the models selector
+// stays within bounded vertical height via sliding window and wraps around.
+func TestModelsModalSlidingWindowAndWrapAround(t *testing.T) {
+	m := newTestApp()
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.showModels = true
+
+	items := m.getModelList()
+	if len(items) == 0 {
+		t.Skip("no models available in test app")
+	}
+
+	// 1. Up from 0 should wrap around to bottom
+	m.modelsSel = 0
+	m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.modelsSel != len(items)-1 {
+		t.Errorf("expected wrap-around to bottom (%d), got %d", len(items)-1, m.modelsSel)
+	}
+
+	// 2. Down from bottom should wrap around to top
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.modelsSel != 0 {
+		t.Errorf("expected wrap-around to top (0), got %d", m.modelsSel)
+	}
+
+	// 3. Sliding window renders bounded lines (not overflowing 24 terminal height)
+	rendered := m.renderModelsModal()
+	lineCount := len(strings.Split(rendered, "\n"))
+	if lineCount > 24 {
+		t.Errorf("models modal height %d lines > 24 terminal height", lineCount)
+	}
+}
+
+// TestModelsModalLiveFilter verifies typing filters model list in real time.
+func TestModelsModalLiveFilter(t *testing.T) {
+	m := newTestApp()
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.showModels = true
+
+	// Type 'g', 'e', 'm'
+	m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
+	m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+
+	if m.modelsQuery != "gem" {
+		t.Errorf("expected modelsQuery 'gem', got %q", m.modelsQuery)
+	}
+
+	filtered := m.getModelList()
+	for _, item := range filtered {
+		if !strings.Contains(strings.ToLower(item.ModelName), "gem") && !strings.Contains(strings.ToLower(item.ProviderID), "gem") {
+			t.Errorf("unexpected model %q under filter 'gem'", item.ModelName)
+		}
+	}
+
+	// Backspace removes last character
+	m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if m.modelsQuery != "ge" {
+		t.Errorf("expected modelsQuery 'ge', got %q", m.modelsQuery)
+	}
+}
+

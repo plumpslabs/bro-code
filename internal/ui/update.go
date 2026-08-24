@@ -965,24 +965,53 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.askMove(-1)
 				return m, nil
 			}
-			if m.showModels && m.modelsSel > 0 {
-				m.modelsSel--
+			if m.showModels {
+				items := m.getModelList()
+				if len(items) > 0 {
+					if m.modelsSel > 0 {
+						m.modelsSel--
+					} else {
+						m.modelsSel = len(items) - 1
+					}
+				}
 				return m, nil
 			}
-			if m.showSessions && m.sessionsSel > 0 {
-				m.sessionsSel--
+			if m.showSessions {
+				if len(m.sessionList) > 0 {
+					if m.sessionsSel > 0 {
+						m.sessionsSel--
+					} else {
+						m.sessionsSel = len(m.sessionList) - 1
+					}
+				}
 				return m, nil
 			}
-			if m.showMCP && m.mcpAddActive && m.mcpAddStep == 0 && m.mcpAddType > 0 {
-				m.mcpAddType--
+			if m.showMCP && m.mcpAddActive && m.mcpAddStep == 0 {
+				if m.mcpAddType > 0 {
+					m.mcpAddType--
+				} else {
+					m.mcpAddType = 2
+				}
 				return m, nil
 			}
-			if m.showMCP && !m.mcpAddActive && m.mcpSel > 0 {
-				m.mcpSel--
+			if m.showMCP && !m.mcpAddActive {
+				names := m.mcpNames()
+				if len(names) > 0 {
+					if m.mcpSel > 0 {
+						m.mcpSel--
+					} else {
+						m.mcpSel = len(names) - 1
+					}
+				}
 				return m, nil
 			}
-			if m.showConnect && m.connectStep == 0 && m.connectProviderSel > 0 {
-				m.connectProviderSel--
+			if m.showConnect && m.connectStep == 0 {
+				total := len(provider.BuiltinProviders) + 1
+				if m.connectProviderSel > 0 {
+					m.connectProviderSel--
+				} else {
+					m.connectProviderSel = total - 1
+				}
 				return m, nil
 			}
 			if m.turnRunning && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk {
@@ -1018,28 +1047,51 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.showModels {
 				items := m.getModelList()
-				if m.modelsSel < len(items)-1 {
-					m.modelsSel++
+				if len(items) > 0 {
+					if m.modelsSel < len(items)-1 {
+						m.modelsSel++
+					} else {
+						m.modelsSel = 0
+					}
 				}
 				return m, nil
 			}
-			if m.showSessions && m.sessionsSel < len(m.sessionList)-1 {
-				m.sessionsSel++
+			if m.showSessions {
+				if len(m.sessionList) > 0 {
+					if m.sessionsSel < len(m.sessionList)-1 {
+						m.sessionsSel++
+					} else {
+						m.sessionsSel = 0
+					}
+				}
 				return m, nil
 			}
-			if m.showMCP && m.mcpAddActive && m.mcpAddStep == 0 && m.mcpAddType < 2 {
-				m.mcpAddType++
+			if m.showMCP && m.mcpAddActive && m.mcpAddStep == 0 {
+				if m.mcpAddType < 2 {
+					m.mcpAddType++
+				} else {
+					m.mcpAddType = 0
+				}
 				return m, nil
 			}
 			if m.showMCP && !m.mcpAddActive {
 				names := m.mcpNames()
-				if m.mcpSel < len(names)-1 {
-					m.mcpSel++
+				if len(names) > 0 {
+					if m.mcpSel < len(names)-1 {
+						m.mcpSel++
+					} else {
+						m.mcpSel = 0
+					}
 				}
 				return m, nil
 			}
-			if m.showConnect && m.connectStep == 0 && m.connectProviderSel < len(provider.BuiltinProviders) {
-				m.connectProviderSel++
+			if m.showConnect && m.connectStep == 0 {
+				total := len(provider.BuiltinProviders) + 1
+				if m.connectProviderSel < total-1 {
+					m.connectProviderSel++
+				} else {
+					m.connectProviderSel = 0
+				}
 				return m, nil
 			}
 			if !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP && !m.showAsk && !strings.Contains(m.promptInput.Value(), "\n") {
@@ -1053,6 +1105,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+			}
+
+		case "backspace":
+			if m.showModels {
+				if len(m.modelsQuery) > 0 {
+					m.modelsQuery = m.modelsQuery[:len(m.modelsQuery)-1]
+					m.modelsSel = 0
+				}
+				return m, nil
+			}
+
+		default:
+			if m.showModels && len(keyStr) == 1 && keyStr[0] >= 32 && keyStr[0] != 127 {
+				m.modelsQuery += keyStr
+				m.modelsSel = 0
+				return m, nil
 			}
 		}
 	}
