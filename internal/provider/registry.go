@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -569,45 +570,57 @@ type ModelEntry struct {
 	Model    string `json:"model"`
 }
 
-// DiscoverModels returns all models from detected providers (cached or freshly fetched).
+var (
+	liveModelsCacheMu sync.RWMutex
+	liveModelsCache   = make(map[string][]string)
+)
+
+// DiscoverModels returns all models from detected providers using configured/builtin
+// defaults and cached live models for instant (<1ms) non-blocking startup.
+// It never blocks on synchronous network requests during startup.
 func DiscoverModels(cfg AppConfig) map[string][]string {
 	result := make(map[string][]string)
 
 	detected := AutoDetect(cfg)
+	var needFetch []DetectedProvider
+
 	for _, d := range detected {
 		models := d.Info.DefaultModels
 		if len(models) == 0 {
 			models = []string{"default"}
 		}
-		// If key is present and provider supports /models, attempt fetch. The
-		// fetched list is MERGED with the configured one (not a replacement):
-		// configured models stay visible even when the gateway's live list
-		// omits them or reports them under a different ID.
-		// Fetch the live model list: keyed providers fetch when a key exists;
-		// public (open-local-proxy) providers like FreeBuff fetch unconditionally.
-		if (d.APIKey != "" || d.Info.ModelsPublic) && d.Info.Protocol == "openai-compatible" && d.Info.DefaultBaseURL != "" {
-			fetched, liveLimits, err := FetchOpenAIModelsDetailed(d.Info.DefaultBaseURL, d.APIKey)
-			if err == nil && len(fetched) > 0 {
-				// Cache the gateway's reported context_length per model so
-				// ContextWindowFor can prefer the live per-deployment cap
-				// (e.g. poolside reports 262144 even though native is 1M).
-				recordLiveContextLimits(d.Info.ID, liveLimits)
-				if d.Info.ModelsPublic {
-					// Open proxy: the live list is authoritative — the proxy
-					// rejects any model not in it, so never offer dead models.
-					models = fetched
-				} else {
-					models = mergeModelLists(models, fetched)
-				}
+
+		liveModelsCacheMu.RLock()
+		cachedLive, ok := liveModelsCache[d.Info.ID]
+		liveModelsCacheMu.RUnlock()
+
+		if ok && len(cachedLive) > 0 {
+			if d.Info.ModelsPublic {
+				models = cachedLive
+			} else {
+				models = mergeModelLists(models, cachedLive)
 			}
+		} else if (d.APIKey != "" || d.Info.ModelsPublic) && d.Info.Protocol == "openai-compatible" && d.Info.DefaultBaseURL != "" {
+			needFetch = append(needFetch, d)
 		}
+
 		result[d.Info.ID] = models
 	}
 
-	// NOTE: the local opencode CLI binary is deliberately NOT spawned here.
-	// The opencode provider's free models come from the built-in static list
-	// (OpenCodeFreeModels), so starting BroCode never launches an external
-	// process and never flashes its spinner/output on the terminal.
+	// Trigger background non-blocking fetch for providers that have live endpoints
+	if len(needFetch) > 0 {
+		go func(providers []DetectedProvider) {
+			for _, d := range providers {
+				fetched, liveLimits, err := FetchOpenAIModelsDetailed(d.Info.DefaultBaseURL, d.APIKey)
+				if err == nil && len(fetched) > 0 {
+					recordLiveContextLimits(d.Info.ID, liveLimits)
+					liveModelsCacheMu.Lock()
+					liveModelsCache[d.Info.ID] = fetched
+					liveModelsCacheMu.Unlock()
+				}
+			}
+		}(needFetch)
+	}
 
 	return result
 }

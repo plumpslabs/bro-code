@@ -144,12 +144,20 @@ func hasLocalGitDir(path string) bool {
 	return err == nil
 }
 
-// isGitRepo checks whether path is a valid Git working directory.
+// isGitRepo checks whether path is a valid Git working directory using fast stat checks.
 func isGitRepo(path string) bool {
-	if hasLocalGitDir(path) {
-		return true
+	cur := path
+	for i := 0; i < 8; i++ {
+		if hasLocalGitDir(cur) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur || parent == "" || parent == "." {
+			break
+		}
+		cur = parent
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
 	cmd.Dir = path
