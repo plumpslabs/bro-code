@@ -149,6 +149,39 @@ var builtinContextLimits = map[string]map[string]int{
 		"mimo/mimo-v2.5-pro":           1_048_576,
 		"google/gemini-2.5-flash-lite": 1_048_576,
 	},
+	"cerebras": {
+		"llama-3.3-70b":                128_000,
+		"llama3.1-8b":                   128_000,
+		"deepseek-r1-distill-llama-70b": 128_000,
+	},
+	"mistral": {
+		"codestral-latest":    256_000,
+		"mistral-large-latest": 128_000,
+		"mistral-small-latest": 128_000,
+		"pixtral-large-latest": 128_000,
+		"ministral-8b-latest":  128_000,
+	},
+	"sambanova": {
+		"Meta-Llama-3.3-70B-Instruct":   128_000,
+		"Qwen2.5-Coder-32B-Instruct":     32_768,
+		"DeepSeek-R1-Distill-Llama-70B": 128_000,
+	},
+	"github": {
+		"gpt-4o":                     128_000,
+		"gpt-4o-mini":                128_000,
+		"o3-mini":                    200_000,
+		"DeepSeek-R1":                64_000,
+		"meta-llama-3.3-70b-instruct": 131_072,
+	},
+	"cohere": {
+		"command-r-plus-08-2024": 128_000,
+		"command-r-08-2024":      128_000,
+	},
+	"cloudflare": {
+		"@cf/meta/llama-3.3-70b-instruct":             131_072,
+		"@cf/deepseek-ai/deepseek-r1-distill-qwen-32b": 131_072,
+		"@cf/qwen/qwen2.5-coder-32b-instruct":          32_768,
+	},
 }
 
 // FriendlyName returns the display name for a provider ID, falling back to
@@ -290,6 +323,87 @@ var BuiltinProviders = []ProviderInfo{
 		// falls back to the 128k default unless configured by the user.
 	},
 	{
+		ID:             "cerebras",
+		Name:           "Cerebras (Ultra-Fast)",
+		Protocol:       "openai-compatible",
+		APIKeyEnvVar:   "CEREBRAS_API_KEY",
+		DefaultBaseURL: "https://api.cerebras.ai/v1",
+		DefaultModels: []string{
+			"llama-3.3-70b",
+			"llama3.1-8b",
+			"deepseek-r1-distill-llama-70b",
+		},
+		ContextLimits: builtinContextLimits["cerebras"],
+	},
+	{
+		ID:             "mistral",
+		Name:           "Mistral AI",
+		Protocol:       "openai-compatible",
+		APIKeyEnvVar:   "MISTRAL_API_KEY",
+		DefaultBaseURL: "https://api.mistral.ai/v1",
+		DefaultModels: []string{
+			"codestral-latest",
+			"mistral-large-latest",
+			"mistral-small-latest",
+			"pixtral-large-latest",
+			"ministral-8b-latest",
+		},
+		ContextLimits: builtinContextLimits["mistral"],
+	},
+	{
+		ID:             "sambanova",
+		Name:           "SambaNova Fast",
+		Protocol:       "openai-compatible",
+		APIKeyEnvVar:   "SAMBANOVA_API_KEY",
+		DefaultBaseURL: "https://api.sambanova.ai/v1",
+		DefaultModels: []string{
+			"Meta-Llama-3.3-70B-Instruct",
+			"Qwen2.5-Coder-32B-Instruct",
+			"DeepSeek-R1-Distill-Llama-70B",
+		},
+		ContextLimits: builtinContextLimits["sambanova"],
+	},
+	{
+		ID:             "github",
+		Name:           "GitHub Models",
+		Protocol:       "openai-compatible",
+		APIKeyEnvVar:   "GITHUB_TOKEN",
+		DefaultBaseURL: "https://models.inference.ai.azure.com",
+		DefaultModels: []string{
+			"gpt-4o",
+			"gpt-4o-mini",
+			"o3-mini",
+			"DeepSeek-R1",
+			"meta-llama-3.3-70b-instruct",
+		},
+		ContextLimits: builtinContextLimits["github"],
+	},
+	{
+		ID:             "cohere",
+		Name:           "Cohere",
+		Protocol:       "openai-compatible",
+		APIKeyEnvVar:   "COHERE_API_KEY",
+		DefaultBaseURL: "https://api.cohere.com/v2",
+		DefaultModels: []string{
+			"command-r-plus-08-2024",
+			"command-r-08-2024",
+		},
+		ContextLimits: builtinContextLimits["cohere"],
+	},
+	{
+		ID:             "cloudflare",
+		Name:           "Cloudflare Workers AI",
+		Protocol:       "openai-compatible",
+		APIKeyEnvVar:   "CLOUDFLARE_API_TOKEN",
+		DefaultBaseURL: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+		DefaultModels: []string{
+			"@cf/meta/llama-3.3-70b-instruct",
+			"@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+			"@cf/qwen/qwen2.5-coder-32b-instruct",
+		},
+		ContextLimits: builtinContextLimits["cloudflare"],
+	},
+	{
 		ID:             "freebuff",
 		Name:           "FreeBuff (Free)",
 		Protocol:       "openai-compatible",
@@ -372,6 +486,15 @@ func AutoDetect(cfg AppConfig) []DetectedProvider {
 		}
 		if p.ID == "google" && key == "" {
 			key = os.Getenv("GOOGLE_API_KEY")
+		}
+		if p.ID == "mistral" && key == "" {
+			key = os.Getenv("CODESTRAL_API_KEY")
+		}
+		if p.ID == "github" && key == "" {
+			key = os.Getenv("GITHUB_MODELS_KEY")
+		}
+		if p.ID == "cloudflare" && key == "" {
+			key = os.Getenv("CLOUDFLARE_API_KEY")
 		}
 
 		if p.ID == "ollama" {

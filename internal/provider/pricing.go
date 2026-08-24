@@ -63,6 +63,15 @@ var defaultPrices = map[string][2]float64{
 	"llama-3.1-8b":  {0.05, 0.08},
 	"llama-3.2":     {0.18, 0.20},
 	"llama":         {0.59, 0.79},
+	// Mistral / Codestral
+	"codestral":     {0.20, 0.60},
+	"mistral-large": {2.00, 6.00},
+	"mistral-small": {0.20, 0.60},
+	"ministral":     {0.10, 0.10},
+	"mistral":       {0.20, 0.60},
+	// Cohere
+	"command-r-plus": {2.50, 10.00},
+	"command-r":      {0.50, 1.50},
 	// Qwen (via Ollama / local)
 	"qwen2.5": {0.40, 1.60},
 	"qwen":    {0.40, 1.60},
