@@ -63,9 +63,10 @@ if [ -f "docs/index.html" ]; then
     rm -f "docs/index.html.bak"
 fi
 
-# 3. Update README.md badge
+# 3. Update README.md badge and ASCII header
 if [ -f "README.md" ]; then
     sed -i.bak -E "s/release-v[0-9]+\.[0-9]+\.[0-9]+/release-$NEW_VER/g" README.md
+    sed -i.bak -E "s/BroCode v[0-9]+\.[0-9]+\.[0-9]+/BroCode $NEW_VER/g" README.md
     rm -f "README.md.bak"
 fi
 
