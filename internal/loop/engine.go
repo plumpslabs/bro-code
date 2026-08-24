@@ -236,6 +236,10 @@ type Engine struct {
 	// toolReminderSent guards the single "answer now" reminder injected when
 	// the tool-only budget is exhausted.
 	toolReminderSent bool
+	// readCounts tracks how many times each file has been read this turn.
+	// When a file reaches the cap (maxReadsPerFile), further reads are blocked
+	// and the model is forced to edit or answer instead of spinning.
+	readCounts map[string]int
 	// toolReminder2Sent guards the second, stronger reminder sent one round
 	// after the first — with the list of files already explored so a model
 	// deep in legitimate exploration can answer from what it has.
@@ -751,6 +755,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.lastToolCall = provider.ToolCall{}
 	e.lastToolCallRepeats = 0
 	e.explored = nil
+	e.readCounts = make(map[string]int)
 	// Reset the per-turn cost budget counter.
 	e.costUSD = 0
 	e.turnTokens = 0
@@ -1039,25 +1044,50 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// what it knows and what context is still missing.
 		warnRounds, finalWarnRounds, maxAbsolute, exploredCap := e.explorationBudget()
 
+		// LOOP GUARD: when the model reads the same file repeatedly (line-by-line
+		// exploration), inject a FORCE EDIT message BEFORE the standard warnings.
+		// This prevents the model from burning its entire budget reading one file
+		// in small chunks instead of reading the full file and editing it.
+		if e.exploredStalls >= 2 && e.toolOnlyRounds >= 4 {
+			lastFile := ""
+			if n := len(e.explored); n > 0 {
+				lastFile = e.explored[n-1]
+			}
+			if lastFile != "" {
+				_ = e.context.AppendUserMessage(fmt.Sprintf(
+					"🚫 STOP READING. You have read %s %d times already — you have enough context. "+
+					"NOW use edit_file or write_file to implement the changes. Do NOT read this file again. "+
+					"If you need to see the full file, read it ONCE with start_line=1 end_line=9999. "+
+					"Then IMMEDIATELY edit it. The user is waiting for code changes, not more exploration."+e.exploredSummary(),
+					lastFile, e.exploredStalls))
+				if onUpdate != nil {
+					onUpdate(e.state, "🚫 Repeated reads detected — forcing edit phase")
+				}
+			}
+		}
 		if e.toolOnlyRounds >= warnRounds && !e.toolReminderSent {
 			e.toolReminderSent = true
-			// The reminder must NOT forbid tools absolutely: a model that
-			// knows exactly which one more read (a specific line range of a
-			// big file) would settle the answer should be allowed to make it,
-			// then answer. An absolute "do not call tools" left models stuck
-			// deliberating in reasoning forever ("warning says stop but I
-			// genuinely need lines 60-100") until the budget aborted them.
-			_ = e.context.AppendUserMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files. If you know exactly which ONE more read would settle the answer (a specific file or line range), make that single read — then answer. Otherwise answer NOW using what you have read; do not keep exploring. If you genuinely do NOT have enough context, stop and say exactly what is missing instead of guessing."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
+			_ = e.context.AppendUserMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files. If this is an implementation task, you MUST now use edit_file or write_file to make changes — do NOT keep reading. If this is a research/analysis task, answer NOW using what you have read. Do NOT keep exploring."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Tool budget nearly exhausted — one final read allowed, then answer")
+				onUpdate(e.state, "⚠️ Tool budget nearly exhausted — edit now or answer")
 			}
 			continue
 		}
 		if e.toolOnlyRounds >= finalWarnRounds && !e.toolReminder2Sent {
 			e.toolReminder2Sent = true
-			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. You may make AT MOST ONE more tool call — only a specific read you already know you need (a file or line range) — and then you MUST write your answer in the next response. No further exploration, no re-reading. If you cannot fully answer, give a partial answer with what you know and state clearly what context is still missing — never fabricate." + e.exploredSummary())
+			// Check if this is an implementation task (user asked to build/implement/fix)
+			isImplTask := strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "implement") ||
+				strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "build") ||
+				strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "fix") ||
+				strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "buat") ||
+				strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "pasang")
+			if isImplTask {
+				_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is an IMPLEMENTATION task. You MUST now use edit_file or write_file to write actual code changes. Do NOT read any more files. The user expects working code, not a plan or summary. Edit the files you already read and produce real changes." + e.exploredSummary())
+			} else {
+				_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. You may make AT MOST ONE more tool call — only a specific read you already know you need (a file or line range) — and then you MUST write your answer in the next response. No further exploration, no re-reading. If you cannot fully answer, give a partial answer with what you know and state clearly what context is still missing — never fabricate." + e.exploredSummary())
+			}
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Final warning — one final read max, then answer or stop")
+				onUpdate(e.state, "⚠️ Final warning — edit now or answer")
 			}
 			continue
 		}
@@ -1126,11 +1156,19 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 			// Graceful Recovery: make ONE final completion request WITHOUT tools,
 			// forcing the model to synthesize a helpful answer from context so far.
+			hasEdits := len(e.editedFiles) > 0
 			synthPrompt := "⚠️ TOOL EXPLORATION BUDGET REACHED: tool calls are now DISABLED for this final response. "
 			if autoFixResult != "" {
 				synthPrompt += "The engine already applied auto-fixes via lsp_autofix (results below) — report exactly what was fixed. "
 			}
-			synthPrompt += "Synthesize a helpful, comprehensive response for the user in the user's language based ONLY on the files and context explored so far. If the task was to fix warnings/deprecations, report the fixes that were applied and list any that remain for a follow-up turn — do NOT tell the user to apply the fixes themselves. Answer as much of the user's prompt as possible; note any genuinely missing context." + e.exploredSummary()
+			if hasEdits {
+				synthPrompt += fmt.Sprintf("The engine already edited %d file(s) during this turn: %s. Report what was changed. ", len(e.editedFiles), strings.Join(e.editedFiles, ", "))
+			} else {
+				synthPrompt += "⚠️ NO EDITS WERE MADE THIS TURN — you only read files. Do NOT claim changes were implemented. "
+				synthPrompt += "If the task was to implement changes, honestly report: (1) what you explored, (2) what the plan should be, and (3) ask the user to send a follow-up prompt for you to actually write the code. "
+				synthPrompt += "Never say 'done' or 'implemented' when no files were edited. The user will be frustrated if you claim work was done when it was not. "
+			}
+			synthPrompt += "Synthesize a helpful, comprehensive response for the user in the user's language based ONLY on the files and context explored so far. Answer as much of the user's prompt as possible; note any genuinely missing context." + e.exploredSummary()
 			if autoFixResult != "" {
 				synthPrompt += "\n\nENGINE AUTO-FIX RESULTS:\n" + autoFixResult
 			}

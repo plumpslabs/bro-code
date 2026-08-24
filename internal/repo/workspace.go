@@ -1,14 +1,13 @@
 package repo
 
 import (
-	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
+
+	"github.com/plumpslabs/bro-code/internal/gitutil"
 )
 
 // RepoInfo describes a single repository inside a workspace.
@@ -144,23 +143,9 @@ func hasLocalGitDir(path string) bool {
 	return err == nil
 }
 
-// isGitRepo checks whether path is a valid Git working directory using fast stat checks.
+// isGitRepo checks whether path is a valid Git working directory.
+// Uses the shared gitutil package which caches results per directory
+// to avoid spawning duplicate git processes (50-200ms each on Windows).
 func isGitRepo(path string) bool {
-	cur := path
-	for i := 0; i < 8; i++ {
-		if hasLocalGitDir(cur) {
-			return true
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur || parent == "" || parent == "." {
-			break
-		}
-		cur = parent
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = path
-	out, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(out)) == "true"
+	return gitutil.IsGitRepo(path)
 }

@@ -374,10 +374,10 @@ func (a *OpenAIAdapter) StreamComplete(ctx context.Context, req CompletionReques
 
 	// A stream that ended without either a [DONE] frame or a finish_reason was
 	// cut mid-generation — provider timeout, session expiry, or a free-tier
-	// duration/queue limit hit while the answer was still streaming (exactly
-	// what free gateways like FreeBuff do). Returning the partial text as a
-	// complete answer would silently serve a half response, so surface a
-	// retryable error instead and let the engine retry/fall back.
+	// duration/queue limit hit while the answer was still streaming.
+	// Returning the partial text as a complete answer would silently serve a
+	// half response, so surface a retryable error instead and let the engine
+	// retry/fall back.
 	if !sawDone && res.FinishReason == "" {
 		return nil, StreamTruncated()
 	}

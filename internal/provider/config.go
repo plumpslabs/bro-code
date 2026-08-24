@@ -403,7 +403,7 @@ var familyContextLimits = []struct {
 	{"qwen2.5-coder", 131_072},
 	{"qwen", 131_072},
 	// Free gateway / Chinese open models: MiMo & MiniMax = 1M natively. Both
-	// bare (mimo-v2.5) and FreeBuff wire (mimo/mimo-v2.5) ID forms match.
+	// bare (mimo-v2.5) and namespaced (mimo/mimo-v2.5) ID forms match.
 	{"mimo-", 1_048_576},
 	{"mimo/", 1_048_576},
 	{"minimax-", 1_048_576},

@@ -463,7 +463,7 @@ func (m *Model) connectNext() {
 			p := provider.BuiltinProviders[m.connectProviderSel]
 			m.connectBaseURLInput.SetValue(p.DefaultBaseURL)
 			if p.APIKeyEnvVar == "" {
-				// Keyless provider (BroCode Free Gateway, FreeBuff, Ollama): no
+				// Keyless provider (BroCode Free Gateway, Ollama): no
 				// API key exists — save straight away.
 				m.connectTextInput.SetValue("")
 				m.applyConnectConfig()

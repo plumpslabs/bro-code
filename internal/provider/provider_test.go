@@ -794,23 +794,6 @@ func TestContextWindowFor(t *testing.T) {
 	}
 }
 
-// TestContextWindowForFreeBuff anchors the official FreeBuff context windows
-// (CodebuffAI FREEBUFF_MODEL_CONTEXT_WINDOWS, 2026-08): M3 is capped at 512K
-// on the free tier, MiMo and Gemini flash lite use their native 1M.
-func TestContextWindowForFreeBuff(t *testing.T) {
-	cases := map[string]int{
-		"minimax/minimax-m3":           524_288,
-		"mimo/mimo-v2.5":               1_048_576,
-		"mimo/mimo-v2.5-pro":           1_048_576,
-		"google/gemini-2.5-flash-lite": 1_048_576,
-	}
-	for model, want := range cases {
-		if got := ContextWindowFor(AppConfig{}, "freebuff", model); got != want {
-			t.Errorf("freebuff %s: expected %d window, got %d", model, want, got)
-		}
-	}
-}
-
 // TestContextWindowForOpenCode anchors the per-model free-tier windows of the
 // BroCode free gateway (models.dev, 2026-08): the free tier does NOT cap every
 // model at 200K — longcat/nemotron-ultra serve their native 1M, laguna-free is
@@ -1072,8 +1055,8 @@ func TestOpenAIStreamCompleteContent(t *testing.T) {
 	}
 }
 
-// TestOpenAIStreamCompleteMidStreamCut simulates a free-tier gateway (e.g.
-// FreeBuff) whose session/duration limit expires WHILE the answer is still
+// TestOpenAIStreamCompleteMidStreamCut simulates a free-tier gateway
+// whose session/duration limit expires WHILE the answer is still
 // streaming: content arrives, then the connection just closes with no
 // finish_reason and no [DONE]. The adapter must return an error — not a
 // silently truncated answer — so the engine can fall back to another

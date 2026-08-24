@@ -210,7 +210,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if fb := m.engine.LastFallbackModel(); fb != "" {
 				// Include WHY the primary failed (duration/queue limit, invalid
 				// model, auth error) so the user can act on it — e.g. switch
-				// model or restart the FreeBuff session — instead of wondering.
+				// model or provider — instead of wondering.
 				reason := m.engine.LastFallbackReason()
 				msg := fmt.Sprintf("⚠️ Primary provider failed — this answer came from fallback model %s.", fb)
 				if reason != "" && len(reason) < 300 {

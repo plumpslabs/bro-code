@@ -8,7 +8,7 @@ import (
 // defaultPrices holds best-effort list prices in USD per MILLION tokens
 // (input, output). Keys are model IDs or family prefixes; the longest prefix
 // that matches the model wins. Zero entries mean the model is free/local
-// (BroCode free gateway, FreeBuff, Ollama) or unknown (priced as $0 rather
+// (BroCode free gateway, Ollama) or unknown (priced as $0 rather
 // than blocking the run). Prices are the vendor list rates as of 2026-08;
 // real billing depends on the provider's current rates, prompt caching, and
 // usage tiers.

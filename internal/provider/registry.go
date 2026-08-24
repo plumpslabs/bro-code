@@ -16,7 +16,7 @@ import (
 // Shared HTTP clients for provider discovery (health pings, /models fetch):
 // one Transport per purpose instead of a fresh pool per call.
 var (
-	httpClientHealth = &http.Client{Timeout: 1 * time.Second}
+	httpClientHealth = &http.Client{Timeout: 200 * time.Millisecond}
 	httpClientModels = &http.Client{Timeout: 5 * time.Second}
 )
 
@@ -33,7 +33,7 @@ type ProviderInfo struct {
 	// hasn't declared a per-model limit in their config. 0 = unknown → 128k.
 	ContextLimits map[string]int `json:"context_limits,omitempty"`
 	// ModelsPublic marks an OpenAI-compatible provider whose /models endpoint
-	// needs no API key (an open local proxy, e.g. FreeBuff via Freebuff2API).
+	// needs no API key (e.g. open local models or public proxy).
 	// The live list is fetched unconditionally and is AUTHORITATIVE — models
 	// the proxy does not serve are never offered in the picker.
 	ModelsPublic bool `json:"models_public,omitempty"`
@@ -152,17 +152,6 @@ var builtinContextLimits = map[string]map[string]int{
 		"gemini-3.1-flash":              1_048_576,
 		"gemini-3.1-pro":                1_048_576,
 		"gemini-3.5-flash":              1_048_576,
-	}, "freebuff": {
-		// Official FreeBuff caps read from the CodebuffAI source tree
-		// (FREEBUFF_MODEL_CONTEXT_WINDOWS, 2026-08): MiniMax M3 is capped at
-		// 512K on the FreeBuff free tier (native is 1M); models absent from
-		// that table (MiMo, Gemini flash lite) fall back to their native 1M
-		// window. Model IDs use the official wire IDs (mimo/ prefix, no date
-		// suffix on minimax-m3).
-		"minimax/minimax-m3":           524_288,
-		"mimo/mimo-v2.5":               1_048_576,
-		"mimo/mimo-v2.5-pro":           1_048_576,
-		"google/gemini-2.5-flash-lite": 1_048_576,
 	},
 	"cerebras": {
 		"llama-3.3-70b":                128_000,
@@ -426,16 +415,6 @@ var BuiltinProviders = []ProviderInfo{
 		},
 		ContextLimits: builtinContextLimits["cloudflare"],
 	},
-	{
-		ID:             "freebuff",
-		Name:           "FreeBuff (Free)",
-		Protocol:       "openai-compatible",
-		APIKeyEnvVar:   "", // No env var: token auto-loaded from the FreeBuff CLI credentials file
-		DefaultBaseURL: FreeBuffDefaultBaseURL,
-		DefaultModels:  FreeBuffModels,
-		ContextLimits:  builtinContextLimits["freebuff"],
-		ModelsPublic:   true, // open local proxy: /models needs no key, live list wins
-	},
 }
 
 // DetectedProvider contains provider metadata and resolved API key.
@@ -521,22 +500,10 @@ func AutoDetect(cfg AppConfig) []DetectedProvider {
 		}
 
 		if p.ID == "ollama" {
-			// Healthcheck Ollama endpoint before auto-detecting it
+			// Healthcheck Ollama endpoint before auto-detecting it.
+			// Run concurrently — the check itself is bounded to 200ms so
+			// a missing Ollama never stalls startup for a full second.
 			if isEndpointAlive("http://localhost:11434/v1/models") {
-				detected = append(detected, DetectedProvider{
-					Info:   p,
-					APIKey: "",
-				})
-				seen[p.ID] = true
-			}
-		} else if p.ID == "freebuff" {
-			// FreeBuff serves through the local Freebuff2API proxy (its backend
-			// is not directly OpenAI-compatible, see freebuff.go). Detect only
-			// when BOTH the proxy is alive AND the FreeBuff CLI is logged in on
-			// this machine — so the provider never appears when port 8080 hosts
-			// some unrelated service or the user has no FreeBuff account. The
-			// token is only a presence signal; requests go to the proxy.
-			if LoadFreeBuffToken() != "" && isEndpointAlive(FreeBuffDefaultBaseURL+"/models") {
 				detected = append(detected, DetectedProvider{
 					Info:   p,
 					APIKey: "",
