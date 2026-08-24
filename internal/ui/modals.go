@@ -798,13 +798,32 @@ func (m Model) renderSessionsModal() string {
 	return lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2).Render(m.sessionsViewport.View())
 }
 
+func computeSlidingWindow(total, selected, maxVisible int) (int, int) {
+	if total <= maxVisible {
+		return 0, total
+	}
+	start := 0
+	if selected >= maxVisible {
+		start = selected - maxVisible + 1
+	}
+	end := start + maxVisible
+	if end > total {
+		end = total
+		start = end - maxVisible
+		if start < 0 {
+			start = 0
+		}
+	}
+	return start, end
+}
+
 func (m Model) renderModelsModal() string {
 	var sb strings.Builder
 	items := m.getModelList()
 	if len(items) > 0 {
-		sb.WriteString(fmt.Sprintf("=== Select AI Model (/models) — %d/%d ===\n", m.modelsSel+1, len(items)))
+		sb.WriteString(fmt.Sprintf("=== Select AI Model (/models) — %d/%d ===\n\n", m.modelsSel+1, len(items)))
 	} else {
-		sb.WriteString("=== Select AI Model (/models) ===\n")
+		sb.WriteString("=== Select AI Model (/models) ===\n\n")
 	}
 
 	searchIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true).Render("🔍 ")
@@ -823,7 +842,7 @@ func (m Model) renderModelsModal() string {
 	scrollHintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true)
 
 	if len(items) == 0 {
-		sb.WriteString("No models found matching filter.\n")
+		sb.WriteString("  No models found matching filter.\n")
 	} else {
 		maxVisible := 8
 		if m.height > 20 {
@@ -836,25 +855,10 @@ func (m Model) renderModelsModal() string {
 			}
 		}
 
-		startIdx := 0
-		endIdx := len(items)
-		if len(items) > maxVisible {
-			startIdx = m.modelsSel - (maxVisible / 2)
-			if startIdx < 0 {
-				startIdx = 0
-			}
-			endIdx = startIdx + maxVisible
-			if endIdx > len(items) {
-				endIdx = len(items)
-				startIdx = endIdx - maxVisible
-				if startIdx < 0 {
-					startIdx = 0
-				}
-			}
-		}
+		startIdx, endIdx := computeSlidingWindow(len(items), m.modelsSel, maxVisible)
 
 		if startIdx > 0 {
-			sb.WriteString(scrollHintStyle.Render(fmt.Sprintf("  ▲ ... (%d more models above)\n", startIdx)))
+			sb.WriteString(scrollHintStyle.Render(fmt.Sprintf("  ▲ ... (%d more models above)", startIdx)) + "\n")
 		}
 
 		for idx := startIdx; idx < endIdx; idx++ {
@@ -868,18 +872,19 @@ func (m Model) renderModelsModal() string {
 			if item.ModelName == m.activeModel && item.ProviderID == m.activeProvider.Info.ID {
 				statusTag = activeBadgeStyle.Render(" [active]")
 			} else if m.isProviderConfigured(item.ProviderID, "") {
-				statusTag = greenBadge.Render(" [✓ ready]")
+				statusTag = greenBadge.Render(" [ready]")
 			}
 
-			sb.WriteString(fmt.Sprintf("%s %-28s (%s)%s\n", cursor, item.ModelName, provider.FriendlyName(item.ProviderID), statusTag))
+			pName := provider.FriendlyName(item.ProviderID)
+			sb.WriteString(fmt.Sprintf("%s %-32s %-20s %s\n", cursor, item.ModelName, "("+pName+")", statusTag))
 		}
 
 		if endIdx < len(items) {
-			sb.WriteString(scrollHintStyle.Render(fmt.Sprintf("  ▼ ... (%d more models below)\n", len(items)-endIdx)))
+			sb.WriteString(scrollHintStyle.Render(fmt.Sprintf("  ▼ ... (%d more models below)", len(items)-endIdx)) + "\n")
 		}
 	}
 
-	sb.WriteString("\n[↑/↓ navigate (wrap-around) · ENTER apply · ESC close]")
+	sb.WriteString("\n" + scrollHintStyle.Render("[↑/↓ navigate (wrap-around) · ENTER apply · ESC close]"))
 	style := lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(1, 2)
 	if m.width > 0 {
 		style = style.Width(m.width - 4)
@@ -912,25 +917,10 @@ func (m Model) renderConnectModal() string {
 			}
 		}
 
-		startIdx := 0
-		endIdx := total
-		if total > maxVisible {
-			startIdx = m.connectProviderSel - (maxVisible / 2)
-			if startIdx < 0 {
-				startIdx = 0
-			}
-			endIdx = startIdx + maxVisible
-			if endIdx > total {
-				endIdx = total
-				startIdx = endIdx - maxVisible
-				if startIdx < 0 {
-					startIdx = 0
-				}
-			}
-		}
+		startIdx, endIdx := computeSlidingWindow(total, m.connectProviderSel, maxVisible)
 
 		if startIdx > 0 {
-			sb.WriteString(hintStyle.Render(fmt.Sprintf("  ▲ ... (%d more providers above)\n", startIdx)))
+			sb.WriteString(hintStyle.Render(fmt.Sprintf("  ▲ ... (%d more providers above)", startIdx)) + "\n")
 		}
 
 		for i := startIdx; i < endIdx; i++ {
@@ -947,14 +937,14 @@ func (m Model) renderConnectModal() string {
 				} else if m.isProviderConfigured(p.ID, p.APIKeyEnvVar) {
 					badge = greenStyle.Render(" [✓ configured]")
 				}
-				sb.WriteString(fmt.Sprintf("%s %-25s (ID: %s)%s\n", cursor, p.Name, p.ID, badge))
+				sb.WriteString(fmt.Sprintf("%s %-26s %-16s %s\n", cursor, p.Name, fmt.Sprintf("(ID: %s)", p.ID), badge))
 			} else {
-				sb.WriteString(fmt.Sprintf("%s %-25s\n", cursor, "✨ Custom Provider..."))
+				sb.WriteString(fmt.Sprintf("%s %-26s\n", cursor, "✨ Custom Provider..."))
 			}
 		}
 
 		if endIdx < total {
-			sb.WriteString(hintStyle.Render(fmt.Sprintf("  ▼ ... (%d more providers below)\n", total-endIdx)))
+			sb.WriteString(hintStyle.Render(fmt.Sprintf("  ▼ ... (%d more providers below)", total-endIdx)) + "\n")
 		}
 		sb.WriteString("\n" + hintStyle.Render("[↑/↓ navigate (wrap-around) · ENTER select · ESC cancel]"))
 
