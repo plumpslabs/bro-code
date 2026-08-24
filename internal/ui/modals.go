@@ -637,10 +637,19 @@ func (m *Model) getModelList() []modelOptionItem {
 
 	for _, pID := range providerIDs {
 		list := m.modelOptions[pID]
+		friendly := provider.FriendlyName(pID)
 		for _, mod := range list {
 			if m.modelsQuery != "" {
-				q := strings.ToLower(m.modelsQuery)
-				if !strings.Contains(strings.ToLower(mod), q) && !strings.Contains(strings.ToLower(pID), q) {
+				tokens := strings.Fields(strings.ToLower(m.modelsQuery))
+				target := strings.ToLower(mod + " " + pID + " " + friendly)
+				match := true
+				for _, tok := range tokens {
+					if !strings.Contains(target, tok) {
+						match = false
+						break
+					}
+				}
+				if !match {
 					continue
 				}
 			}
@@ -798,10 +807,15 @@ func (m Model) renderModelsModal() string {
 		sb.WriteString("=== Select AI Model (/models) ===\n")
 	}
 
+	searchIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true).Render("🔍 ")
 	if m.modelsQuery != "" {
-		sb.WriteString("Filter: " + m.modelsQuery + "▏ (type to filter, backspace to clear)\n\n")
+		filterLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true).Render(m.modelsQuery)
+		cursorBlink := lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Render("▏")
+		hint := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(" [backspace: delete · esc: clear]")
+		sb.WriteString(searchIcon + "Search: " + filterLabel + cursorBlink + hint + "\n\n")
 	} else {
-		sb.WriteString("Type to filter models...\n\n")
+		placeholder := lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true).Render("Type to search model or provider (e.g. 'gemini', 'groq llama', 'free')...")
+		sb.WriteString(searchIcon + placeholder + "\n\n")
 	}
 
 	greenBadge := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)

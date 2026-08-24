@@ -652,7 +652,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.showModels {
-				m.showModels = false
+				if m.modelsQuery != "" {
+					m.modelsQuery = ""
+					m.modelsSel = 0
+				} else {
+					m.showModels = false
+				}
 				return m, nil
 			}
 			if m.showSessions {
