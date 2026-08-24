@@ -106,6 +106,7 @@ type FileActionDecision struct {
 
 // Registry holds all registered tools plus the permission gate state.
 type Registry struct {
+	mu       sync.RWMutex // guards tools for concurrent async registration (e.g. MCP deferred startup)
 	tools    map[string]Tool
 	repoRoot string          // anchors the cd/pushd escape check
 	allow    map[string]bool // session allow-list (keys from AllowKey)
@@ -453,6 +454,8 @@ func (r *Registry) askViaModal(ctx context.Context, cmd string) (bool, string, e
 }
 
 func (r *Registry) Register(t Tool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.tools[t.Name()] = t
 }
 
@@ -461,6 +464,8 @@ func (r *Registry) Register(t Tool) {
 // the model does, so diagnostics land in the first prompt instead of costing a
 // tool round-trip).
 func (r *Registry) ToolByName(name string) Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.tools[name]
 }
 
@@ -518,6 +523,8 @@ func (r *Registry) Definitions() []provider.ToolDefinition {
 	// silently invalidating the cache prefix every round and defeating both
 	// Anthropic cache_control breakpoints and OpenAI's automatic prefix
 	// caching — each round would pay full price again.
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {
 		names = append(names, name)
@@ -540,20 +547,24 @@ func (r *Registry) Definitions() []provider.ToolDefinition {
 }
 
 func (r *Registry) Execute(ctx context.Context, name, argsJSON string) (result string, err error) {
+	// Lookup under lock, but release before tool execution (which can take
+	// seconds) so concurrent Register calls (e.g. async MCP startup) are
+	// not blocked for the entire tool execution duration.
+	r.mu.RLock()
 	if r.toolFilter != nil && !r.toolFilter(name) {
+		r.mu.RUnlock()
 		return "", fmt.Errorf("tool '%s' is disabled by active agent policy", name)
 	}
-
-	// Executor-level read-only enforcement: catches direct Execute calls that
-	// never pass through GateAction (sub-agents and other non-loop callers).
-	// lsp_fix/lsp_rename mutate files, so they are read-only-blocked too.
 	if r.readOnly && (name == "write_file" || name == "edit_file" || name == "edit_symbol" || name == "delete_file" || name == "lsp_fix" || name == "lsp_rename") {
+		r.mu.RUnlock()
 		return "", fmt.Errorf("tool '%s' is disabled in read-only mode (PLANNER/MINER): output your plan directly as text in your response and BroCode will save it automatically to .brocode/current_plan.md", name)
 	}
 	if r.readOnlyBash && name == "bash" {
+		r.mu.RUnlock()
 		return "", fmt.Errorf("tool 'bash' is disabled in PLANNER mode (read-only): switch to BUILDER to execute commands")
 	}
 	t, ok := r.tools[name]
+	r.mu.RUnlock()
 	if !ok {
 		return "", fmt.Errorf("tool '%s' not registered", name)
 	}
@@ -713,6 +724,8 @@ func isFileTool(name string) bool {
 
 // Lookup returns a registered tool by name, or nil if not found.
 func (r *Registry) Lookup(name string) Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.tools[name]
 }
 
@@ -723,6 +736,8 @@ func (r *Registry) Lookup(name string) Tool {
 // DENIED in a sub-agent — destructive operations must go through the main
 // agent's approval modal, never a silent background run.
 func (r *Registry) SubRegistry() *Registry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	nr := &Registry{
 		tools:        make(map[string]Tool, len(r.tools)),
 		repoRoot:     r.repoRoot,

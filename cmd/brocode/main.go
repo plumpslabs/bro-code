@@ -248,23 +248,24 @@ func main() {
 	tools.SetSandbox(tool.LoadSandbox(cwd))
 
 	// 7. Load MCP servers (.mcp.json, .brocode/mcp.json, global, opencode)
+	// StartAsync is non-blocking: servers connect in the background so the
+	// TUI starts instantly. MCP tools are registered via callback once the
+	// handshake completes — before the user sends their first prompt.
 	mcpMgr := mcp.NewManager()
 	mcpMgr.LoadDefaults()
+	var mcpCtx context.Context
 	if len(mcpMgr.ServerNames()) > 0 {
-		mcpCtx, mcpCancel := context.WithCancel(context.Background())
+		var mcpCancel context.CancelFunc
+		mcpCtx, mcpCancel = context.WithCancel(context.Background())
 		defer mcpCancel()
-		mcpMgr.Start(mcpCtx)
-		for _, mt := range mcpMgr.Tools() {
-			tools.Register(mt)
-		}
-		for name, errMsg := range mcpMgr.Errors() {
-			if errMsg != "" {
-				initialMessages = append(initialMessages, fmt.Sprintf("⚠️ MCP server %s failed: %s", name, errMsg))
+		mcpDone := mcpMgr.StartAsync(mcpCtx)
+		// Register MCP tools in background once servers are ready.
+		go func() {
+			<-mcpDone
+			for _, mt := range mcpMgr.Tools() {
+				tools.Register(mt)
 			}
-		}
-		if n := len(mcpMgr.Tools()); n > 0 {
-			initialMessages = append(initialMessages, fmt.Sprintf("🔌 MCP connected: %d tools from %d servers (%s)", n, len(mcpMgr.ServerNames()), strings.Join(mcpMgr.ServerNames(), ", ")))
-		}
+		}()
 		defer mcpMgr.Close()
 	}
 

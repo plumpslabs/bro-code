@@ -248,6 +248,97 @@ func (m *Manager) Start(ctx context.Context) {
 	}
 }
 
+// StartAsync launches MCP server connections in the background and returns
+// a channel that closes when all servers have completed their handshake.
+// This is non-blocking: the TUI starts immediately while MCP connects.
+func (m *Manager) StartAsync(ctx context.Context) <-chan struct{} {
+	m.mu.Lock()
+	if m.started {
+		m.mu.Unlock()
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	m.started = true
+	m.mu.Unlock()
+
+	done := make(chan struct{})
+	if len(m.configs) == 0 {
+		close(done)
+		return done
+	}
+
+	type serverResult struct {
+		name   string
+		client Client
+		tools  []*MCPTool
+		err    string
+	}
+
+	resChan := make(chan serverResult, len(m.configs))
+	var wg sync.WaitGroup
+
+	for name, cfg := range m.configs {
+		wg.Add(1)
+		go func(srvName string, srvCfg ServerConfig) {
+			defer wg.Done()
+			c, err := m.newClient(srvCfg)
+			if err != nil {
+				resChan <- serverResult{name: srvName, err: "spawn failed: " + err.Error()}
+				return
+			}
+			handshakeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			if _, err := c.Initialize(handshakeCtx, mcp.InitializeRequest{
+				Params: mcp.InitializeParams{
+					ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
+					ClientInfo: mcp.Implementation{
+						Name:    "brocode",
+						Version: "0.1",
+					},
+				},
+			}); err != nil {
+				_ = c.Close()
+				resChan <- serverResult{name: srvName, err: "initialize failed: " + err.Error()}
+				return
+			}
+			toolsRes, err := c.ListTools(handshakeCtx, mcp.ListToolsRequest{})
+			if err != nil {
+				_ = c.Close()
+				resChan <- serverResult{name: srvName, err: "list tools failed: " + err.Error()}
+				return
+			}
+			var srvTools []*MCPTool
+			for _, t := range toolsRes.Tools {
+				srvTools = append(srvTools, &MCPTool{
+					server: srvName,
+					client: c,
+					def:    t,
+				})
+			}
+			resChan <- serverResult{name: srvName, client: c, tools: srvTools}
+		}(name, cfg)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resChan)
+		for res := range resChan {
+			m.mu.Lock()
+			if res.err != "" {
+				m.errors[res.name] = res.err
+			} else {
+				m.clients[res.name] = res.client
+				m.tools = append(m.tools, res.tools...)
+			}
+			m.mu.Unlock()
+		}
+		close(done)
+	}()
+
+	return done
+}
+
 // Tools returns all discovered MCP tools flattened across servers.
 func (m *Manager) Tools() []*MCPTool {
 	m.mu.Lock()

@@ -44,9 +44,11 @@ func CheckLatestVersion(ctx context.Context, forceRefresh bool) (string, bool, e
 		if data, err := os.ReadFile(cPath); err == nil {
 			var cache VersionCache
 			if json.Unmarshal(data, &cache) == nil {
-				if time.Since(cache.CheckedAt) < 12*time.Hour {
-					return cache.LatestTag, cache.HasUpdate, nil
-				}
+			if time.Since(cache.CheckedAt) < 12*time.Hour {
+				// Re-compare against current binary version so a stale "hasUpdate"
+				// from before an upgrade doesn't keep showing the notification.
+				return cache.LatestTag, isNewerVersion(cache.LatestTag, Version), nil
+			}
 			}
 		}
 	}

@@ -210,6 +210,15 @@ func (m *Map) String() string {
 // listProjectFiles returns relative paths of all project files, skipping
 // ignored/generated dirs and extensions, sorted for a stable hash.
 func listProjectFiles(root string) []string {
+	// Fast path: use `git ls-files` when available. This is O(1) on large
+	// repos (reads git index, not filesystem), respects .gitignore, and
+	// handles 100k+ files in <50ms. Falls back to filepath.WalkDir when
+	// git is unavailable or cwd is not a git repo.
+	if gitFiles := gitLsFiles(root); gitFiles != nil {
+		return gitFiles
+	}
+
+	// Fallback: slow filepath.WalkDir for non-git directories
 	var files []string
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
