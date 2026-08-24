@@ -179,6 +179,12 @@ func (a *OpenAIAdapter) doPost(ctx context.Context, apiReq *openAIChatRequest) (
 	if a.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+a.APIKey)
 	}
+	if strings.Contains(a.BaseURL, "openrouter.ai") {
+		httpReq.Header.Set("HTTP-Referer", "https://github.com/plumpslabs/bro-code")
+		httpReq.Header.Set("X-Title", "BroCode")
+		httpReq.Header.Set("X-OpenRouter-Title", "BroCode")
+		httpReq.Header.Set("X-OpenRouter-Categories", "developer-tools")
+	}
 
 	resp, err := a.Client.Do(httpReq)
 	if err != nil {
