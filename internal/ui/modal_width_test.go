@@ -156,5 +156,15 @@ func TestModelsModalLiveFilter(t *testing.T) {
 	if m.modelsQuery != "ge" {
 		t.Errorf("expected modelsQuery 'ge', got %q", m.modelsQuery)
 	}
+
+	// Test typing 'y', 'n', 'd', numbers and spaces (regression test: ensure 'y' is not intercepted by confirmation prompts)
+	m.modelsQuery = ""
+	m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m.Update(tea.KeyPressMsg{Code: ' ', Text: " "})
+	m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	m.Update(tea.KeyPressMsg{Code: '3', Text: "3"})
+	if m.modelsQuery != "y d3" {
+		t.Errorf("expected modelsQuery 'y d3', got %q", m.modelsQuery)
+	}
 }
 

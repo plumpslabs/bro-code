@@ -417,6 +417,100 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// In Models selection modal: dedicated isolated event handler so every key
+		// (letters, 'y', 'n', 'd', numbers, space, punctuation) filters seamlessly.
+		if m.showModels {
+			switch keyStr {
+			case "esc":
+				if m.modelsQuery != "" {
+					m.modelsQuery = ""
+					m.modelsSel = 0
+				} else {
+					m.showModels = false
+				}
+				return m, nil
+
+			case "enter":
+				m.applySelectedModel()
+				m.showModels = false
+				return m, nil
+
+			case "up":
+				items := m.getModelList()
+				if len(items) > 0 {
+					if m.modelsSel > 0 {
+						m.modelsSel--
+					} else {
+						m.modelsSel = len(items) - 1 // wrap around to bottom
+					}
+				}
+				return m, nil
+
+			case "down":
+				items := m.getModelList()
+				if len(items) > 0 {
+					if m.modelsSel < len(items)-1 {
+						m.modelsSel++
+					} else {
+						m.modelsSel = 0 // wrap around to top
+					}
+				}
+				return m, nil
+
+			case "pgup":
+				m.modelsSel -= 5
+				if m.modelsSel < 0 {
+					m.modelsSel = 0
+				}
+				return m, nil
+
+			case "pgdown":
+				items := m.getModelList()
+				m.modelsSel += 5
+				if len(items) > 0 && m.modelsSel >= len(items) {
+					m.modelsSel = len(items) - 1
+				}
+				return m, nil
+
+			case "home":
+				m.modelsSel = 0
+				return m, nil
+
+			case "end":
+				items := m.getModelList()
+				if len(items) > 0 {
+					m.modelsSel = len(items) - 1
+				}
+				return m, nil
+
+			case "backspace":
+				if len(m.modelsQuery) > 0 {
+					m.modelsQuery = m.modelsQuery[:len(m.modelsQuery)-1]
+					m.modelsSel = 0
+				}
+				return m, nil
+
+			case "ctrl+u", "alt+backspace", "ctrl+backspace", "ctrl+delete", "alt+delete":
+				m.modelsQuery = ""
+				m.modelsSel = 0
+				return m, nil
+
+			case "space":
+				m.modelsQuery += " "
+				m.modelsSel = 0
+				return m, nil
+
+			default:
+				// Any printable rune typed into the filter box
+				if len(keyStr) == 1 && keyStr[0] >= 32 && keyStr[0] != 127 {
+					m.modelsQuery += keyStr
+					m.modelsSel = 0
+					return m, nil
+				}
+			}
+			return m, nil
+		}
+
 		// Queue management mode (Ctrl+K / Alt+K):
 		if m.queueMode {
 			if len(m.pendingQueue) == 0 {
