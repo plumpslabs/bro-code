@@ -267,11 +267,48 @@ func calculateTotal(items []Item) int {
         sum += it.Price
     }`
 
-	closest := FindClosestBlock(content, target)
+	closest, startL, endL := FindClosestBlockWithLines(content, target)
 	if closest == "" {
 		t.Fatalf("expected closest block match, got empty")
 	}
+	if startL != 4 || endL != 7 {
+		t.Errorf("expected lines 4-7, got %d-%d", startL, endL)
+	}
 	if !strings.Contains(closest, "sum += it.Price * it.Qty") {
 		t.Errorf("expected closest block to contain actual file lines, got: %s", closest)
+	}
+}
+
+func TestApplyResilientEdit_BlankTolerant(t *testing.T) {
+	content := `export const Layout = () => {
+    return (
+
+        <div className="flex h-screen w-full flex-col overflow-hidden">
+            <div className="relative flex h-full w-full flex-col">
+                <main>Content</main>
+            </div>
+        </div>
+    );
+};`
+
+	// Model omitted the blank line between return ( and <div ...
+	target := `    return (
+        <div className="flex h-screen w-full flex-col overflow-hidden">
+            <div className="relative flex h-full w-full flex-col">`
+
+	replacement := `    return (
+        <SubscriptionWarningBanner />
+        <div className="flex h-screen w-full flex-col overflow-hidden">
+            <div className="relative flex h-full w-full flex-col">`
+
+	res, tier, err := ApplyResilientEdit(content, target, replacement)
+	if err != nil {
+		t.Fatalf("ApplyResilientEdit failed: %v", err)
+	}
+	if tier != "blank-tolerant" && tier != "block-anchor" && tier != "fuzzy-similarity" {
+		t.Errorf("expected resilient tier match, got: %s", tier)
+	}
+	if !strings.Contains(res, "<SubscriptionWarningBanner />") {
+		t.Errorf("expected replacement in result, got: %s", res)
 	}
 }

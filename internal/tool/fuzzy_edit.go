@@ -54,12 +54,17 @@ func ApplyResilientEdit(content, target, replacement string) (string, string, er
 		return res, "block-anchor", nil
 	}
 
+	// ── Tier 5.5: Blank-Line & Gap Tolerant Match ────────────────────────────
+	if res, ok := matchBlankTolerant(normContent, normTarget, normReplacement); ok {
+		return res, "blank-tolerant", nil
+	}
+
 	// ── Tier 6: Fuzzy Similarity Window ─────────────────────────────────────
 	if res, ok := matchFuzzyWindow(normContent, normTarget, normReplacement); ok {
 		return res, "fuzzy-similarity", nil
 	}
 
-	return "", "", fmt.Errorf("target block not found in file (tried exact, whitespace-normalized, indent-aligned, block-anchor, and fuzzy matching)")
+	return "", "", fmt.Errorf("target block not found in file (tried exact, whitespace-normalized, indent-aligned, block-anchor, blank-tolerant, and fuzzy matching)")
 }
 
 func normalizeLineEndings(s string) string {
@@ -222,6 +227,86 @@ func matchBlockAnchor(content, target, replacement string) (string, bool) {
 		out = append(out, cLines[m.end:]...)
 		return strings.Join(out, "\n"), true
 	}
+	return "", false
+}
+
+// matchBlankTolerant matches when non-empty target lines match non-empty content lines
+// in order, ignoring blank line differences between content and target.
+func matchBlankTolerant(content, target, replacement string) (string, bool) {
+	cLines := strings.Split(content, "\n")
+	tLines := strings.Split(strings.TrimRight(target, "\n"), "\n")
+
+	type nonBlankLine struct {
+		text string
+		idx  int
+	}
+	var tNonBlank []nonBlankLine
+	for i, l := range tLines {
+		if t := strings.TrimSpace(l); t != "" {
+			tNonBlank = append(tNonBlank, nonBlankLine{text: t, idx: i})
+		}
+	}
+	if len(tNonBlank) < 2 {
+		return "", false
+	}
+
+	matchCount := 0
+	matchStart := -1
+	matchEnd := -1
+
+	for i := 0; i < len(cLines); i++ {
+		if strings.TrimSpace(cLines[i]) != tNonBlank[0].text {
+			continue
+		}
+		cIdx := i + 1
+		tIdx := 1
+		matched := true
+		for tIdx < len(tNonBlank) && cIdx < len(cLines) {
+			cTrimmed := strings.TrimSpace(cLines[cIdx])
+			if cTrimmed == "" {
+				cIdx++
+				continue
+			}
+			if cTrimmed == tNonBlank[tIdx].text {
+				tIdx++
+				cIdx++
+			} else {
+				matched = false
+				break
+			}
+		}
+		if matched && tIdx == len(tNonBlank) {
+			matchCount++
+			matchStart = i
+			matchEnd = cIdx
+		}
+	}
+
+	if matchCount == 1 && matchStart >= 0 && matchEnd > matchStart {
+		destBaseIndent := leadingWhitespace(cLines[matchStart])
+		rLines := strings.Split(strings.TrimRight(replacement, "\n"), "\n")
+		rBaseIndent := leadingWhitespace(rLines[0])
+
+		alignedReplacements := make([]string, len(rLines))
+		for k, rl := range rLines {
+			if strings.TrimSpace(rl) == "" {
+				alignedReplacements[k] = ""
+				continue
+			}
+			if rBaseIndent != "" && strings.HasPrefix(rl, rBaseIndent) {
+				alignedReplacements[k] = destBaseIndent + strings.TrimPrefix(rl, rBaseIndent)
+			} else {
+				alignedReplacements[k] = destBaseIndent + strings.TrimSpace(rl)
+			}
+		}
+
+		var out []string
+		out = append(out, cLines[:matchStart]...)
+		out = append(out, alignedReplacements...)
+		out = append(out, cLines[matchEnd:]...)
+		return strings.Join(out, "\n"), true
+	}
+
 	return "", false
 }
 
@@ -555,13 +640,20 @@ func isHTMLExt(ext string) bool {
 // FindClosestBlock scans content for the line window of the same length as target
 // that has the highest similarity to target, providing an immediate diagnostic suggestion.
 func FindClosestBlock(content, target string) string {
+	res, _, _ := FindClosestBlockWithLines(content, target)
+	return res
+}
+
+// FindClosestBlockWithLines scans content for the line window with the highest similarity to target
+// and returns the closest snippet, 1-based start line, and 1-based end line.
+func FindClosestBlockWithLines(content, target string) (string, int, int) {
 	targetLines := strings.Split(strings.TrimSpace(target), "\n")
 	if len(targetLines) == 0 {
-		return ""
+		return "", 0, 0
 	}
 	contentLines := strings.Split(content, "\n")
 	if len(contentLines) < len(targetLines) {
-		return ""
+		return "", 0, 0
 	}
 
 	bestScore := 0.0
@@ -574,7 +666,7 @@ func FindClosestBlock(content, target string) string {
 			score += lineSimilarity(strings.TrimSpace(targetLines[j]), strings.TrimSpace(contentLines[i+j]))
 		}
 		avg := score / float64(targetLen)
-		if avg > bestScore && avg >= 0.4 {
+		if avg > bestScore && avg >= 0.35 {
 			bestScore = avg
 			bestStart = i
 		}
@@ -585,7 +677,7 @@ func FindClosestBlock(content, target string) string {
 		if end > len(contentLines) {
 			end = len(contentLines)
 		}
-		return strings.Join(contentLines[bestStart:end], "\n")
+		return strings.Join(contentLines[bestStart:end], "\n"), bestStart + 1, end
 	}
-	return ""
+	return "", 0, 0
 }

@@ -1126,10 +1126,10 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 			res, _, err := ApplyResilientEdit(newContent, hunk.Target, hunk.Replacement)
 			if err != nil {
 				diag := ""
-				if closest := FindClosestBlock(newContent, hunk.Target); closest != "" {
-					diag = fmt.Sprintf("\nDid you mean:\n---\n%s\n---", closest)
+				if closest, startL, endL := FindClosestBlockWithLines(newContent, hunk.Target); closest != "" {
+					diag = fmt.Sprintf("\n💡 Closest match in %s at lines %d-%d:\n---\n%s\n---\n👉 Tip: pass 'start_line': %d, 'end_line': %d in edit_file or copy the exact block above into 'target'.", filepath.Base(args.Path), startL, endL, closest, startL, endL)
 				}
-				return "", fmt.Errorf("chunk #%d failed in %s: %w.%s Tip: inspect with read_file to copy the exact code block", idx+1, args.Path, err, diag)
+				return "", fmt.Errorf("chunk #%d failed in %s: %w.%s", idx+1, args.Path, err, diag)
 			}
 			newContent = res
 		}
@@ -1164,10 +1164,10 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 			editRange = fmt.Sprintf(" (lines %d-%d)", args.StartLine, end)
 		} else {
 			diag := ""
-			if closest := FindClosestBlock(content, args.Target); closest != "" {
-				diag = fmt.Sprintf("\nDid you mean:\n---\n%s\n---", closest)
+			if closest, startL, endL := FindClosestBlockWithLines(content, args.Target); closest != "" {
+				diag = fmt.Sprintf("\n💡 Closest match in %s at lines %d-%d:\n---\n%s\n---\n👉 Tip: pass 'start_line': %d, 'end_line': %d in edit_file or copy the exact block above into 'target'. Do NOT repeat the exact same failing call.", filepath.Base(args.Path), startL, endL, closest, startL, endL)
 			}
-			return "", fmt.Errorf("target block not found in %s: %w.%s Tip: use read_file first to copy the exact code block", args.Path, err, diag)
+			return "", fmt.Errorf("target block not found in %s: %w.%s", args.Path, err, diag)
 		}
 	} else if args.StartLine > 0 || args.EndLine > 0 {
 		// Pure positional edit without target

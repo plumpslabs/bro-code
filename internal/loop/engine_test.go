@@ -194,6 +194,125 @@ func TestMinerModeToolGuard(t *testing.T) {
 	}
 }
 
+type repeatWriteAdapter struct {
+	count int
+}
+
+func (m *repeatWriteAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	m.count++
+	if req.Tools == nil {
+		return &provider.CompletionResponse{
+			Content: "### Execution Plan for Subscription Warning Banner\n1. Create SubscriptionWarningBanner.tsx\n2. Integrate to Layout.tsx",
+		}, nil
+	}
+	return &provider.CompletionResponse{
+		Content: "Saya akan mulai implementasi sekarang.",
+		ToolCalls: []provider.ToolCall{
+			{ID: fmt.Sprintf("w%d", m.count), Name: "write_file", Arguments: `{"path":"src/Banner.tsx","content":"export const Banner = () => {}"}`},
+		},
+	}, nil
+}
+
+// TestPlannerModeCircuitBreakerOnRepeatedWriteTools tests that if a model in PLANNER mode
+// repeatedly tries to invoke write_file in a loop, the circuit breaker stops the loop
+// and synthesizes the plan gracefully instead of spinning infinitely.
+func TestPlannerModeCircuitBreakerOnRepeatedWriteTools(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &repeatWriteAdapter{}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetMode("PLANNER")
+
+	ans, err := engine.RunTurn(context.Background(), "buat plan subscription warning banner", nil)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if !strings.Contains(ans, "Execution Plan") && !strings.Contains(ans, "Plan") && !strings.Contains(ans, "Banner") {
+		t.Errorf("expected synthesized plan answer, got: %s", ans)
+	}
+	if adapter.count > 5 {
+		t.Errorf("circuit breaker failed to stop loop early, took %d rounds", adapter.count)
+	}
+}
+
+type spinningGrepAdapter struct {
+	count int
+}
+
+func (m *spinningGrepAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	m.count++
+	if req.Tools == nil {
+		return &provider.CompletionResponse{
+			Content: "Fixed div structure in Layout.tsx successfully.",
+		}, nil
+	}
+	return &provider.CompletionResponse{
+		Content: "Saya sudah memiliki cukup konteks. Saya perlu memastikan bahwa div pembuka di return statement memiliki pasangan penutup yang benar.",
+		ToolCalls: []provider.ToolCall{
+			{ID: fmt.Sprintf("g%d", m.count), Name: "grep", Arguments: fmt.Sprintf(`{"path":"src/Layout.tsx","pattern":"div_%d"}`, m.count)},
+		},
+	}, nil
+}
+
+func TestSpinningGrepInspectionCap(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &spinningGrepAdapter{}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetMode("BUILDER")
+
+	_, err := engine.RunTurn(context.Background(), "fix closing div in Layout.tsx", nil)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	msgs := ctxMgr.Messages()
+	foundInspectionBlocked := false
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "INSPECTION BLOCKED") {
+			foundInspectionBlocked = true
+			break
+		}
+	}
+
+	if !foundInspectionBlocked {
+		t.Errorf("expected INSPECTION BLOCKED message when spinning on grep on the same file")
+	}
+}
+
+func TestPreambleRepetitionLoopDetectionInBuilderMode(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	adapter := &spinningGrepAdapter{}
+
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetMode("BUILDER")
+
+	_, err := engine.RunTurn(context.Background(), "fix closing div in Layout.tsx", nil)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	msgs := ctxMgr.Messages()
+	foundRepeatIntent := false
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "STOP REPEATING INTENT") {
+			foundRepeatIntent = true
+			break
+		}
+	}
+
+	if !foundRepeatIntent {
+		t.Errorf("expected STOP REPEATING INTENT warning when model repeats boilerplate explanation before tool calls")
+	}
+}
+
 func TestUsageRecorderCalledAtTurnEnd(t *testing.T) {
 	tools := tool.NewRegistry()
 	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)

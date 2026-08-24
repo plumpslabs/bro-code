@@ -347,6 +347,19 @@ func (m *Manager) AppendSystemNote(content string) error {
 	return err
 }
 
+// InjectContextMessage adds a message to the in-memory context (so the model
+// sees it) WITHOUT persisting to the store (so it doesn't show in chat history
+// or appear on -c resume). Used for internal loop-guard messages that should
+// steer the model but never pollute the user's conversation.
+func (m *Manager) InjectContextMessage(content string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	msg := provider.Message{Role: "user", Content: content}
+	m.messages = append(m.messages, msg)
+	m.totalTokens += m.estimateTokens(content)
+	m.userTokens += m.estimateTokens(content)
+}
+
 // AppendFileDiff records a live per-file diff at the exact moment an edit lands,
 // preserving the true chronological flow in the session history so -c resume
 // never dumps diffs at the bottom of the conversation.

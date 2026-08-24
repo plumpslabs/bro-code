@@ -240,6 +240,14 @@ type Engine struct {
 	// When a file reaches the cap (maxReadsPerFile), further reads are blocked
 	// and the model is forced to edit or answer instead of spinning.
 	readCounts map[string]int
+	// lastTextResponse tracks the model's most recent text-only response
+	// (no tool calls). When the model repeats the same text N times without
+	// calling any tools, a loop-break message is injected.
+	lastTextResponse     string
+	lastTextResponseCount int
+	// modeGuardTrippedCount counts consecutive rounds where tool calls
+	// were blocked by read-only mode guards (PLANNER/MINER).
+	modeGuardTrippedCount int
 	// toolReminder2Sent guards the second, stronger reminder sent one round
 	// after the first — with the list of files already explored so a model
 	// deep in legitimate exploration can answer from what it has.
@@ -625,7 +633,7 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		health:            newProviderHealth(),
 		fallbackPolicy:    FallbackAuto,
 		repoRoot:          tools.RepoRoot(),
-		planGateEnabled:   false,
+		planGateEnabled:   true,
 		tuning:            prompt.DefaultTuning(),
 		earlyExitOnError: true, // default: stop on mutating tool failure
 	}
@@ -756,6 +764,8 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.lastToolCallRepeats = 0
 	e.explored = nil
 	e.readCounts = make(map[string]int)
+	e.lastTextResponse = ""
+	e.lastTextResponseCount = 0
 	// Reset the per-turn cost budget counter.
 	e.costUSD = 0
 	e.turnTokens = 0
@@ -1042,66 +1052,21 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// model (no new files for several rounds) is cut off. The reminders
 		// never demand a fabricated answer — the model may honestly report
 		// what it knows and what context is still missing.
-		warnRounds, finalWarnRounds, maxAbsolute, exploredCap := e.explorationBudget()
+		warnRounds, finalWarnRounds, maxAbsolute, _ := e.explorationBudget()
 
-		// LOOP GUARD: when the model reads the same file repeatedly (line-by-line
-		// exploration), inject a FORCE EDIT message BEFORE the standard warnings.
-		// This prevents the model from burning its entire budget reading one file
-		// in small chunks instead of reading the full file and editing it.
-		if e.exploredStalls >= 2 && e.toolOnlyRounds >= 4 {
-			lastFile := ""
-			if n := len(e.explored); n > 0 {
-				lastFile = e.explored[n-1]
-			}
-			if lastFile != "" {
-				_ = e.context.AppendUserMessage(fmt.Sprintf(
-					"🚫 STOP READING. You have read %s %d times already — you have enough context. "+
-					"NOW use edit_file or write_file to implement the changes. Do NOT read this file again. "+
-					"If you need to see the full file, read it ONCE with start_line=1 end_line=9999. "+
-					"Then IMMEDIATELY edit it. The user is waiting for code changes, not more exploration."+e.exploredSummary(),
-					lastFile, e.exploredStalls))
-				if onUpdate != nil {
-					onUpdate(e.state, "🚫 Repeated reads detected — forcing edit phase")
-				}
-			}
-		}
+		// Inject non-intrusive budget reminders when exploration milestones are reached
 		if e.toolOnlyRounds >= warnRounds && !e.toolReminderSent {
 			e.toolReminderSent = true
-			_ = e.context.AppendUserMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files. If this is an implementation task, you MUST now use edit_file or write_file to make changes — do NOT keep reading. If this is a research/analysis task, answer NOW using what you have read. Do NOT keep exploring."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
+			e.context.InjectContextMessage(fmt.Sprintf("⚠️ You have called tools %d times in a row without answering, and already examined %d files. Synthesize your findings or proceed to edits."+e.exploredSummary(), e.toolOnlyRounds, len(e.explored)))
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Tool budget nearly exhausted — edit now or answer")
+				onUpdate(e.state, "🔍 Continuing codebase analysis...")
 			}
-			continue
-		}
-		if e.toolOnlyRounds >= finalWarnRounds && !e.toolReminder2Sent {
+		} else if e.toolOnlyRounds >= finalWarnRounds && !e.toolReminder2Sent {
 			e.toolReminder2Sent = true
-			// Check if this is an implementation task (user asked to build/implement/fix)
-			isImplTask := strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "implement") ||
-				strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "build") ||
-				strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "fix") ||
-				strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "buat") ||
-				strings.Contains(strings.ToLower(e.context.LastUserPrompt()), "pasang")
-			if isImplTask {
-				_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is an IMPLEMENTATION task. You MUST now use edit_file or write_file to write actual code changes. Do NOT read any more files. The user expects working code, not a plan or summary. Edit the files you already read and produce real changes." + e.exploredSummary())
-			} else {
-				_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: This is your LAST chance. You may make AT MOST ONE more tool call — only a specific read you already know you need (a file or line range) — and then you MUST write your answer in the next response. No further exploration, no re-reading. If you cannot fully answer, give a partial answer with what you know and state clearly what context is still missing — never fabricate." + e.exploredSummary())
-			}
+			e.context.InjectContextMessage("⚠️ Final exploration round: conclude your findings or execute edits now." + e.exploredSummary())
 			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Final warning — edit now or answer")
+				onUpdate(e.state, "⚠️ Approaching exploration budget — wrapping up findings")
 			}
-			continue
-		}
-		// Accelerate the final warning when the agent has already read many
-		// DISTINCT files yet still hasn't answered — continued reading is now
-		// over-exploration, not progress (it was resetting the stall counter by
-		// touching a new file each round).
-		if !e.toolReminder2Sent && e.toolOnlyRounds >= warnRounds && len(e.explored) >= exploredCap {
-			e.toolReminder2Sent = true
-			_ = e.context.AppendUserMessage("⚠️ FINAL WARNING: You have already examined " + fmt.Sprintf("%d", len(e.explored)) + " distinct files without answering. Make AT MOST ONE more targeted read if you truly need it, then write your answer. Do NOT keep opening new files." + e.exploredSummary())
-			if onUpdate != nil {
-				onUpdate(e.state, "⚠️ Final warning — too much reading, answer now")
-			}
-			continue
 		}
 		// 1. Thinking State
 		e.state = StateThinking
@@ -1312,6 +1277,70 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			return "", err
 		}
 
+		// TEXT RESPONSE LOOP DETECTION: when the model generates the same
+		// text response multiple times without calling any tools, inject a
+		// loop-break message. This catches the "I have enough context, I
+		// will now..." infinite loop where the model keeps repeating itself
+		// without ever editing files.
+		// TEXT & PREAMBLE REPETITION DETECTION: when the model generates the same
+		// text response or preamble multiple times across rounds, inject a loop-break message.
+		if resp.Content != "" {
+			trimmed := strings.TrimSpace(resp.Content)
+			isRepeat := (trimmed == e.lastTextResponse)
+			if !isRepeat && len(trimmed) > 60 && len(e.lastTextResponse) > 60 {
+				prefixLen := 80
+				if len(trimmed) < prefixLen {
+					prefixLen = len(trimmed)
+				}
+				if len(e.lastTextResponse) < prefixLen {
+					prefixLen = len(e.lastTextResponse)
+				}
+				if trimmed[:prefixLen] == e.lastTextResponse[:prefixLen] {
+					isRepeat = true
+				}
+			}
+
+			if isRepeat {
+				e.lastTextResponseCount++
+				if e.lastTextResponseCount >= 2 {
+					// Model repeated same text 3+ times — force it to act or stop
+					e.lastTextResponseCount = 0 // reset to avoid spam
+					var loopBreakMsg string
+					if e.Mode() == "PLANNER" {
+						loopBreakMsg = fmt.Sprintf(
+							"🔄 LOOP DETECTED: You have repeated the same explanation text %d times. "+
+							"STOP repeating this text. You are in PLANNER mode (read-only architecture planning): "+
+							"provide your complete, step-by-step implementation plan in text now without calling write tools.",
+							e.lastTextResponseCount+1)
+					} else if e.Mode() == "MINER" {
+						loopBreakMsg = fmt.Sprintf(
+							"🔄 LOOP DETECTED: You have repeated the same explanation text %d times. "+
+							"STOP repeating this text. You are in MINER mode (knowledge extraction): "+
+							"provide your extracted findings and conclusions in text now.",
+							e.lastTextResponseCount+1)
+					} else if len(resp.ToolCalls) > 0 {
+						loopBreakMsg = "🛑 STOP REPEATING INTENT: You keep stating that you have enough context and will fix the issue, but continue repeating the same monologue before calling read tools. STOP repeating this text. Use 'edit_file' to apply your fix NOW."
+					} else {
+						loopBreakMsg = fmt.Sprintf(
+							"🔄 LOOP DETECTED: You have responded with the exact same text %d times without calling any tools or making edits. "+
+							"STOP generating this text. Either: (1) call edit_file/write_file to actually implement the changes, "+
+							"(2) call a different tool to gather NEW information, or (3) provide a DIFFERENT answer. "+
+							"Do NOT repeat this response again.",
+							e.lastTextResponseCount+1)
+					}
+					e.context.InjectContextMessage(loopBreakMsg)
+					// Also count as tool-only round to trigger existing budget warnings
+					e.toolOnlyRounds++
+					if onUpdate != nil {
+						onUpdate(e.state, "🔄 Repetitive text loop detected — forcing direct action")
+					}
+				}
+			} else {
+				e.lastTextResponse = trimmed
+				e.lastTextResponseCount = 0
+			}
+		}
+
 		// 2. Check if Model wants to call tools (Acting & Observing State)
 		if len(resp.ToolCalls) > 0 {
 			e.state = StateActing
@@ -1364,52 +1393,6 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						}
 						pending[i] = pendingTool{tc: tc, output: guardMsg}
 						continue
-					}
-				}
-
-				// TSR REPRODUCE gate: while the task is armed as a bug fix and no
-				// reproduction has been observed, code edits are blocked with a
-				// Off-Task Edit Gate: block write/edit on a file the model has NEVER
-				// read, grepped, or explicitly fetched in this turn. This prevents
-				// the model from making destructive edits to the wrong file when it
-				// panics near the stall/budget limit and guesses a target.
-				if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" {
-					var editPath string
-					var args map[string]any
-					if json.Unmarshal([]byte(tc.Arguments), &args) == nil {
-						editPath, _ = args["path"].(string)
-					}
-					if editPath != "" {
-						if abs, err := filepath.Abs(editPath); err == nil {
-							editPath = abs
-						}
-						// If the file does not exist yet on disk (creating a new file with write_file),
-						// it cannot be read first — allow new file creation immediately.
-						_, statErr := os.Stat(editPath)
-						isNewFile := os.IsNotExist(statErr)
-
-						// Count non-bash explored entries to see if the model has
-						// performed any file reads this turn. If it has only run bash
-						// commands (no read_file/grep/list_dir), the gate does not
-						// trigger — the model may be writing a new file or doing a
-						// straightforward edit without needing to read first.
-						fileReads := 0
-						for _, entry := range e.explored {
-							if !strings.HasPrefix(entry, "bash: ") {
-								fileReads++
-							}
-						}
-						if !isNewFile && fileReads > 0 && !e.wasExplored(editPath) {
-							offTaskMsg := fmt.Sprintf(
-								"⚠️ [OFF-TASK EDIT GATE]: You are trying to edit '%s' but you have NOT read or examined it during this turn (you explored: %s). Read it first before editing, or confirm this is the correct target file.",
-								editPath, e.exploredPathList(),
-							)
-							if onUpdate != nil {
-								onUpdate(e.state, "⚠️ Edit blocked — file not read during this turn")
-							}
-							pending[i] = pendingTool{tc: tc, output: offTaskMsg}
-							continue
-						}
 					}
 				}
 
@@ -1485,7 +1468,47 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 				}
 
-				// 2. Multi-tool cycle and consecutive repetition detection:
+				// 2. Per-File Inspection Cap: block repeated reads, greps, or searches on the same file
+				// to prevent the model from spinning on exploratory tools without making edits.
+				if tc.Name == "read_file" || tc.Name == "grep" || tc.Name == "search_code" {
+					var rArgs map[string]any
+					if json.Unmarshal([]byte(tc.Arguments), &rArgs) == nil {
+						rPath, _ := rArgs["path"].(string)
+						if rPath == "" {
+							rPath, _ = rArgs["file"].(string)
+						}
+						if rPath != "" {
+							e.readCounts[rPath]++
+							if e.readCounts[rPath] > 3 {
+								var blockedMsg string
+								if e.Mode() == "PLANNER" {
+									blockedMsg = fmt.Sprintf(
+										"🚫 [INSPECTION BLOCKED]: You have already examined '%s' %d times. "+
+										"You have sufficient context. Output your complete plan in text now.",
+										rPath, e.readCounts[rPath])
+								} else if e.Mode() == "MINER" {
+									blockedMsg = fmt.Sprintf(
+										"🚫 [INSPECTION BLOCKED]: You have already examined '%s' %d times. "+
+										"Output your extracted findings in text now.",
+										rPath, e.readCounts[rPath])
+								} else {
+									blockedMsg = fmt.Sprintf(
+										"🚫 [INSPECTION BLOCKED]: You have already examined '%s' %d times. "+
+										"You have sufficient context from this file. NOW use 'edit_file' or 'write_file' to implement your changes. "+
+										"Do NOT inspect this file again.",
+										rPath, e.readCounts[rPath])
+								}
+								if onUpdate != nil {
+									onUpdate(e.state, "🚫 Inspection blocked — edit this file instead")
+								}
+								pending[i] = pendingTool{tc: tc, output: blockedMsg}
+								continue
+							}
+						}
+					}
+				}
+
+				// 3. Multi-tool cycle and consecutive repetition detection:
 				key := normalizedToolCallKey(tc)
 				if e.turnToolCallCounts == nil {
 					e.turnToolCallCounts = make(map[string]int)
@@ -1514,6 +1537,8 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					guardMsg := fmt.Sprintf("⚠️ [LOOP GUARD]: You already called '%s' with these exact arguments earlier in this turn (call #%d). The result is ALREADY in your conversation context above. Do NOT re-run the same tool call with identical arguments.", tc.Name, callCount)
 					if tc.Name == "read_file" {
 						guardMsg += " If you need to read further in this file, you MUST provide 'start_line' (e.g. start_line: 250) and 'end_line', or use 'grep' / 'code_locate' to find the target function directly."
+					} else if tc.Name == "edit_file" {
+						guardMsg += " If your previous edit failed to match, inspect the diagnostic above and pass 'start_line' and 'end_line' directly in edit_file, or call 'read_file' with that line range first to copy the exact code block verbatim."
 					} else {
 						guardMsg += " Synthesize what you already gathered or proceed with next steps."
 					}
@@ -1809,6 +1834,25 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						onUpdate(e.state, "🧪 Failure reproduced — TSR reproduce gate open, edits allowed")
 					}
 				}
+			}
+
+			// Circuit breaker: prevent infinite loop when the model in PLANNER/MINER
+			// repeatedly proposes blocked mutating tools.
+			if (e.Mode() == "PLANNER" || e.Mode() == "MINER") && execCount == 0 && len(resp.ToolCalls) > 0 {
+				e.modeGuardTrippedCount++
+				if e.modeGuardTrippedCount >= 2 {
+					e.context.InjectContextMessage(fmt.Sprintf(
+						"🛑 STOP CALLING WRITE TOOLS: You are in %s mode (read-only architecture mode). "+
+						"Code writing and modifying tools are disabled. You have already examined the codebase. "+
+						"You MUST now output your complete response in text without making any further tool calls.",
+						e.Mode(),
+					))
+				}
+				if e.modeGuardTrippedCount >= 3 {
+					return e.finalSynth(ctx, fmt.Sprintf("%s mode: blocked repeated attempts to call mutating tools in read-only mode", e.Mode()), "Mode Guard Finalize")
+				}
+			} else {
+				e.modeGuardTrippedCount = 0
 			}
 
 			// Real-time compact file-change summary into the activity slot
@@ -2166,7 +2210,7 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 
 	in := &prompt.Input{
 		Mode:          currentMode,
-		Iteration:     iteration,
+		Iteration:     1,
 		ProjectCtx:    e.projectCtx,
 		RepoMap:       e.repoMap,
 		Stacks:        e.stacks,
@@ -2344,11 +2388,10 @@ func (e *Engine) recordExplored(tc provider.ToolCall) {
 			// reading a big file (the exact abort the user kept hitting). True
 			// spinning is still caught: identical repeated calls are blocked by
 			// repeat detection, and the absolute cap bounds everything.
-			if tc.Name == "read_file" {
-				if _, hasRange := m["start_line"]; hasRange {
-					e.exploredStalls = 0
-				}
-			}
+			// NOTE: range-reads (start_line/end_line) NO LONGER reset exploredStalls.
+			// The old behavior let models read the same file 15+ times line-by-line
+			// without ever triggering the loop guard. The per-file read cap above
+			// now handles this case correctly.
 		case "list_dir", "grep", "glob":
 			target, _ = m["path"].(string)
 			if target == "" {
@@ -2610,7 +2653,9 @@ func looksLikeImplTask(query string) bool {
 	// (proportionality) says should run with minimal ceremony, not a plan gate.
 	implWords := []string{"implement", "build a", "build the", "create",
 		"scaffold", "set up", "new feature", "new module", "new service",
-		"new endpoint", "migrate", "introduce"}
+		"new endpoint", "migrate", "introduce",
+		// Indonesian keywords
+		"implementasi", "buat", "pasang", "tambahkan fitur", "buatkan"}
 	for _, w := range implWords {
 		if strings.Contains(q, w) {
 			return true
