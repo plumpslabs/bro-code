@@ -700,28 +700,40 @@ BroCode v0.1.40</div>
             <tbody>
               <tr><td><code>/new</code></td><td>Sessions</td><td>Start a clean, fresh conversation session</td></tr>
               <tr><td><code>/sessions</code> (<code>/s</code>)</td><td>Sessions</td><td>Interactive session manager modal (<code>Enter</code> resume, <code>d</code> delete, <code>D</code> delete all)</td></tr>
+              <tr><td><code>/history</code></td><td>Sessions</td><td>Display the entire conversation transcript for the active session</td></tr>
               <tr><td><code>/undo</code></td><td>Core</td><td><strong>Time-Travel Rollback</strong>: Instantly revert file changes from last turn via Git shadow snapshots</td></tr>
               <tr><td><code>/diff</code></td><td>Code</td><td>Render unified / side-by-side diff of all modifications made during the session</td></tr>
-              <tr><td><code>/compact</code></td><td>Memory</td><td>Force instant context compaction into structured 5-part session memory</td></tr>
-              <tr><td><code>/cost</code></td><td>Budget</td><td>Inspect real-time token consumption, context usage, and estimated spend</td></tr>
+              <tr><td><code>/compact</code> (<code>/summarize</code>)</td><td>Memory</td><td>Force instant context compaction into structured 5-part session memory</td></tr>
+              <tr><td><code>/cost</code> (<code>/tokens</code>, <code>/usage</code>)</td><td>Budget</td><td>Inspect real-time token consumption, context usage, and estimated spend</td></tr>
+              <tr><td><code>/clear</code> (<code>/cls</code>)</td><td>Core</td><td>Clear the current terminal chat viewport buffer</td></tr>
+              <tr><td><code>/mode</code></td><td>Modes</td><td>Inspect current mode or switch between <code>BUILDER</code>, <code>PLANNER</code>, <code>MINER</code></td></tr>
               <tr><td><code>/builder</code></td><td>Modes</td><td>Switch active mode to <code>BUILDER</code> (autonomous implementation)</td></tr>
-              <tr><td><code>/planner</code></td><td>Modes</td><td>Switch active mode to <code>PLANNER</code> (read-only architecture planning)</td></tr>
-              <tr><td><code>/miner</code></td><td>Modes</td><td>Switch active mode to <code>MINER</code> (knowledge extraction & memory persistence)</td></tr>
-              <tr><td><code>/diagnose</code></td><td>Quality</td><td>Run project-wide LSP diagnostics and display categorized error/warning lists</td></tr>
+              <tr><td><code>/plan</code> (<code>/planner</code>)</td><td>Modes</td><td>Switch active mode to <code>PLANNER</code> (read-only architecture planning)</td></tr>
+              <tr><td><code>/plan clear</code></td><td>Modes</td><td>Archive active plan from <code>.brocode/current_plan.md</code> to <code>.brocode/plans/archive/</code></td></tr>
+              <tr><td><code>/mine</code> (<code>/miner</code>)</td><td>Modes</td><td>Switch active mode to <code>MINER</code> (knowledge extraction & memory persistence)</td></tr>
+              <tr><td><code>/agent [name]</code></td><td>Modes</td><td>List or switch custom agent personas in <code>.brocode/agents/*.md</code></td></tr>
+              <tr><td><code>/diagnose</code> (<code>/scan</code>)</td><td>Quality</td><td>Run project-wide LSP diagnostics and display categorized error/warning lists</td></tr>
               <tr><td><code>/diagnose fix</code></td><td>Quality</td><td>Automatically apply safe LSP quick-fixes, import organizes, and renames</td></tr>
-              <tr><td><code>/deps</code></td><td>Tooling</td><td>Stack-agnostic dependency resolver to detect and install missing packages</td></tr>
-              <tr><td><code>/spec</code></td><td>Planning</td><td>Execute architectural blueprint contract engine before modifying files</td></tr>
-              <tr><td><code>/tournament</code></td><td>Planning</td><td>Run competitive multi-solution tournament benchmarking for algorithmic trade-offs</td></tr>
-              <tr><td><code>/repair</code></td><td>Quality</td><td>Autonomous root-cause analysis and automated test-driven repair ladder</td></tr>
-              <tr><td><code>/provenance</code></td><td>Security</td><td>Verify cryptographic Merkle chain and tamper-evident AI SBOM signatures</td></tr>
+              <tr><td><code>/lsp</code></td><td>Quality</td><td>Inspect connected Language Server Protocol managers, active servers, and install hints</td></tr>
+              <tr><td><code>/deps</code> (<code>/dep-resolve</code>)</td><td>Tooling</td><td>Stack-agnostic dependency resolver to detect and install missing packages</td></tr>
+              <tr><td><code>/spec [task]</code></td><td>Planning</td><td>Execute architectural blueprint contract engine before modifying files</td></tr>
+              <tr><td><code>/tournament [task]</code></td><td>Planning</td><td>Run competitive multi-solution tournament benchmarking for algorithmic trade-offs</td></tr>
+              <tr><td><code>/repair [task]</code></td><td>Quality</td><td>Autonomous root-cause analysis and automated test-driven repair ladder</td></tr>
+              <tr><td><code>/provenance</code> (<code>/verify</code>)</td><td>Security</td><td>Verify cryptographic Merkle chain and tamper-evident AI SBOM signatures</td></tr>
               <tr><td><code>/trace</code></td><td>Security</td><td>Trace file provenance origins, timestamps, and model attestation hashes</td></tr>
-              <tr><td><code>/mcp</code></td><td>Ecosystem</td><td>Open Model Context Protocol manager (inspect servers, <code>a</code> add wizard, <code>d</code> delete)</td></tr>
-              <tr><td><code>/connect</code></td><td>Providers</td><td>Launch interactive provider configuration wizard (API keys, gateways)</td></tr>
-              <tr><td><code>/models</code></td><td>Providers</td><td>Open interactive model picker modal with fuzzy search</td></tr>
+              <tr><td><code>/mcp</code></td><td>Ecosystem</td><td>Open Model Context Protocol manager (inspect servers, <code>a</code> add wizard, <code>d</code> delete, <code>r</code> reload)</td></tr>
+              <tr><td><code>/debug</code></td><td>Tooling</td><td>Display runtime engine metrics, memory allocation stats, and goroutine health</td></tr>
+              <tr><td><code>/connect</code> (<code>/c</code>)</td><td>Providers</td><td>Launch interactive provider configuration wizard (API keys, gateways)</td></tr>
+              <tr><td><code>/models</code> (<code>/m</code>)</td><td>Providers</td><td>Open interactive model picker modal with fuzzy search</td></tr>
               <tr><td><code>/skills</code></td><td>Ecosystem</td><td>List loaded system skills and active project-level skill extensions</td></tr>
-              <tr><td><code>/memory</code></td><td>Memory</td><td>View cross-session project memory, captured gotchas, and architecture rules</td></tr>
-              <tr><td><code>/copy</code></td><td>Utility</td><td>Copy the last assistant response directly to OS clipboard</td></tr>
+              <tr><td><code>/memory</code> (<code>/mem</code>)</td><td>Memory</td><td>View cross-session project memory, captured gotchas, and architecture rules</td></tr>
+              <tr><td><code>/ask [query]</code></td><td>Core</td><td>Launch ephemeral prompt execution without polluting session history</td></tr>
+              <tr><td><code>/search-key [k]</code></td><td>Providers</td><td>Configure credentials for high-speed documentation search (Exa / Tavily)</td></tr>
+              <tr><td><code>/context7-key [k]</code></td><td>Providers</td><td>Configure Context7 documentation resolver credentials</td></tr>
+              <tr><td><code>/copy</code> (<code>/y</code>)</td><td>Utility</td><td>Copy the last assistant response directly to OS clipboard</td></tr>
               <tr><td><code>/mouse</code></td><td>Utility</td><td>Toggle mouse mode between wheel scrolling and native drag selection</td></tr>
+              <tr><td><code>/update</code> (<code>/upgrade</code>)</td><td>Utility</td><td>Check for and install the latest BroCode release binary</td></tr>
+              <tr><td><code>/quit</code> (<code>/exit</code>, <code>/q</code>)</td><td>Utility</td><td>Terminate BroCode and exit cleanly</td></tr>
             </tbody>
           </table>
         </div>

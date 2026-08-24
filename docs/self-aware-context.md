@@ -42,7 +42,7 @@ Single SQLite DB (the existing session store), three tables:
 - `events` — session event stream (user/assistant/tool/compaction).
 
 Both `knowledge` and `notes` share one `*store.Store` handle, so they are wired
-with a single `SetKnowledgeStore` call in `internal/ui/app.go`.
+with a single `SetKnowledgeStore` call in `internal/ui/engine_bridge.go`.
 
 ## Big-file comprehension (the "5000 lines, only 1000 known" problem)
 
