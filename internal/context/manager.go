@@ -92,12 +92,23 @@ type Manager struct {
 	// truncate-and-pointer digest, i.e. the tokens actually re-sent each round.
 	userTokens    int
 	asstTokens    int
-	toolTokens    int
-	// lastPromptHash stores a short hash of the last user prompt so the engine
-	// can detect when a new user message is completely unrelated to the ongoing
-	// conversation (stale context). When detected, partial context reset is
-	// triggered instead of full-clear, preserving session metadata.
-	lastPromptHash string
+	toolTokens    int// lastPromptHash stores a short hash of the last user prompt so the engine
+// can detect when a new user message is completely unrelated to the ongoing
+// conversation (stale context). When detected, partial context reset is
+// triggered instead of full-clear, preserving session metadata.
+lastPromptHash string
+// editedFiles tracks paths edited during the current session, so compaction
+// can truncate tool outputs about edited files less aggressively (preserving
+// more context for the deliverable).
+editedFiles []string
+}
+
+// SetEditedFiles updates the list of files edited this session so compaction
+// can apply smart truncation (higher cap for edited-file outputs).
+func (m *Manager) SetEditedFiles(files []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.editedFiles = files
 }
 
 // NewManager creates a context manager connected to SQLite store.
@@ -422,6 +433,18 @@ func (m *Manager) ImportToolResult(toolCallID, content string) {
 	m.totalTokens += t
 }
 
+// ImportSystemNote restores a system note (tournament results, /help, /plan,
+// etc.) into memory so the model can reference it after resume. Tokens are
+// counted so the 80% threshold accurately reflects context usage.
+func (m *Manager) ImportSystemNote(content string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.messages = append(m.messages, provider.Message{Role: "system", Content: content})
+	t := m.estimateTokens(content)
+	m.totalTokens += t
+}
+
 // maxToolResultContextChars caps how much of each tool result is kept in the
 // persistent context. The model still receives the full result (up to the
 // tool layer's CapOutput, ~40k) in the round it runs the tool — this smaller
@@ -552,7 +575,13 @@ func (m *Manager) NeedsCompaction() bool {
 // or log dump — so only the leading instruction-bearing part is kept verbatim.
 const pinnedGoalMaxChars = 1500
 
-// Compact performs structured summary compaction.
+// Compact performs layered summary compaction (5-layer pipeline):
+//
+// Layer 1: Truncate large tool outputs in-place (reduce noise before summarization)
+// Layer 2: Goal-pinning (keep first user message verbatim)
+// Layer 3: Summarize old messages (existing compaction)
+// Layer 4: Keep last 4 messages verbatim (active tail)
+// Layer 5: Archive explored files to persistent store (cross-session memory)
 //
 // Goal-pinning: the FIRST user message carries the turn's goal and constraints.
 // Summarizing it away is the documented compaction failure (governance decay —
@@ -562,6 +591,11 @@ const pinnedGoalMaxChars = 1500
 func (m *Manager) Compact(summary CompactionSummary) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Layer 1: Truncate large tool outputs BEFORE summarization. This reduces
+	// noise in the summary (the LLM summarizer sees cleaner input) and shrinks
+	// the total message count so the summary is more focused.
+	m.truncateLargeOutputs()
 
 	summaryText := summary.Format()
 	systemSummaryMsg := provider.Message{
@@ -707,12 +741,9 @@ func ExtractEventContent(payloadJSON string) string {
 // It restores only the newest events that fit ~80% of the context window and
 // returns human-readable display lines for the UI log.
 //
-// Assistant turns keep their real structure (reasoning/content/tool_calls):
-// tool-call-only turns render as a compact summary instead of raw JSON, and
-// tool results are re-paired with their calls so providers that require the
-// tool_calls → result pairing don't break. Engine-injected reminders (loop
-// guard, tool budget, verification failures) are restored for the model but
-// displayed as ⚙️ system notes, not as if the user had typed them.
+// OPTIMIZATION: early-exit once the context window is full — for sessions
+// with thousands of events, we stop parsing JSON payloads as soon as the
+// 80% threshold is reached (most events after that would be skipped anyway).
 func RestoreSession(m *Manager, events []store.Event) []string {
 	var display []string
 	skipped := 0
@@ -727,7 +758,14 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 	}
 
 	for _, ev := range events {
-		if m.TotalTokens() > int(float64(m.MaxWindow())*0.8) && restored > 0 {
+		// System messages (tournament results, /help, /plan) are lightweight
+		// and important for user context — allow them up to 90% of the window.
+		// Other events stop at 80% to leave headroom for the next turn.
+		threshold := 0.80
+		if ev.Type == "system_msg" {
+			threshold = 0.90
+		}
+		if m.TotalTokens() > int(float64(m.MaxWindow())*threshold) && restored > 0 {
 			skipped = len(events) - restored
 			break
 		}
@@ -777,6 +815,9 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 			if text == "" {
 				text = ExtractEventContent(ev.PayloadJSON)
 			}
+			// Import system messages into in-memory context so the model can
+			// reference them after resume (tournament results, /help, /plan, etc.).
+			m.ImportSystemNote(text)
 			display = append(display, text)
 		case "file_diff":
 			flushPendingTools()
@@ -846,6 +887,40 @@ func isEngineReminder(text string) bool {
 // outside this package (e.g. the CLI) that need to filter out engine-injected
 // user_msg events when reconstructing user-facing history.
 func IsEngineReminder(text string) bool { return isEngineReminder(text) }
+
+// truncateLargeOutputs reduces noise before compaction by capping tool output
+// messages that exceed a threshold. This is Layer 1 of the compaction pipeline:
+// truncate → summarize → archive. Tool outputs are the biggest token consumers
+// (bash output, file reads, grep results) and rarely need full length for
+// the summary to be accurate.
+//
+// SMART TRUNCATION: messages referencing files the model edited are truncated
+// less aggressively (8000 chars) than irrelevant tool outputs (4000 chars).
+// This preserves context about the deliverable while still cutting noise.
+func (m *Manager) truncateLargeOutputs() {
+	const defaultMax = 4000  // cap for generic tool output
+	const editedMax = 8000   // higher cap for tool output about edited files
+	for i := range m.messages {
+		if m.messages[i].Role != "tool" || len(m.messages[i].Content) <= defaultMax {
+			continue
+		}
+		content := m.messages[i].Content
+		cap := defaultMax
+		// If this tool output references a file the model edited, keep more
+		// context (the model may need to reference specific error lines).
+		for _, ef := range m.editedFiles {
+			if strings.Contains(content, ef) {
+				cap = editedMax
+				break
+			}
+		}
+		if len(content) > cap {
+			m.messages[i].Content = content[:cap] +
+				"\n…[output truncated for compaction — full output was " +
+				fmt.Sprintf("%d", len(content)) + " chars]"
+		}
+	}
+}
 
 // compactToolSummary renders a single compact 1-line process summary for tool calls.
 func compactToolSummary(tools []string) string {

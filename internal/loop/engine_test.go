@@ -626,11 +626,15 @@ func TestEngineToolBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunTurn failed: %v", err)
 	}
-	// A SPINNING model (no new files) is cut at the tool-only budget, well
-	// below the 25-iteration cap; the reminder rounds inject messages without
-	// calling the adapter.
-	if adapter.calls > maxToolOnlyRounds {
-		t.Fatalf("spinning model not cut at tool-only budget: %d completions (max %d)", adapter.calls, maxToolOnlyRounds)
+	// A SPINNING model (no new files) is cut at the tool budget, well
+	// below the 25-iteration cap. The read-only budget blocks tools after
+	// readOnlyHardStop rounds, and the total budget stops after maxToolOnlyRounds
+	// + a few grace rounds for the synthesis request. The adapter counts all
+	// Complete calls (including blocked-tool rounds), so the upper bound is
+	// maxToolOnlyRounds + some headroom for blocked rounds.
+	budgetCeiling := maxToolOnlyRounds + readOnlyHardStop
+	if adapter.calls > budgetCeiling {
+		t.Fatalf("spinning model not cut at tool budget: %d completions (max %d)", adapter.calls, budgetCeiling)
 	}
 	if adapter.calls <= toolWarnRounds {
 		t.Fatalf("spinning model cut too early (%d <= warn %d) — guard fired before any real exploration", adapter.calls, toolWarnRounds)

@@ -2,6 +2,7 @@ package loop
 
 import (
 	"strings"
+	"time"
 )
 
 // SetToolDescBudget caps how many characters of tool descriptions are passed
@@ -41,6 +42,36 @@ const (
 	// files for a codebase task is normal exploration, but unbounded reading is capped.
 	exploredWarnCap = 12
 )
+
+// Read-only budget: separates exploration (reads) from execution (edits/writes)
+// so a model that reads 12 files still has budget to edit. Without this,
+// read_file and edit_file share one pool — aggressive exploration Starves
+// execution and the agent reports findings without shipping code.
+const (
+	// readOnlyWarnRounds — first "stop reading, start editing" reminder.
+	// After this many consecutive read-only rounds, inject a prompt that
+	// forces the model to act on what it already knows.
+	readOnlyWarnRounds = 6
+	// readOnlyHardStop — hard cap on consecutive read-only rounds. The model
+	// MUST switch to editing or answering after this many reads. This is
+	// separate from the total tool budget so reads never consume the full pool.
+	readOnlyHardStop = 10
+	// minWriteBudget — minimum number of tool rounds reserved for mutations
+	// (edit/write/bash). When the read-only counter hits this threshold, the
+	// model is told to stop exploring and start implementing, regardless of
+	// the total tool budget remaining.
+	minWriteBudget = 6
+)
+
+// isReadOnlyTool reports whether a tool is pure exploration (no side effects).
+// Used to track the separate read-only budget.
+func isReadOnlyTool(name string) bool {
+	switch name {
+	case "read_file", "list_dir", "grep", "glob", "search_code", "fetch_url", "web_search", "doc_lookup":
+		return true
+	}
+	return false
+}
 
 // CalculateAdaptiveToolBudget dynamically scales the tool budget based on
 // prompt complexity, active mode, and task keywords.
@@ -102,6 +133,43 @@ func iterationsForComplexity(t complexityTier) int {
 	default:
 		return 16
 	}
+}
+
+// ComplexityTier is the exported alias for classifyTaskComplexity's result,
+// so the UI layer can derive an adaptive timeout from the same signal.
+type ComplexityTier = complexityTier
+
+// Exported tier constants for use by callers outside this package.
+const (
+	TierSimple  = tierSimple
+	TierMedium  = tierMedium
+	TierComplex = tierComplex
+)
+
+// ClassifyTaskComplexity is the exported wrapper around classifyTaskComplexity.
+func ClassifyTaskComplexity(query string) ComplexityTier {
+	return classifyTaskComplexity(query)
+}
+
+// timeoutForComplexity maps a task tier to a wall-clock timeout for the turn
+// watchdog. Simple tasks should finish fast; complex cross-module refactors
+// need more room. The autonomous extension (+15 iterations) is separate and
+// does NOT extend the time budget — time is the real safety net.
+func timeoutForComplexity(t complexityTier) time.Duration {
+	switch t {
+	case tierSimple:
+		return 5 * time.Minute
+	case tierComplex:
+		return 15 * time.Minute
+	default:
+		return 10 * time.Minute
+	}
+}
+
+// TimeoutForComplexity is the exported wrapper so the UI can derive an
+// adaptive wall-clock timeout from the engine's complexity tier.
+func TimeoutForComplexity(t ComplexityTier) time.Duration {
+	return timeoutForComplexity(t)
 }
 
 // explorationBudget returns the adaptive warn, final warn, and absolute caps
@@ -175,4 +243,75 @@ func isMutatingTool(name string) bool {
 		return true
 	}
 	return false
+}
+
+// taskType classifies the user's prompt into a task category for adaptive
+// tool filtering. Different task types benefit from different tool subsets:
+// bug fixes don't need memory or web search; code exploration doesn't need
+// edit tools. This shrinks the schema payload and prevents the model from
+// being tempted by irrelevant tools — the #1 efficiency gain for short tasks.
+type taskType int
+
+const (
+	taskGeneric taskType = iota
+	taskBugFix          // error, crash, not working, regression
+	taskExplore         // explain, what does, how does, architecture
+	taskImplement       // add, create, implement, build
+	taskRefactor        // refactor, clean up, simplify, optimize
+	taskTest            // test, coverage, spec, assertion
+)
+
+func classifyTaskType(query string) taskType {
+	p := strings.ToLower(strings.TrimSpace(query))
+
+	// Bug fix: error signals, crash, not working
+	for _, kw := range []string{"error", "crash", "panic", "failing", "broken", "not working", "regression", "bug", "fix the"} {
+		if strings.Contains(p, kw) {
+			return taskBugFix
+		}
+	}
+	// Exploration: explain, what does, how does, architecture
+	for _, kw := range []string{"explain", "what does", "how does", "architecture", "overview", "why does", "what is", "how is"} {
+		if strings.Contains(p, kw) {
+			return taskExplore
+		}
+	}
+	// Implementation: add, create, implement, build
+	for _, kw := range []string{"add", "create", "implement", "build", "new feature", "add support", "introduce"} {
+		if strings.Contains(p, kw) {
+			return taskImplement
+		}
+	}
+	// Refactor: refactor, clean up, simplify, optimize
+	for _, kw := range []string{"refactor", "clean up", "simplify", "optimize", "deduplicate", "restructure"} {
+		if strings.Contains(p, kw) {
+			return taskRefactor
+		}
+	}
+	// Test: test, coverage, spec
+	for _, kw := range []string{"test", "coverage", "spec", "assertion", "unit test", "integration test"} {
+		if strings.Contains(p, kw) {
+			return taskTest
+		}
+	}
+	return taskGeneric
+}
+
+// taskExcludeTools maps task types to tools that should be EXCLUDED for that
+// task type. This reduces schema noise and prevents the model from wasting
+// tool calls on irrelevant actions. E.g., a bug-fix task doesn't need
+// memory, web_search, or doc_lookup — only read, edit, bash, grep.
+var taskExcludeTools = map[taskType]map[string]bool{
+	taskBugFix: {
+		"memory": true, "web_search": true, "doc_lookup": true,
+		"code_outline": true, "blast_radius": true, "impact": true,
+	},
+	taskExplore: {
+		"write_file": true, "edit_file": true, "delete_file": true,
+		"memory": true, "lsp_fix": true, "lsp_rename": true,
+	},
+	taskTest: {
+		"memory": true, "web_search": true, "doc_lookup": true,
+		"code_outline": true, "blast_radius": true,
+	},
 }

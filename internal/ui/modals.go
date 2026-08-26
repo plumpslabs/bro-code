@@ -173,8 +173,7 @@ func mcpEmptyState() string {
 	sb.WriteString("```json\n")
 	sb.WriteString(`{"mcpServers": {"my-server": {"command": "npx", "args": ["-y", "pkg"]}}}` + "\n")
 	sb.WriteString("```\n\n")
-	sb.WriteString("3. Run `/mcp-reload` to connect\n\n")
-	sb.WriteString("[a] add server · [r] reload · ESC close")
+	sb.WriteString("3. Run `/mcp-reload` to connect")
 	return "MCP:\n" + sb.String()
 }
 

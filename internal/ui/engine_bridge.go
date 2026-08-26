@@ -99,6 +99,8 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 	m.appendMessages("YOU:\n" + userQuery)
 	m.status = "Thinking..."
 	m.turnStart = time.Now()
+	// Classify task complexity early so the watchdog can use an adaptive timeout.
+	m.turnTier = loop.ClassifyTaskComplexity(userQuery)
 	// Clear any stale streaming state from a previous interrupted turn.
 	m.streaming = false
 	m.pendingStream = ""
@@ -119,6 +121,17 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 		}
 		if m.prog != nil {
 			m.prog.Send(streamChunkMsg(delta))
+		}
+	})
+
+	// Reset the turn watchdog timer on productive iterations (file edits/writes)
+	// so the wall-clock safety net does not cut short real work.
+	m.engine.SetProductiveIterHandler(func() {
+		if m.quitting {
+			return
+		}
+		if m.prog != nil {
+			m.prog.Send(productiveIterMsg{})
 		}
 	})
 

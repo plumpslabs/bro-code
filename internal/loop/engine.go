@@ -62,6 +62,35 @@ func (s LoopState) String() string {
 	}
 }
 
+// execPhase defines the execution phases within a turn. The engine transitions
+// through these phases to give the model clear guidance on what to do next:
+//   - phaseResearch: read files, grep, understand the codebase
+//   - phaseExecute: edit files, write code, run bash commands
+//   - phaseVerify: run tests, build, check types (no more edits)
+//
+// This replaces the ad-hoc "stop reading" prompts with structured phase
+// transitions so the model always knows what phase it's in.
+type execPhase int
+
+const (
+	phaseResearch execPhase = iota
+	phaseExecute
+	phaseVerify
+)
+
+func (p execPhase) String() string {
+	switch p {
+	case phaseResearch:
+		return "RESEARCH"
+	case phaseExecute:
+		return "EXECUTE"
+	case phaseVerify:
+		return "VERIFY"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 // AgentTurn enforces thinking before answering (§2.2).
 type AgentTurn struct {
 	Reasoning string              `json:"reasoning"`
@@ -145,6 +174,21 @@ type Engine struct {
 	lastChangeEmit     int
 	lastChangeDiffEmit int
 	state           LoopState
+	// lastTier records the complexity tier of the most recent turn so the UI
+	// can derive an adaptive timeout without re-classifying the query.
+	lastTier complexityTier
+	// execPhase tracks the current execution phase within a turn: research →
+	// execute → verify. The engine injects phase-specific prompts so the model
+	// knows whether to read files, edit files, or run verification — preventing
+	// the "read 12 files, never edit" pattern.
+	execPhase execPhase
+	// phaseEdits counts edits made in the current phase. When the model makes
+	// edits and then tries to read more files, the engine nudges it to verify
+	// instead.
+	phaseEdits int
+	// phaseReads counts consecutive reads in the current phase. Used to detect
+	// when the model is stuck in research when it should be executing.
+	phaseReads int
 	fallbacks       []Fallback
 	streamHandler   func(delta string)
 	progressHandler TurnOutputHandler
@@ -236,6 +280,13 @@ type Engine struct {
 	// toolReminderSent guards the single "answer now" reminder injected when
 	// the tool-only budget is exhausted.
 	toolReminderSent bool
+	// readOnlyRounds counts consecutive rounds where the model ONLY called
+	// read-only tools (read_file, grep, glob, etc.) without any mutation.
+	// When this exceeds readOnlyHardStop, the model is forced to edit or
+	// answer — separate from toolOnlyRounds so reads never starve execution.
+	readOnlyRounds int
+	// readOnlyReminderSent guards the "stop reading, start editing" reminder.
+	readOnlyReminderSent bool
 	// readCounts tracks how many times each file has been read this turn.
 	// When a file reaches the cap (maxReadsPerFile), further reads are blocked
 	// and the model is forced to edit or answer instead of spinning.
@@ -417,6 +468,11 @@ type Engine struct {
 	hardCapIterations int
 	// askHandler optionally prompts the user when turn limit is reached.
 	askHandler func(question string, options []string) (string, error)
+	// productiveIterHandler is called after each productive tool iteration
+	// (file edit/write/create/delete or successful bash) so the UI can reset
+	// its turn watchdog timer — productive work should not count against the
+	// wall-clock safety net. Nil = disabled (fixed timeout).
+	productiveIterHandler func()
 	// exploreQuery caches the MINER's file-path context for warm-start relevance filtering.
 	exploreQuery string
 	// agentPrompt carries custom instructions from an active CustomAgent.
@@ -609,6 +665,14 @@ func (e *Engine) SetAskHandler(fn func(question string, options []string) (strin
 	e.askHandler = fn
 }
 
+// SetProductiveIterHandler wires a callback invoked after each productive
+// tool iteration (file mutation or successful bash). The UI uses this to
+// reset its turn watchdog timer so productive work is not cut short by the
+// wall-clock safety net.
+func (e *Engine) SetProductiveIterHandler(fn func()) {
+	e.productiveIterHandler = fn
+}
+
 // NewEngine creates an agent loop engine instance.
 func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *bcontext.Manager, model string) *Engine {
 	if ctxMgr != nil {
@@ -722,6 +786,12 @@ func (e *Engine) State() LoopState {
 	return e.state
 }
 
+// LastTier returns the complexity tier of the most recent turn, so the UI
+// can derive an adaptive wall-clock timeout.
+func (e *Engine) LastTier() complexityTier {
+	return e.lastTier
+}
+
 // RunTurn executes the ReAct loop until a terminal state is reached.
 type TurnOutputHandler func(state LoopState, info string)
 
@@ -765,6 +835,11 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 	e.toolOnlyRounds = 0
 	e.toolReminderSent = false
 	e.toolReminder2Sent = false
+	e.readOnlyRounds = 0
+	e.readOnlyReminderSent = false
+	e.execPhase = phaseResearch
+	e.phaseEdits = 0
+	e.phaseReads = 0
 	e.exploredStalls = 0
 	e.lastExploredTarget = ""
 	e.lastToolCall = provider.ToolCall{}
@@ -809,6 +884,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			// extension still adds +15 when the task proves bigger than its
 			// tier, so a misclassification never traps a real task.
 			tier := classifyTaskComplexity(userQuery)
+			e.lastTier = tier
 			e.maxIterations = iterationsForComplexity(tier)
 			if tier == tierSimple && onUpdate != nil {
 				onUpdate(e.state, fmt.Sprintf("⚡ Simple task detected — reduced iteration budget (%d, complex tasks get 25)", e.maxIterations))
@@ -1073,6 +1149,32 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			e.context.InjectContextMessage("⚠️ Final exploration round: conclude your findings or execute edits now." + e.exploredSummary())
 			if onUpdate != nil {
 				onUpdate(e.state, "⚠️ Approaching exploration budget — wrapping up findings")
+			}
+		}
+		// Read-only budget: when the model has spent too many rounds purely
+		// exploring (read_file, grep, glob, etc.) without any mutation, force
+		// it to act on what it already knows. This prevents the "read 12 files,
+		// run out of budget, report findings without editing" pattern.
+		if e.readOnlyRounds >= readOnlyWarnRounds && !e.readOnlyReminderSent {
+			e.readOnlyReminderSent = true
+			e.context.InjectContextMessage(
+				fmt.Sprintf("⚠️ STOP EXPLORING. You have read files %d rounds in a row without editing. "+
+					"You ALREADY have enough context. Use edit_file or write_file NOW to implement the changes. "+
+					"Do NOT read any more files. Act on what you know."+e.exploredSummary(),
+					e.readOnlyRounds))
+			if onUpdate != nil {
+				onUpdate(e.state, "⚠️ Read budget warning — switching to implementation")
+			}
+		} else if e.readOnlyRounds >= readOnlyHardStop {
+			// Hard stop: force the model to use remaining budget for mutations.
+			e.context.InjectContextMessage(
+				fmt.Sprintf("🚫 READ BUDGET EXHAUSTED (%d consecutive read-only rounds). "+
+					"Tool calls are RESTRICTED to edit_file, write_file, bash, and git only. "+
+					"You MUST implement the changes now with the context you have gathered. "+
+					"Do NOT call read_file, grep, glob, or any other read-only tool."+e.exploredSummary(),
+					e.readOnlyRounds))
+			if onUpdate != nil {
+				onUpdate(e.state, "🚫 Read budget exhausted — implementation mode enforced")
 			}
 		}
 		// 1. Thinking State
@@ -1385,6 +1487,23 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			// This round was tool-only (no answer text); count it toward the
 			// budget so a model that never answers gets cut off.
 			e.toolOnlyRounds++
+			// Track read-only rounds separately: if ALL tool calls in this round
+			// are read-only (exploration), increment the read budget counter.
+			// If any call is a mutation, the counter resets (the model switched
+			// to execution, which is what we want).
+			allReadOnly := true
+			for _, tc := range resp.ToolCalls {
+				if !isReadOnlyTool(tc.Name) {
+					allReadOnly = false
+					break
+				}
+			}
+			if allReadOnly {
+				e.readOnlyRounds++
+			} else {
+				e.readOnlyRounds = 0
+				e.readOnlyReminderSent = false
+			}
 			// A fresh round has not counted any bash family yet.
 			e.iterBashFamily = ""
 
@@ -1432,6 +1551,18 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 						pending[i] = pendingTool{tc: tc, output: guardMsg}
 						continue
 					}
+				}				// Read-only hard stop: when the model has exhausted its read budget
+				// (readOnlyRounds >= readOnlyHardStop), block read-only tools so the
+				// agent is forced to act on what it already knows instead of reading
+				// more files and running out of budget before editing.
+				if e.readOnlyRounds >= readOnlyHardStop && isReadOnlyTool(tc.Name) {
+					guardMsg := fmt.Sprintf("🚫 [READ BUDGET]: Read budget exhausted (%d consecutive read-only rounds). "+
+						"Use edit_file, write_file, bash, or git NOW. Do NOT read more files.", e.readOnlyRounds)
+					if onUpdate != nil {
+						onUpdate(e.state, guardMsg)
+					}
+					pending[i] = pendingTool{tc: tc, output: guardMsg}
+					continue
 				}
 
 				// TSR contract: for bug-fix tasks, block any edit until the failure
@@ -1570,7 +1701,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				e.lastToolCall = tc
 
 				if callCount >= 2 || e.lastToolCallRepeats >= 2 {
-					if callCount >= 4 || e.lastToolCallRepeats >= 4 {
+					if callCount >= 3 || e.lastToolCallRepeats >= 3 {
 						// The model ignored the guard warning and is still
 						// spinning — abort the whole turn instead of burning iterations.
 						e.state = StateBlocked
@@ -1614,7 +1745,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 							e.bashFamilyStreak = 0
 						}
 					}
-					if e.bashFamilyStreak >= 6 {
+					if e.bashFamilyStreak >= 3 {
 						fuzzyGuard := fmt.Sprintf("⚠️ [LOOP GUARD]: You have spent %d consecutive rounds running similar '%s' commands without converging. Stop re-running the same command family — change your approach, answer directly with what you have, or state precisely what information is still missing.", e.bashFamilyStreak, e.lastBashFamily)
 						if onUpdate != nil {
 							onUpdate(e.state, "⚠️ Same-command loop detected — instructing model to change strategy")
@@ -1684,6 +1815,51 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// completion tokens that produced it (the deliverable, not overhead).
 		if roundMutation {
 			e.turnProductiveTokens += e.lastRoundOutput
+		}	// Signal productive work so the UI can reset its turn watchdog timer.
+	// Fires on file-mutation rounds (edit/write/create/delete) — the clearest
+	// signal that the task advanced, not just explored.
+	if roundMutation {
+		if e.productiveIterHandler != nil {
+			e.productiveIterHandler()
+		}
+	}
+
+		// EXECUTION PHASE TRACKING: transition between research → execute → verify
+		// so the model always knows what phase it's in and what to do next.
+		if roundMutation {
+			// File mutation = execution phase. Track edits for verify gate.
+			if e.execPhase == phaseResearch {
+				e.execPhase = phaseExecute
+				e.phaseEdits = 0
+				e.phaseReads = 0
+			}
+			if e.execPhase == phaseExecute {
+				e.phaseEdits++
+			}
+			// AUTO-VERIFY: after every file mutation, inject a reminder to verify
+			// (run build/test). This is stronger than waiting for the model to
+			// re-read — it nudges verification BEFORE the model moves on to
+			// editing more files. Only inject after the first edit (not after
+			// every single edit in a batch) to avoid noise.
+			if e.phaseEdits == 1 {
+				e.context.InjectContextMessage("[AUTO-VERIFY] You just edited a file. After completing all edits for this task, run the appropriate verification command (tsc --noEmit / go build / npm test / cargo check) before declaring done. The model MUST verify builds pass.")
+			}
+		} else if allReadOnly {
+			// Read-only round: if we're in execute phase and have made edits,
+			// the model is re-reading after editing — nudge toward verification.
+			if e.execPhase == phaseExecute && e.phaseEdits > 0 {
+				e.phaseReads++
+				if e.phaseReads >= 2 && !e.readOnlyReminderSent {
+					e.context.InjectContextMessage(
+						fmt.Sprintf("[PHASE: VERIFY] You have made %d edit(s) and are now reading files again. "+
+							"STOP reading. Run the build/test command (e.g. tsc --noEmit, go build, npm test) "+
+							"to verify your edits are correct. Do NOT edit or read more files until verification passes.",
+						e.phaseEdits))
+					if onUpdate != nil {
+						onUpdate(e.state, "[VERIFY] Suggesting verification after edits")
+					}
+				}
+			}
 		}
 
 			// PHASE 2 — EXECUTION: run every pending call. Read-only tools
@@ -1813,12 +1989,15 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					e.toolOnlyRounds = 0
 					e.toolReminderSent = false
 					e.toolReminder2Sent = false
+					e.readOnlyRounds = 0
+					e.readOnlyReminderSent = false
 					e.exploredStalls = 0
 					e.turnToolCallCounts = make(map[string]int) // file mutated: verification commands and re-reads are valid
 					e.lastToolCallRepeats = 0
 					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" || pending[i].tc.Name == "edit_symbol" {
 						if p := extractToolPath(pending[i].tc.Arguments); p != "" {
 							e.editedFiles = append(e.editedFiles, p)
+							e.context.SetEditedFiles(e.editedFiles) // sync for smart compaction truncation
 							e.readCounts = make(map[string]int) // allow re-reading newly edited files
 							// Keep the session symbol index current after real edits.
 							if e.onFileEdited != nil && err == nil {
@@ -2274,6 +2453,7 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 		PlanMode:      e.planMode,
 		ActivePlan:    activePlanStr,
 		AgentPrompt:   e.agentPrompt,
+		ModelTier:     prompt.ClassifyModelTier(e.model),
 		Tuning:        e.tuning,
 	}
 	// Inject session edit summary: when files have been changed in this session
@@ -2306,6 +2486,10 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 		if currentMode == "MINER" && e.exploreQuery != "" {
 			in.MemoryWarm = e.mem.WarmStartRelevant(in.UserPrompt + " " + e.exploreQuery)
 		}
+		// Memory index: always load the compact table of contents so the agent
+		// knows WHAT knowledge exists even after compaction. This is the L1
+		// pointer file from Claude Code's 3-layer memory architecture.
+		in.MemoryIndex = e.mem.MemoryIndex()
 		if in.MemoryWarm != "" && onUpdate != nil && iteration == 1 {
 			onUpdate(e.state, "🧠 Warm Start: Recalled project memory & hot files")
 		}
@@ -2402,6 +2586,40 @@ func (e *Engine) toolsForMode(mode string) []provider.ToolDefinition {
 			lean[i] = d
 		}
 		defs = lean
+	}
+	// Model-tier tool filtering: weak models get fewer tools to avoid
+	// confusion from too many options. This implements Cursor/Aider's
+	// model-aware routing principle.
+	tier := prompt.ClassifyModelTier(e.model)
+	if tier == "weak" {
+		// Weak models: core tools only (read, edit, write, bash, grep)
+		weakKeep := map[string]bool{
+			"read_file": true, "write_file": true, "edit_file": true,
+			"bash": true, "grep": true, "glob": true, "list_dir": true,
+			"run_tests": true, "git": true,
+		}
+		out := make([]provider.ToolDefinition, 0, len(weakKeep))
+		for _, d := range defs {
+			if weakKeep[d.Name] {
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+	// Task-type adaptive tool filtering: certain task types don't need all tools.
+	// E.g., a bug-fix task doesn't need memory, web_search, doc_lookup — only
+	// read, edit, bash, grep. This shrinks the schema payload and prevents the
+	// model from being tempted by irrelevant tools.
+	taskType := classifyTaskType(e.context.LastUserPrompt())
+	if excludeByTask, ok := taskExcludeTools[taskType]; ok {
+		out := make([]provider.ToolDefinition, 0, len(defs))
+		for _, d := range defs {
+			if excludeByTask[d.Name] {
+				continue
+			}
+			out = append(out, d)
+		}
+		return out
 	}
 	if mode == "BUILDER" {
 		return defs

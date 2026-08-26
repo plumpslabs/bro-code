@@ -40,6 +40,14 @@ var builderRules = []Rule{
 		Text: `3. EXPLORE BEFORE ANSWERING & TARGETED DISCOVERY (DRY): Inspect files when you need context. Check existing helpers and components before creating new ones. When you have enough context, proceed immediately to the solution.`,
 	},
 	{
+		ID:   "b3c",
+		Text: `3c. EDIT IMMEDIATELY — NO RE-READS: After reading a file and understanding it, EDIT it immediately. NEVER re-read the same file you just edited to "verify" — trust your edit. Re-reading the same file is a loop, not verification. If you need to verify, run the project's build/test command instead.`,
+	},
+	{
+		ID:   "b3d",
+		Text: `3d. IGNORE PRE-EXISTING WARNINGS: Code review warnings about file length (>300 lines), function length (>50 lines), or deep nesting (>4 levels) are PRE-EXISTING issues — NOT caused by your edits. Do NOT fix them unless the user explicitly asks. Focus ONLY on the task the user requested.`,
+	},
+	{
 		ID:   "b3b",
 		Text: `3b. BATCH & STAY LEAN: Batch independent tool calls when possible. Use start_line/end_line in read_file and edit_file to work efficiently with large files.`,
 	},
@@ -57,7 +65,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID:   "b7",
-		Text: `7. EXPLORE → EDIT → VERIFY: For non-trivial modifications, inspect the file, apply surgical edits, and verify correctness with project tests or build commands.`,
+		Text: `7. EXPLORE → EDIT → VERIFY: For non-trivial modifications, inspect the file ONCE, apply surgical edits, and verify correctness with project tests or build commands. The flow is: read → edit → build/test. NEVER: read → edit → read → edit → read.`,
 	},
 	{
 		ID:   "b8",
@@ -68,12 +76,16 @@ var builderRules = []Rule{
 		Text: `9. ANSWER PROPORTIONATELY & SENIOR PRAGMATIC CANDOR: Keep explanations clear, concise, and code-focused. Omit unnecessary preambles, defensive self-justifications, or conversational fluff.`,
 	},
 	{
+		ID:   "b9b",
+		Text: `9b. NO NARRATION — JUST ACT: NEVER narrate what you are about to do. Do NOT write "Sekarang saya perlu...", "Sekarang saya akan...", "Mari kita..." before using a tool. Just call the tool directly. Your actions speak louder than words.`,
+	},
+	{
 		ID:   "b10",
 		Text: `10. EVIDENCE-BASED PROBLEM SOLVING: Form clear hypotheses, observe error output, and apply targeted fixes. Adapt your approach if a strategy doesn't work.`,
 	},
 	{
 		ID:   "b11",
-		Text: `11. ANTI-LOOP EFFICIENCY: Once you have sufficient context, apply edits directly. Avoid re-running identical queries.`,
+		Text: `11. ANTI-LOOP EFFICIENCY: Once you have sufficient context, apply edits directly. Avoid re-running identical queries. NEVER read the same file twice in a row. NEVER grep for something you already found. NEVER re-read a file after editing it — use build/test to verify instead.`,
 	},
 	{
 		ID:   "b12",
@@ -135,10 +147,39 @@ func modeDesc(mode string) string {
 	}
 }
 
+// modelTierRules limits how many rules a model tier receives. Weak models
+// (small open-source) get only the essential rules; strong models (Claude,
+// GPT-4) get the full set. This prevents instruction-following degradation
+// when the prompt is too long for the model's capacity.
+var modelTierLimits = map[string]int{
+	"weak":   6,  // b1, b2, b7, b9b, b11, b17 (core actions only)
+	"medium": 12, // add b3, b3c, b3d, b5, b6, b9
+	"strong": 99, // all rules
+}
+
+// ClassifyModelTier maps a model name to its instruction-following tier.
+func ClassifyModelTier(model string) string {
+	m := strings.ToLower(model)
+	// Strong instruction followers
+	for _, prefix := range []string{"claude", "gpt-4", "gpt-5", "o3", "o4", "gemini-2", "qwen3"} {
+		if strings.Contains(m, prefix) {
+			return "strong"
+		}
+	}
+	// Weak instruction followers (small open-source)
+	for _, kw := range []string{"tiny", "mini", "flash", "lite", "7b", "8b", "3b", "1b", "qwen2.5-7b"} {
+		if strings.Contains(m, kw) {
+			return "weak"
+		}
+	}
+	// Everything else is medium (deepseek-v4, mimo, llama-3.3-70b, etc.)
+	return "medium"
+}
+
 // modeRules returns the enabled rules for a mode, filtered by the tuning
-// surface. The default (no tuning overrides) returns every rule, preserving
-// the historical prompt verbatim.
-func modeRules(mode string, t *Tuning) []Rule {
+// surface AND the model's instruction-following tier. Weak models get fewer
+// rules to avoid confusion; strong models get the full set.
+func modeRules(mode string, t *Tuning, modelTier string) []Rule {
 	var all []Rule
 	switch mode {
 	case "PLANNER":
@@ -154,12 +195,19 @@ func modeRules(mode string, t *Tuning) []Rule {
 			off[id] = true
 		}
 	}
+	limit := modelTierLimits["strong"]
+	if l, ok := modelTierLimits[modelTier]; ok {
+		limit = l
+	}
 	out := make([]Rule, 0, len(all))
 	for _, r := range all {
 		if off[r.ID] {
 			continue
 		}
 		out = append(out, r)
+		if len(out) >= limit {
+			break
+		}
 	}
 	return out
 }
@@ -179,7 +227,7 @@ func renderMode(in *Input) string {
 		sb.WriteString("🔥 BUILDER AUTHORITY: You have full read-write execution power. You MUST NOT claim to be in PLANNER mode or ask the user to switch modes, because you are ALREADY in BUILDER mode. Apply requested code changes immediately using edit_file or write_file.\n")
 	}
 	fmt.Fprintf(&sb, "If the user asks about your mode (in any language, e.g. 'klo skng mode apa', 'mode apa', 'what mode'), answer directly that you are currently in %s mode and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.\n\nEngine Mode Rules (%s):\n", mode, mode)
-	for i, r := range modeRules(mode, in.Tuning) {
+	for i, r := range modeRules(mode, in.Tuning, in.ModelTier) {
 		if i > 0 {
 			sb.WriteString("\n")
 		}

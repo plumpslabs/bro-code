@@ -59,6 +59,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logViewport.GotoBottom()
 		}
 
+	case productiveIterMsg:
+		// Reset the turn watchdog timer on productive work (file edits/writes)
+		// so the wall-clock safety net does not cut short active implementation.
+		if m.turnRunning {
+			m.turnStart = time.Now()
+		}
+		return m, nil
+
 	case spinnerTickMsg:
 		// When idle (no turn running, not busy), stop the ticker immediately
 		// so BroCode consumes 0.0% CPU and zero battery while waiting for input.
@@ -1357,5 +1365,9 @@ func (m *Model) effectiveTurnTimeout() time.Duration {
 			return d
 		}
 	}
-	return turnTimeout
+	// Adaptive timeout: simple tasks get less time, complex tasks get more.
+	// The productiveIterHandler resets turnStart on file edits, so the timer
+	// only counts wall-clock time since the LAST productive iteration — not
+	// the entire turn duration.
+	return loop.TimeoutForComplexity(m.turnTier)
 }

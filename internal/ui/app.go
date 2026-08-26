@@ -146,6 +146,9 @@ type Model struct {
 	// so the activity slot can show an elapsed timer and the user can tell a
 	// slow generation apart from a real hang.
 	turnStart time.Time
+	// turnTier stores the complexity tier of the current turn so the
+	// watchdog can derive an adaptive wall-clock timeout.
+	turnTier loop.ComplexityTier
 
 	// Live token streaming state & memoized formatting cache
 	streaming          bool
@@ -338,6 +341,10 @@ type turnResultMsg struct {
 	// rather than clobbering the new turn's turnRunning/streaming state.
 	gen int
 }
+
+// productiveIterMsg is sent by the engine's productiveIterHandler after a
+// file-mutation round so the Bubble Tea loop can reset the turn watchdog timer.
+type productiveIterMsg struct{}
 
 // maxChatMessages is a SAFETY CEILING, not a display window: the chat log
 // keeps every message of the session in memory (the user's history must never

@@ -83,6 +83,33 @@ func recordTurnFile(ctx context.Context, path string) {
 	}
 }
 
+// trustThreshold is the number of times a command pattern must be approved
+// before it is auto-approved without prompting. This implements graduated
+// trust: the more the user approves a command, the less they are interrupted.
+const trustThreshold = 3
+
+// normalizeCommandPattern extracts the base command from a full command string
+// so trust is tracked by pattern ("git commit -m \"fix\"" → "git commit").
+func normalizeCommandPattern(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	parts := strings.Fields(cmd)
+	if len(parts) == 0 {
+		return ""
+	}
+	// For git/npm/yarn/pnpm, include the subcommand (git commit, npm install)
+	base := parts[0]
+	if len(parts) > 1 {
+		sub := parts[1]
+		if sub == "commit" || sub == "push" || sub == "pull" || sub == "checkout" ||
+			sub == "branch" || sub == "reset" || sub == "merge" || sub == "rebase" ||
+			sub == "stash" || sub == "install" || sub == "run" || sub == "test" ||
+			sub == "build" || sub == "start" {
+			base += " " + sub
+		}
+	}
+	return base
+}
+
 // Tool represents an executable native tool.
 type Tool interface {
 	Name() string
@@ -132,6 +159,15 @@ type Registry struct {
 	fileActionFunc func(context.Context, FileActionRequest) (FileActionDecision, error)
 	fileAllow      map[string]bool
 
+	// Graduated trust: tracks how many times a command pattern has been
+	// approved this session. After trustThreshold approvals, the command
+	// is auto-approved without prompting (like Claude Code's auto-mode).
+	trustCounts  map[string]int
+	trustEnabled bool
+	// trustPatterns maps command patterns to their approval counts.
+	// Patterns are normalized: "git commit -m \"fix\"" → "git commit"
+	trustPatterns map[string]bool
+
 	// knowledgeStore is the Smart Context Graph backend. When set, read_file
 	// updates it asynchronously and edit_file/write_file/delete_file invalidate
 	// entries synchronously — so the engine gets smart warm-start hints without
@@ -160,6 +196,26 @@ func (r *Registry) SetCommandFilter(fn func(cmd string) (bool, bool)) {
 func (r *Registry) SetExecutionPolicy(readOnly, readOnlyBash bool) {
 	r.readOnly = readOnly
 	r.readOnlyBash = readOnlyBash
+}
+
+// EnableGraduatedTrust activates the graduated trust system: commands that
+// have been approved trustThreshold times are auto-approved without prompting.
+func (r *Registry) EnableGraduatedTrust() {
+	r.trustEnabled = true
+	r.trustCounts = make(map[string]int)
+}
+
+// TrustCounts returns the current trust level per command pattern (for UI
+// display and persistence).
+func (r *Registry) TrustCounts() map[string]int {
+	if r.trustCounts == nil {
+		return nil
+	}
+	out := make(map[string]int, len(r.trustCounts))
+	for k, v := range r.trustCounts {
+		out[k] = v
+	}
+	return out
 }
 
 // NewRegistry initializes default built-in tools.
@@ -390,12 +446,36 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 		return true, "", nil
 	}
 
+	// Graduated trust: if the user has approved this command pattern enough
+	// times (trustThreshold), auto-approve without prompting. This implements
+	// Claude Code's graduated trust spectrum — the more the user approves,
+	// the less they are interrupted.
+	if r.trustEnabled && r.trustCounts != nil {
+		pattern := normalizeCommandPattern(cmd)
+		if pattern != "" && r.trustCounts[pattern] >= trustThreshold {
+			return true, "", nil
+		}
+	}
+
 	// GateAsk
 	if r.askFunc == nil {
 		return true, "", nil // headless/unattended: proceed
 	}
 
-	return r.askViaModal(ctx, cmd, gateContext)
+	allowed, reason, err := r.askViaModal(ctx, cmd, gateContext)
+	// Record approval for graduated trust: when the user approves a command,
+	// increment the trust counter for its pattern. After trustThreshold
+	// approvals, the pattern is auto-approved next time.
+	if allowed && r.trustEnabled {
+		pattern := normalizeCommandPattern(cmd)
+		if pattern != "" {
+			if r.trustCounts == nil {
+				r.trustCounts = make(map[string]int)
+			}
+			r.trustCounts[pattern]++
+		}
+	}
+	return allowed, reason, err
 }
 
 // gateFileAction asks the user for approval of a critical file mutation
@@ -887,9 +967,28 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		return "", err
 	}
 
+	// Content-addressable read cache: if the file's mtime hasn't changed
+	// since the last read, return the cached content instantly. This avoids
+	// re-reading the same file multiple times per turn (model often calls
+	// read_file on the same file with different start_line/end_line ranges).
+	// Only cache files under 1000 lines to avoid interfering with auto-paging.
+	if cached, ok := readCache.Get(args.Path); ok {
+		cachedLines := strings.Count(cached, "\n") + 1
+		if cachedLines < 1000 {
+			return CapOutput(cached), nil
+		}
+	}
+
 	data, err := os.ReadFile(args.Path)
 	if err != nil {
 		return "", err
+	}
+	// Cache small files for future reads (mtime-based invalidation).
+	// Only files under 1000 lines are cached to avoid interfering with
+	// the auto-paging logic for large files.
+	lineCount := strings.Count(string(data), "\n") + 1
+	if lineCount < 1000 {
+		readCache.Put(args.Path, string(data))
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -1272,7 +1371,16 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 
 	edits := myers.ComputeEdits(span.URIFromPath(args.Path), content, newContent)
 	unified := gotextdiff.ToUnified(args.Path, args.Path, content, edits)
-	return fmt.Sprintf("Successfully updated %s%s\nDiff:\n%s", args.Path, editRange, unified), nil
+	result := fmt.Sprintf("Successfully updated %s%s\nDiff:\n%s", args.Path, editRange, unified)
+	// LOW-CONFIDENCE WARNING: when the match tier was fuzzy/block-anchor/
+	// blank-tolerant, warn the model that the replacement might be wrong.
+	// This triggers auto-verification: re-read the file and confirm the edit
+	// landed correctly instead of assuming success.
+	if strings.Contains(editRange, "fuzzy") || strings.Contains(editRange, "block-anchor") ||
+		strings.Contains(editRange, "blank-tolerant") {
+		result += "\n⚠️ LOW-CONFIDENCE MATCH: The edit matched via fuzzy similarity. Please re-read the file to confirm the replacement was applied correctly."
+	}
+	return result, nil
 }
 
 // DeleteFileTool permanently removes a file. It is gated (GateAction asks the

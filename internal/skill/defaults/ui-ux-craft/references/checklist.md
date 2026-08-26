@@ -4,6 +4,21 @@ Full quality gate. Run before saying "done" on Component/Page tasks.
 
 ---
 
+## Template Detection (MUST pass — blocks delivery)
+
+Run this FIRST. If ANY match → rewrite before proceeding.
+
+| # | Check | How to Verify |
+|---|---|---|
+| T1 | No gradient hero sections | Search for `bg-gradient` in hero/header — replace with solid bg or Badge + heading pattern |
+| T2 | No dark cards with colored text | Search for dark backgrounds (`from-gray-900`, `bg-slate-900`) — replace with white/light Card + subtle border |
+| T3 | No centered-everything layout | Check if body text is centered — left-align body, center only headlines/hero |
+| T4 | No hardcoded hex colors | Search for `#[0-9a-fA-F]{6}` — replace with semantic tokens (text-foreground, bg-primary, etc.) |
+| T5 | No placeholder-only forms | Check all `<input>` — must have visible `<Label>` above it |
+| T6 | No emoji as icons | Search for emoji in UI elements — replace with Lucide/Phosphor icons |
+| T7 | Cards have consistent padding | All cards use same spacing (e.g., `p-6`) — no mixed padding |
+| T8 | Color changes are semantic | Positive = emerald/green, Negative = red — not all green |
+
 ## Visual (MUST pass)
 
 | # | Check |

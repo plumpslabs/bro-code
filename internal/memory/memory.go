@@ -370,6 +370,52 @@ func (s *Store) WarmStartRelevant(query string) string {
 	return strings.TrimSpace(sb.String())
 }
 
+// MemoryIndex returns a compact table of contents for all memory sections.
+// This is the "L1 pointer file" from Claude Code's 3-layer memory architecture:
+// a lightweight index that's always loaded into context, telling the agent
+// WHAT knowledge exists and WHERE to look. After compaction, the agent still
+// knows the project's structure without re-reading everything.
+//
+// Example output:
+//   📚 Memory Index (use memory tool to recall details):
+//   • Architecture (5 facts): auth flow, DB schema, API routes
+//   • Conventions (3 facts): naming, error handling, testing
+//   • Gotchas (2 facts): race condition in cache, N+1 query
+func (s *Store) MemoryIndex() string {
+	if s == nil {
+		return ""
+	}
+	s.load()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.facts) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("📚 Memory Index (use memory tool to recall details):\n")
+	for sec, items := range s.facts {
+		if len(items) == 0 {
+			continue
+		}
+		// Show first 3 items as preview
+		preview := make([]string, 0, 3)
+		for i, f := range items {
+			if i >= 3 {
+				preview = append(preview, "...")
+				break
+			}
+			// Truncate long facts for preview
+			short := f
+			if len(short) > 60 {
+				short = short[:57] + "..."
+			}
+			preview = append(preview, short)
+		}
+		fmt.Fprintf(&sb, "• %s (%d facts): %s\n", sec, len(items), strings.Join(preview, ", "))
+	}
+	return sb.String()
+}
+
 // Recall searches memory facts by BM25 relevance to query, returning the top
 // matches formatted for the model. Returns a friendly "no memory" note when
 // empty.

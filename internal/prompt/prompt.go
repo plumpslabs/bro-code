@@ -88,6 +88,15 @@ type Input struct {
 	// like MINER can reference prior edits without re-scanning. Populated by
 	// the engine when tool.ChangesLen() > 0 at turn start.
 	SessionEditSummary string
+	// ModelTier classifies the active model's instruction-following capability
+	// so the prompt builder can inject a proportional number of rules:
+	// "weak" (5 rules), "medium" (10 rules), "strong" (full 17 rules).
+	// Empty defaults to "strong" (all rules).
+	ModelTier string
+	// MemoryIndex is a compact table of contents for project memory sections.
+	// Always loaded into context so the agent knows WHAT knowledge exists
+	// even after compaction. Empty disables.
+	MemoryIndex string
 	// Tuning carries the runtime surface (block toggles, rule toggles, skill
 	// catalog budgets). Nil falls back to DefaultTuning.
 	Tuning *Tuning
@@ -146,6 +155,7 @@ func blocks(_ *Input) []Block {
 		// L1 — dynamic session state (LSP, pre-flight, plan gate, smart scope).
 		{Name: "lsp", Render: renderLSP},
 		{Name: "memory", Render: renderMemory},
+		{Name: "memory_index", Render: renderMemoryIndex},
 		{Name: "notes", Render: renderNotesHints},
 		{Name: "knowledge", Render: renderKnowledgeHints},
 		{Name: "scope", Render: renderScopeHint},
@@ -157,6 +167,8 @@ func blocks(_ *Input) []Block {
 		{Name: "session_edits", Render: renderSessionEdits},
 		// L0 — custom agent instructions (if active).
 		{Name: "custom_agent", Render: renderCustomAgent},
+		// L0 — spec-driven workflow for BUILDER mode.
+		{Name: "spec_workflow", Render: renderSpecWorkflow},
 		// L0 — universal contract: mode header + tunable mode rules.
 		{Name: "mode", Always: true, Render: renderMode},
 	}
@@ -215,6 +227,16 @@ func renderMemory(in *Input) string {
 		return ""
 	}
 	return "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + in.MemoryWarm
+}
+
+// renderMemoryIndex renders a compact table of contents for project memory.
+// This is the "L1 pointer file" — always loaded so the agent knows WHAT
+// knowledge exists even after compaction. Use the memory tool to recall details.
+func renderMemoryIndex(in *Input) string {
+	if in.MemoryIndex == "" {
+		return ""
+	}
+	return "\n\n" + in.MemoryIndex
 }
 
 func renderKnowledgeHints(in *Input) string {
@@ -290,4 +312,22 @@ func renderSessionEdits(in *Input) string {
 		return ""
 	}
 	return "\n📝 SESSION EDITS: " + strings.TrimSpace(in.SessionEditSummary) + "\n"
+}
+
+// renderSpecWorkflow injects a mini-spec workflow for BUILDER mode so the
+// agent structures its work instead of randomly reading files. Only shown
+// on iteration 1 (first prompt) to keep the cached prefix stable.
+func renderSpecWorkflow(in *Input) string {
+	if in.Mode != "BUILDER" || in.Iteration != 1 {
+		return ""
+	}
+	return `
+
+📋 SPEC-DRIVEN WORKFLOW (follow this for every task):
+1. UNDERSTAND: Read 2-3 key files to understand the task scope.
+2. PLAN: Output a mini-spec: GOAL (what done looks like), SCOPE (files to touch), ACCEPTANCE (how to verify).
+3. EXECUTE: Edit files. Do NOT re-read files you just edited — trust your edit.
+4. VERIFY: Run build/test command. If it fails, fix and re-verify. Stop when it passes.
+5. DONE: Output a brief summary of changes. Do NOT narrate steps — just show the result.
+If the task is simple (typo, rename, one-line fix), skip to step 3 directly.`
 }

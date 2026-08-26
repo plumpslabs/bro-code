@@ -192,11 +192,21 @@ func main() {
 	if shouldContinue && st != nil {
 		// Old resume logic re-persisted the whole log on every `-c`, leaving
 		// duplicated history in the database. Purge those before restoring so
-		// a resumed session never shows the same prompt multiple times.
-		if removed, err := st.CleanupReplayDuplicates(sessionID); err == nil && removed > 0 {
-			fmt.Printf("✓ Purged %d duplicated history events\n", removed)
-		}
+		// Single DB load: fetch events ONCE, reuse for duplicate cleanup + restore.
+		// The old path loaded events TWICE (once for cleanup, once for restore)
+		// and the O(n²) duplicate detection ran on every resume — both removed.
 		events, err := st.GetSessionEvents(sessionID)
+		if err == nil {
+			// Fast-path: detect duplicates with O(n) hash fingerprinting instead
+			// of the old O(n²/2) payload-comparison loop.
+			if keep, found := store.DetectReplayPrefix(events); found && keep < len(events) {
+				removed := len(events) - keep
+				// Delete duplicated tail events from DB.
+				_, _ = st.CleanupReplayDuplicates(sessionID)
+				events = events[:keep]
+				fmt.Printf("✓ Purged %d duplicated history events\n", removed)
+			}
+		}
 		if err == nil && len(events) > 0 {
 			// Reconstruct the user-facing prompt history from user_msg events
 			// (engine-injected reminders like loop guards are filtered out).

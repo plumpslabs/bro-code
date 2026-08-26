@@ -278,42 +278,14 @@ func (s *Store) CleanupReplayDuplicates(sessionID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n := len(events)
-	if n < 4 {
+	keep, ok := DetectReplayPrefix(events)
+	if !ok {
 		return 0, nil
 	}
-
-	keep := n
-	for k := 1; k <= n/2; k++ {
-		// prefix of length k must equal the next k events…
-		match := true
-		for i := 0; i < k; i++ {
-			if events[i].Type != events[k+i].Type || events[i].PayloadJSON != events[k+i].PayloadJSON {
-				match = false
-				break
-			}
-		}
-		if !match {
-			continue
-		}
-		// …and the whole tail must be a pure repetition of that prefix.
-		full := true
-		for j := k; j < n; j++ {
-			if events[j].Type != events[j%k].Type || events[j].PayloadJSON != events[j%k].PayloadJSON {
-				full = false
-				break
-			}
-		}
-		if full {
-			keep = k
-			break
-		}
-	}
-
+	n := len(events)
 	if keep >= n {
 		return 0, nil
 	}
-
 	// Events carry monotonically increasing seq per session; keep seq <= keep.
 	res, err := s.db.Exec("DELETE FROM events WHERE session_id = ? AND seq > ?", sessionID, keep)
 	if err != nil {
@@ -321,6 +293,73 @@ func (s *Store) CleanupReplayDuplicates(sessionID string) (int, error) {
 	}
 	removed, _ := res.RowsAffected()
 	return int(removed), nil
+}
+
+// DetectReplayPrefix finds the smallest repeating prefix in the event list.
+// Returns (keep, true) when a full repetition is detected — keep is the
+// prefix length. Returns (0, false) when no repetition exists.
+//
+// Fast-path: O(n) worst case using hash fingerprinting instead of the naive
+// O(n²) payload-comparison loop. The hash of each event's (Type, PayloadJSON)
+// is pre-computed once, then prefix–repetition is tested by comparing hashes.
+type replayPrefixEntry struct {
+	Type string
+	Hash uint64
+}
+
+func DetectReplayPrefix(events []Event) (int, bool) {
+	n := len(events)
+	if n < 4 {
+		return 0, false
+	}
+	// Pre-compute hash fingerprints (avoids repeated JSON string comparisons).
+	entries := make([]replayPrefixEntry, n)
+	for i, ev := range events {
+		entries[i] = replayPrefixEntry{Type: ev.Type, Hash: fnvHash(ev.Type + ev.PayloadJSON)}
+	}
+	keep := n
+	found := false
+	for k := 1; k <= n/2; k++ {
+		// Quick gate: if the k-th event doesn't match the 0-th, skip.
+		if entries[0].Hash != entries[k].Hash || entries[0].Type != entries[k].Type {
+			continue
+		}
+		// Check the first k events repeat exactly in the next block.
+		match := true
+		for i := 1; i < k; i++ {
+			if entries[i].Hash != entries[k+i].Hash || entries[i].Type != entries[k+i].Type {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		// The whole tail must be a pure repetition of that prefix.
+		full := true
+		for j := k; j < n; j++ {
+			if entries[j].Hash != entries[j%k].Hash || entries[j].Type != entries[j%k].Type {
+				full = false
+				break
+			}
+		}
+		if full {
+			keep = k
+			found = true
+			break
+		}
+	}
+	return keep, found
+}
+
+// fnvHash is a fast non-cryptographic hash (FNV-1a) for fingerprinting.
+func fnvHash(s string) uint64 {
+	h := uint64(14695981039346656037)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return h
 }
 
 // GetSession retrieves a single session by ID. It returns an error wrapping
@@ -411,4 +450,54 @@ func (s *Store) ListSessionsByProjectPath(projectPath string) ([]Session, error)
 // Close closes the database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// Rich event type helpers: these persist structured events that carry
+// metadata beyond the basic payload, enabling richer session resume.
+
+// PermissionEvent records a user's approval/denial of a gated command.
+type PermissionEvent struct {
+	Command string `json:"command"`
+	Pattern string `json:"pattern"` // normalized pattern (e.g. "git commit")
+	Decision string `json:"decision"` // "allow" | "deny" | "allow_session"
+	TrustLevel int  `json:"trust_level"` // trust count at time of decision
+}
+
+// AppendPermissionEvent persists a permission decision for session resume.
+func (s *Store) AppendPermissionEvent(sessionID string, ev PermissionEvent) error {
+	import_json := fmt.Sprintf(`{"command":%q,"pattern":%q,"decision":%q,"trust_level":%d}`,
+		ev.Command, ev.Pattern, ev.Decision, ev.TrustLevel)
+	_, err := s.AppendEvent(sessionID, "permission", import_json, 0)
+	return err
+}
+
+// PhaseTransitionEvent records a phase change in the execution flow.
+type PhaseTransitionEvent struct {
+	From string `json:"from"` // "RESEARCH" | "EXECUTE" | "VERIFY"
+	To   string `json:"to"`
+	Reason string `json:"reason"` // "edit_made" | "verify_needed" | "done"
+}
+
+// AppendPhaseTransition persists a phase transition for session resume.
+func (s *Store) AppendPhaseTransition(sessionID string, ev PhaseTransitionEvent) error {
+	import_json := fmt.Sprintf(`{"from":%q,"to":%q,"reason":%q}`,
+		ev.From, ev.To, ev.Reason)
+	_, err := s.AppendEvent(sessionID, "phase_transition", import_json, 0)
+	return err
+}
+
+// TrustUpdateEvent records a trust level change for graduated trust.
+type TrustUpdateEvent struct {
+	Pattern string `json:"pattern"`
+	OldLevel int   `json:"old_level"`
+	NewLevel int   `json:"new_level"`
+	AutoApproved bool `json:"auto_approved"` // true if threshold reached
+}
+
+// AppendTrustUpdate persists a trust level change for session resume.
+func (s *Store) AppendTrustUpdate(sessionID string, ev TrustUpdateEvent) error {
+	import_json := fmt.Sprintf(`{"pattern":%q,"old_level":%d,"new_level":%d,"auto_approved":%v}`,
+		ev.Pattern, ev.OldLevel, ev.NewLevel, ev.AutoApproved)
+	_, err := s.AppendEvent(sessionID, "trust_update", import_json, 0)
+	return err
 }
