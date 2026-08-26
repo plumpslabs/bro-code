@@ -11,10 +11,9 @@ import (
 var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 
 // OpenCodeFreeModels is the static list of OpenCode free-tier models BroCode
-// surfaces through model discovery. BroCode is fully standalone: it talks to
-// the OpenCode OpenAI-compatible gateway over HTTP and never spawns the
-// opencode CLI binary — model availability comes from this list plus the
-// provider registry, not by shelling out to any external process.
+// surfaces through model discovery. Used as a FALLBACK when the live /models
+// fetch fails. The canonical source of truth is the gateway itself — this list
+// is kept in sync manually but the live fetch supersedes it at runtime.
 var OpenCodeFreeModels = []string{
 	"deepseek-v4-flash-free",
 	"hy3-free",
@@ -25,6 +24,30 @@ var OpenCodeFreeModels = []string{
 	"nemotron-3-ultra-free",
 	"nemotron-3.5-lightning-free",
 	"big-pickle",
+}
+
+// FilterOpenCodeFreeModels filters a raw model list from the OpenCode /models
+// endpoint down to only free-tier models. The gateway returns ALL models
+// (paid + free), so we must filter. Two heuristics:
+//  1. Models ending in "-free" are always free-tier.
+//  2. Models in the hardcoded OpenCodeFreeModels list are known free-tier.
+// This lets new free models appear automatically when the gateway adds them,
+// while excluding paid models like claude-opus-5 or gpt-5.6-sol.
+func FilterOpenCodeFreeModels(all []string) []string {
+	knownFree := make(map[string]bool, len(OpenCodeFreeModels))
+	for _, m := range OpenCodeFreeModels {
+		knownFree[m] = true
+	}
+	var out []string
+	for _, m := range all {
+		if knownFree[m] || strings.HasSuffix(m, "-free") {
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		return OpenCodeFreeModels // degraded: return hardcoded fallback
+	}
+	return out
 }
 
 // OpenCodeAdapter routes completion requests to the OpenCode free-model

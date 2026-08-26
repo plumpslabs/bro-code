@@ -3,8 +3,11 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -453,6 +456,77 @@ func describeVerification() string {
 		parts = append(parts, label)
 	}
 	return strings.Join(parts, " · ")
+}
+
+var errorLineRegex = regexp.MustCompile(`(?m)(?:^|[^\w/\\])([\w./\\-]+\.[a-zA-Z0-9]+)[:(](\d+)(?:[:,\s)]|$)`)
+
+// AttachErrorSourceSnippets extracts file and line references from compiler/linter error output,
+// reads surrounding code lines from disk, and appends a line-numbered source snippet so the model
+// sees the exact syntax error context without guessing.
+func AttachErrorSourceSnippets(repoRoot string, vetErr string, editedFiles []string) string {
+	if strings.TrimSpace(vetErr) == "" {
+		return vetErr
+	}
+	matches := errorLineRegex.FindAllStringSubmatch(vetErr, 5)
+	if len(matches) == 0 {
+		return vetErr
+	}
+
+	seen := make(map[string]bool)
+	var snippets strings.Builder
+
+	for _, m := range matches {
+		if len(m) < 3 {
+			continue
+		}
+		filePath := m[1]
+		lineNum, err := strconv.Atoi(m[2])
+		if err != nil || lineNum <= 0 {
+			continue
+		}
+		fullPath := filePath
+		if repoRoot != "" && !filepath.IsAbs(filePath) {
+			fullPath = filepath.Join(repoRoot, filePath)
+		}
+		key := fmt.Sprintf("%s:%d", fullPath, lineNum)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		data, rerr := os.ReadFile(fullPath)
+		if rerr != nil {
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		totalLines := len(lines)
+		if totalLines == 0 {
+			continue
+		}
+
+		start := lineNum - 8
+		if start < 1 {
+			start = 1
+		}
+		end := lineNum + 8
+		if end > totalLines {
+			end = totalLines
+		}
+
+		snippets.WriteString(fmt.Sprintf("\n\n--- Source Context for %s (lines %d-%d) ---\n", filePath, start, end))
+		for i := start; i <= end; i++ {
+			prefix := "  "
+			if i == lineNum {
+				prefix = "> " // Highlight failing line
+			}
+			snippets.WriteString(fmt.Sprintf("%s%4d: %s\n", prefix, i, lines[i-1]))
+		}
+	}
+
+	if snippets.Len() > 0 {
+		return vetErr + "\n\n📍 CODE CONTEXT AROUND ERROR:" + snippets.String()
+	}
+	return vetErr
 }
 
 

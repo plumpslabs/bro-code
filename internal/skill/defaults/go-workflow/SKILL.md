@@ -6,6 +6,12 @@ version: 1
 
 # Go Workflow
 
+| Task | Action |
+|---|---|
+| Go build/vet/test error | ✅ Load this skill |
+| Go file edit | ✅ Load this skill |
+| Non-Go project | ❌ Skip — universal contract |
+
 **Use ONLY when this is a Go codebase** (go.mod, go.work, or *.go files under cmd//internal/). If the repo has no go.mod, it is NOT a Go project — skip this skill and let the universal contract apply.
 
 ## Verification (source of truth)

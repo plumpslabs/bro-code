@@ -143,6 +143,13 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 		if nl := strings.Index(body, "\n"); nl >= 0 {
 			path, diff = body[:nl], body[nl+1:]
 		}
+		// Strip optional "#idx" sequence suffix (used internally as unique key)
+		// so the rendered card always shows the clean file path.
+		if hi := strings.LastIndex(path, "#"); hi >= 0 {
+			if _, err := fmt.Sscanf(path[hi+1:], "%d", new(int)); err == nil {
+				path = path[:hi]
+			}
+		}
 		diffBarStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
 		if width > 0 {
 			diffBarStyle = diffBarStyle.Width(width)
@@ -244,6 +251,11 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 	if strings.HasPrefix(msg, "REPORT:\n") {
 		content := strings.TrimPrefix(msg, "REPORT:\n")
 		return renderBorderedCard("📊 SESSION ACTIVITY & BENCHMARK REPORT", "(/report --json to export)", content, "", "37", width)
+	}
+
+	if strings.HasPrefix(msg, "MCP:\n") {
+		content := strings.TrimPrefix(msg, "MCP:\n")
+		return renderBorderedCard("🔌 MCP SERVERS & TOOLS", "(Model Context Protocol)", content, "", "33", width)
 	}
 
 	if strings.HasPrefix(msg, "UNDO:\n") {

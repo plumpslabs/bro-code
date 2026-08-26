@@ -230,6 +230,31 @@ func CumulativeChangeDiff(path string) string {
 	return strings.TrimRight(strings.TrimPrefix(raw, last.Path+"\n"), "\n")
 }
 
+// PerEditDiff returns the unified diff for a single specific change at the
+// given index in the changes slice. This produces a per-edit diff (from the
+// change's own Old→New) rather than a cumulative turn diff, so each edit_file
+// call gets its own distinct diff entry in the chat history.
+// Returns "" when idx is out of bounds.
+func PerEditDiff(idx int) (path, diff string) {
+	changeMu.Lock()
+	defer changeMu.Unlock()
+	if idx < 0 || idx >= len(changes) {
+		return "", ""
+	}
+	c := changes[idx]
+	var raw string
+	switch c.Action {
+	case "created":
+		raw = addPrefixLines(c.New, "+")
+	case "deleted":
+		raw = addPrefixLines(c.Old, "-")
+	default:
+		raw = unifiedDiff(c.Path, c.Old, c.New)
+	}
+	d := strings.TrimRight(strings.TrimPrefix(raw, c.Path+"\n"), "\n")
+	return c.Path, d
+}
+
 // FileChangesOneLine renders a single compact summary line for the activity
 // slot: total file count, net line deltas, and a per-file breakdown. Used for
 // the real-time "what just changed" HUD during a turn (P2 #2) — kept to one

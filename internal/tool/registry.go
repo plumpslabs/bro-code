@@ -276,6 +276,7 @@ func (r *Registry) Sandbox() *Sandbox {
 // are hard-blocked. write_file/edit_file are not gated — the PLANNER mode
 // guard already handles read-only enforcement.
 func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approved bool, reason string, err error) {
+	var gateContext string // human-readable context for the approval modal
 	// Read-only mode policy (executor-level enforcement): mutating tools and
 	// bash are hard-blocked before any sandbox/gate logic. This backstops the
 	// engine-loop guards so even a path that bypasses them cannot mutate.
@@ -330,8 +331,10 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 		// Only the commit action is gated (it mutates the repo). Read-only
 		// actions (status/diff/log/branch) always pass.
 		var args struct {
-			Action  string `json:"action"`
-			Message string `json:"message"`
+			Action  string   `json:"action"`
+			Message string   `json:"message"`
+			Files   []string `json:"files"`
+			All     bool     `json:"all"`
 		}
 		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 			return false, "invalid git arguments: " + err.Error(), nil
@@ -340,6 +343,28 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 			return true, "", nil
 		}
 		cmd = "git commit"
+		// Build human-readable context for the approval modal
+		var commitCtx strings.Builder
+		if args.Message != "" {
+			fmt.Fprintf(&commitCtx, "📝 Commit message: \"%s\"", args.Message)
+		}
+		if args.All {
+			if commitCtx.Len() > 0 {
+				commitCtx.WriteString("\n")
+			}
+			commitCtx.WriteString("📂 Staging: all modified + untracked files (git add -A)")
+		} else if len(args.Files) > 0 {
+			if commitCtx.Len() > 0 {
+				commitCtx.WriteString("\n")
+			}
+			fmt.Fprintf(&commitCtx, "📂 Files: %s", strings.Join(args.Files, ", "))
+		} else {
+			if commitCtx.Len() > 0 {
+				commitCtx.WriteString("\n")
+			}
+			commitCtx.WriteString("📂 Staging: already-staged files only")
+		}
+		gateContext = commitCtx.String()
 	default:
 		return true, "", nil
 	}
@@ -370,7 +395,7 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 		return true, "", nil // headless/unattended: proceed
 	}
 
-	return r.askViaModal(ctx, cmd)
+	return r.askViaModal(ctx, cmd, gateContext)
 }
 
 // gateFileAction asks the user for approval of a critical file mutation
@@ -401,11 +426,37 @@ func (r *Registry) gateFileAction(ctx context.Context, kind, path string) (bool,
 	return true, "", nil
 }
 
+// commandDescriptions maps common gated commands to human-readable explanations
+// so the approval modal shows WHAT will happen, not just the raw command.
+var commandDescriptions = map[string]string{
+	"git commit":      "📦 Commit staged changes to git history",
+	"git push":        "🚀 Push commits to remote repository",
+	"git reset":       "⏪ Undo recent commits (destructive)",
+	"git checkout":    "🔀 Switch branch or restore files",
+	"git branch -d":   "🗑️ Delete a branch",
+	"rm":              "🗑️ Delete files permanently",
+	"rm -rf":          "🗑️ Delete files/directories recursively (destructive)",
+	"npm install":     "📥 Install npm dependencies",
+	"yarn install":    "📥 Install yarn dependencies",
+	"pnpm install":    "📥 Install pnpm dependencies",
+	"pip install":     "📥 Install Python packages",
+	"go install":      "📥 Install Go binaries",
+	"cargo install":   "📥 Install Rust binaries",
+}
+
 // askViaModal presents a gated command to the user via the interactive modal
-// (Allow once / Always allow / Deny). Extracted so the file-action gate can
-// stay separate from the command gate.
-func (r *Registry) askViaModal(ctx context.Context, cmd string) (bool, string, error) {
+// (Allow once / Always allow / Deny). The optional context string adds a
+// human-readable explanation of WHAT will happen (e.g. commit message, files).
+func (r *Registry) askViaModal(ctx context.Context, cmd string, context ...string) (bool, string, error) {
 	question := "⚠️ BroCode wants to run a gated command:\n\n```\n" + cmd + "\n```"
+	// Add human-readable description if available
+	if desc, ok := commandDescriptions[cmd]; ok {
+		question = desc + "\n\n```\n" + cmd + "\n```"
+	}
+	// Add specific context (e.g. commit message, file list)
+	if len(context) > 0 && context[0] != "" {
+		question += "\n\n" + context[0]
+	}
 	// Soft guard: installing external linters mid-task is redundant with
 	// BroCode's built-in LSP (lsp_scan) and network-heavy. Warn + redirect
 	// instead of blocking — the user can still allow if they really want to.

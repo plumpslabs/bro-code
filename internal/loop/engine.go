@@ -633,15 +633,22 @@ func NewEngine(adapter provider.ProviderAdapter, tools *tool.Registry, ctxMgr *b
 		health:            newProviderHealth(),
 		fallbackPolicy:    FallbackAuto,
 		repoRoot:          tools.RepoRoot(),
-		planGateEnabled:   true,
+		planGateEnabled:   false,
 		tuning:            prompt.DefaultTuning(),
 		earlyExitOnError: true, // default: stop on mutating tool failure
 	}
 }
 
 func (e *Engine) SetMode(m string) {
-	e.mode = m
-	e.applyModePolicy()
+	if e.mode != m {
+		oldMode := e.mode
+		e.mode = m
+		e.sysPromptCached = "" // invalidate cached system prompt on mode switch
+		e.applyModePolicy()
+		if e.context != nil && oldMode != "" {
+			_ = e.context.AppendSystemNote(fmt.Sprintf("[SYSTEM NOTICE]: Active engine mode changed from %s to %s. You are now operating strictly in %s mode.", oldMode, m, m))
+		}
+	}
 }
 
 // applyModePolicy hard-enforces the mode at the tool executor level: PLANNER
@@ -1277,6 +1284,25 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			return "", err
 		}
 
+		// Automatic Mode Confusion Recovery: if the user is in BUILDER mode,
+		// but the model hallucinates that it is in PLANNER mode because of old
+		// messages in conversation history, correct it immediately and let it execute edits.
+		if len(resp.ToolCalls) == 0 && e.Mode() == "BUILDER" && iteration <= 2 && resp.Content != "" {
+			lower := strings.ToLower(resp.Content)
+			if strings.Contains(lower, "mode planner") &&
+				(strings.Contains(lower, "beralih ke mode builder") ||
+					strings.Contains(lower, "bisa membaca") ||
+					strings.Contains(lower, "read-only") ||
+					strings.Contains(lower, "hanya read-only") ||
+					strings.Contains(lower, "hanya bisa membaca")) {
+				e.context.InjectContextMessage("⚡ [MODE OVERRIDE]: You are ALREADY in BUILDER mode (🟢) with full permission to edit and write files. Do NOT ask the user to switch modes or output an unimplemented plan. Apply the requested code changes directly using 'edit_file' or 'write_file' NOW.")
+				if onUpdate != nil {
+					onUpdate(e.state, "⚡ Mode correction: model alerted that BUILDER mode is active")
+				}
+				continue
+			}
+		}
+
 		// TEXT RESPONSE LOOP DETECTION: when the model generates the same
 		// text response multiple times without calling any tools, inject a
 		// loop-break message. This catches the "I have enough context, I
@@ -1286,8 +1312,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 		// text response or preamble multiple times across rounds, inject a loop-break message.
 		if resp.Content != "" {
 			trimmed := strings.TrimSpace(resp.Content)
-			isRepeat := (trimmed == e.lastTextResponse)
-			if !isRepeat && len(trimmed) > 60 && len(e.lastTextResponse) > 60 {
+			// Two detection tiers: exact match (identical text) vs prefix match
+			// (80-char leading overlap). Exact repeats are more concerning and
+			// break earlier (2 occurrences); prefix matches are more lenient
+			// (3 occurrences) to avoid false positives on slightly different
+			// responses that happen to share a long preamble.
+			isExactRepeat := (trimmed == e.lastTextResponse)
+			isPrefixRepeat := false
+			if !isExactRepeat && len(trimmed) > 60 && len(e.lastTextResponse) > 60 {
 				prefixLen := 80
 				if len(trimmed) < prefixLen {
 					prefixLen = len(trimmed)
@@ -1296,14 +1328,20 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					prefixLen = len(e.lastTextResponse)
 				}
 				if trimmed[:prefixLen] == e.lastTextResponse[:prefixLen] {
-					isRepeat = true
+					isPrefixRepeat = true
 				}
 			}
 
-			if isRepeat {
+			if isExactRepeat || isPrefixRepeat {
 				e.lastTextResponseCount++
-				if e.lastTextResponseCount >= 2 {
-					// Model repeated same text 3+ times — force it to act or stop
+				// Exact match: break at 2 occurrences (count >= 1)
+				// Prefix match: break at 3 occurrences (count >= 2)
+				breakThreshold := 1
+				if isPrefixRepeat {
+					breakThreshold = 2
+				}
+				if e.lastTextResponseCount >= breakThreshold {
+					// Model repeated same text 2+ times — force it to act or stop
 					e.lastTextResponseCount = 0 // reset to avoid spam
 					var loopBreakMsg string
 					if e.Mode() == "PLANNER" {
@@ -1471,35 +1509,43 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				// 2. Per-File Inspection Cap: block repeated reads, greps, or searches on the same file
 				// to prevent the model from spinning on exploratory tools without making edits.
 				if tc.Name == "read_file" || tc.Name == "grep" || tc.Name == "search_code" {
-					var rArgs map[string]any
+					var rArgs struct {
+						Path      string `json:"path"`
+						File      string `json:"file"`
+						StartLine int    `json:"start_line"`
+						EndLine   int    `json:"end_line"`
+					}
 					if json.Unmarshal([]byte(tc.Arguments), &rArgs) == nil {
-						rPath, _ := rArgs["path"].(string)
+						rPath := rArgs.Path
 						if rPath == "" {
-							rPath, _ = rArgs["file"].(string)
+							rPath = rArgs.File
 						}
 						if rPath != "" {
-							e.readCounts[rPath]++
-							if e.readCounts[rPath] > 3 {
+							rangeKey := rPath
+							if rArgs.StartLine > 0 || rArgs.EndLine > 0 {
+								rangeKey = fmt.Sprintf("%s:%d-%d", rPath, rArgs.StartLine, rArgs.EndLine)
+							}
+							e.readCounts[rangeKey]++
+							if e.readCounts[rangeKey] > 2 || (rArgs.StartLine == 0 && rArgs.EndLine == 0 && e.readCounts[rPath] > 3) {
 								var blockedMsg string
 								if e.Mode() == "PLANNER" {
 									blockedMsg = fmt.Sprintf(
 										"🚫 [INSPECTION BLOCKED]: You have already examined '%s' %d times. "+
 										"You have sufficient context. Output your complete plan in text now.",
-										rPath, e.readCounts[rPath])
+										rPath, e.readCounts[rangeKey])
 								} else if e.Mode() == "MINER" {
 									blockedMsg = fmt.Sprintf(
 										"🚫 [INSPECTION BLOCKED]: You have already examined '%s' %d times. "+
 										"Output your extracted findings in text now.",
-										rPath, e.readCounts[rPath])
+										rPath, e.readCounts[rangeKey])
 								} else {
 									blockedMsg = fmt.Sprintf(
-										"🚫 [INSPECTION BLOCKED]: You have already examined '%s' %d times. "+
-										"You have sufficient context from this file. NOW use 'edit_file' or 'write_file' to implement your changes. "+
-										"Do NOT inspect this file again.",
-										rPath, e.readCounts[rPath])
+										"🚫 [INSPECTION BLOCKED]: You have already examined this code range in '%s' %d times. "+
+										"Use 'edit_file' or 'write_file' to implement your changes now.",
+										rPath, e.readCounts[rangeKey])
 								}
 								if onUpdate != nil {
-									onUpdate(e.state, "🚫 Inspection blocked — edit this file instead")
+									onUpdate(e.state, "🚫 Redundant inspection blocked — proceed to edit")
 								}
 								pending[i] = pendingTool{tc: tc, output: blockedMsg}
 								continue
@@ -1768,9 +1814,12 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					e.toolReminderSent = false
 					e.toolReminder2Sent = false
 					e.exploredStalls = 0
+					e.turnToolCallCounts = make(map[string]int) // file mutated: verification commands and re-reads are valid
+					e.lastToolCallRepeats = 0
 					if pending[i].tc.Name == "write_file" || pending[i].tc.Name == "edit_file" || pending[i].tc.Name == "edit_symbol" {
 						if p := extractToolPath(pending[i].tc.Arguments); p != "" {
 							e.editedFiles = append(e.editedFiles, p)
+							e.readCounts = make(map[string]int) // allow re-reading newly edited files
 							// Keep the session symbol index current after real edits.
 							if e.onFileEdited != nil && err == nil {
 								e.onFileEdited(p)
@@ -1865,27 +1914,28 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				}
 			}
 
-			// Live red/green diff entry per edit: surface a cumulative
-			// diff for every path that gained a NEW change this round directly via onUpdate
-			// and persist as a file_diff event so -c resume preserves exact chronological placement.
+			// Live per-edit diff entry: surface one distinct diff entry for EACH
+			// new change that appeared this round. Using the change index as the
+			// sequence key in the message prefix ensures every edit_file call
+			// creates its own separate entry in the chat history — even when
+			// the same file is edited multiple times.
 			if n := tool.ChangesLen(); n > e.lastChangeDiffEmit {
-				chs := tool.PeekChanges()[e.lastChangeDiffEmit:n]
-				e.lastChangeDiffEmit = n
-				seen := make(map[string]bool)
-				for _, ch := range chs {
-					if seen[ch.Path] {
+				for idx := e.lastChangeDiffEmit; idx < n; idx++ {
+					p, d := tool.PerEditDiff(idx)
+					if p == "" || d == "" {
 						continue
 					}
-					seen[ch.Path] = true
-					if d := tool.CumulativeChangeDiff(ch.Path); d != "" {
-						if onUpdate != nil {
-							onUpdate(e.state, "DIFF:\n"+ch.Path+"\n"+d)
-						}
-						if e.context != nil {
-							_ = e.context.AppendFileDiff(ch.Path, d)
-						}
+					// Sequence key: "DIFF:\n<path>#<idx>\n" so each edit gets its own
+					// chat bubble and never overwrites a prior edit to the same file.
+					seqKey := fmt.Sprintf("DIFF:\n%s#%d\n", p, idx)
+					if onUpdate != nil {
+						onUpdate(e.state, seqKey+d)
+					}
+					if e.context != nil {
+						_ = e.context.AppendFileDiff(p, d)
 					}
 				}
+				e.lastChangeDiffEmit = n
 			}
 
 			// Continuation rule: loop back to StateThinking automatically!
@@ -1934,7 +1984,8 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 					return msg, nil
 				}
-				msg := "Level 1 verification check failed:\n" + vetErr + "\nPlease fix the issues."
+				enrichedErr := AttachErrorSourceSnippets(e.repoRoot, vetErr, e.editedFiles)
+				msg := "Level 1 verification check failed:\n" + enrichedErr + "\nPlease fix the issues."
 				if e.hasPassedVerification {
 					msg += "\n\n🚨 [REGRESSION OBLIGATION VIOLATION]: The verification suite previously passed in this session, but your latest changes broke it. You must resolve this regression before finishing."
 				}
@@ -2224,6 +2275,17 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 		ActivePlan:    activePlanStr,
 		AgentPrompt:   e.agentPrompt,
 		Tuning:        e.tuning,
+	}
+	// Inject session edit summary: when files have been changed in this session
+	// (e.g. BUILDER edits), surface the compact list so MINER/PLANNER modes
+	// can reference prior changes without re-scanning. Skipped for BUILDER
+	// mode since it already knows what it edited.
+	if currentMode != "BUILDER" && tool.ChangesLen() > 0 {
+		var parts []string
+		for _, ch := range tool.PeekChanges() {
+			parts = append(parts, fmt.Sprintf("%s (%s)", ch.Path, ch.Action))
+		}
+		in.SessionEditSummary = strings.Join(parts, ", ")
 	}
 	if e.mem != nil {
 		// Adaptive warm-start budget (memory/adaptive caps): before injecting

@@ -134,8 +134,8 @@ func TestEnsureDefaultsVersionTracking(t *testing.T) {
 	goSkill := embeddedSkill(t, "go-workflow")
 
 	// Fresh install: baseline recorded with the embedded version + hash.
-	if n := EnsureDefaultsInstalled(root); n != 8 {
-		t.Fatalf("expected 8 default skills installed, got %d", n)
+	if n := EnsureDefaultsInstalled(root); n != 9 {
+		t.Fatalf("expected 9 default skills installed, got %d", n)
 	}
 	st := loadVersionState(skillDir)
 	if st.Versions["go-workflow"] != 1 || st.Hashes["go-workflow"] != sha256Hex([]byte(goSkill.Content)) {

@@ -84,6 +84,10 @@ type Input struct {
 	ActivePlan string
 	// AgentPrompt carries custom instructions from an active user-defined CustomAgent.
 	AgentPrompt string
+	// SessionEditSummary lists files changed in the current session so modes
+	// like MINER can reference prior edits without re-scanning. Populated by
+	// the engine when tool.ChangesLen() > 0 at turn start.
+	SessionEditSummary string
 	// Tuning carries the runtime surface (block toggles, rule toggles, skill
 	// catalog budgets). Nil falls back to DefaultTuning.
 	Tuning *Tuning
@@ -149,6 +153,8 @@ func blocks(_ *Input) []Block {
 		{Name: "preflight_autofix", Render: renderPreflightAuto},
 		{Name: "active_plan", Render: renderActivePlan},
 		{Name: "plan_mode", Render: renderPlanMode},
+		// Session edit summary: tells MINER/PLANNER about files changed this turn.
+		{Name: "session_edits", Render: renderSessionEdits},
 		// L0 — custom agent instructions (if active).
 		{Name: "custom_agent", Render: renderCustomAgent},
 		// L0 — universal contract: mode header + tunable mode rules.
@@ -277,4 +283,11 @@ func renderCustomAgent(in *Input) string {
 		return ""
 	}
 	return "\n\n### 🤖 CUSTOM AGENT SPECIFICATION & DIRECTIVES:\n" + strings.TrimSpace(in.AgentPrompt)
+}
+
+func renderSessionEdits(in *Input) string {
+	if strings.TrimSpace(in.SessionEditSummary) == "" {
+		return ""
+	}
+	return "\n📝 SESSION EDITS: " + strings.TrimSpace(in.SessionEditSummary) + "\n"
 }

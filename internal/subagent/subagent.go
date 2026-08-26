@@ -77,10 +77,10 @@ type SubAgent struct {
 // estimated cost it consumed, so callers (the swarm, /cost breakdowns) can
 // attribute usage to a specific phase instead of lumping everything together.
 type RunMetrics struct {
-	Answer       string
-	Tokens       int
-	Cost         float64
-	Compactions  int
+	Answer      string
+	Tokens      int
+	Cost        float64
+	Compactions int
 }
 
 // runOneResult executes one sub-agent in its own isolated loop and returns the
@@ -537,7 +537,8 @@ func (sm *ScoutManager) Drain() []string {
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("### Scout %s — %s\n", id, truncate(j.Task, 150)))
 		if j.Err != nil {
-			sb.WriteString("**Status:** FAILED\n" + j.Err.Error())
+			sb.WriteString("**Status:** FAILED\n")
+			sb.WriteString(j.Err.Error())
 		} else {
 			sb.WriteString("**Status:** DONE\n" + j.Result)
 		}

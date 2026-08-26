@@ -45,6 +45,7 @@ var BuiltinSlashCommands = []AutocompleteItem{
 	{Value: "/memory", Label: "/memory", Desc: "View learned project knowledge & gotchas"},
 	{Value: "/sessions", Label: "/sessions", Desc: "Switch / manage session history"},
 	{Value: "/models", Label: "/models", Desc: "Select active AI model"},
+	{Value: "/model", Label: "/model", Desc: "Switch model directly (/model <name>)"},
 	{Value: "/connect", Label: "/connect", Desc: "Configure providers & API keys"},
 	{Value: "/cost", Label: "/cost", Desc: "Token statistics & estimated spend (USD & IDR)"},
 	{Value: "/lsp", Label: "/lsp", Desc: "Language Server Protocol status"},
@@ -64,6 +65,11 @@ var BuiltinSlashCommands = []AutocompleteItem{
 	{Value: "/worktree", Label: "/worktree", Desc: "Git worktree sandboxing for isolated agent experiments"},
 	{Value: "/update", Label: "/update", Desc: "Check and perform autonomous in-place self-update"},
 	{Value: "/debug-context", Label: "/debug-context", Desc: "Dump active context tokens"},
+	{Value: "/agents", Label: "/agents", Desc: "List active subagents & their status"},
+	{Value: "/agent", Label: "/agent", Desc: "Control a subagent (/agent <id> stop|status)"},
+	{Value: "/mcp", Label: "/mcp", Desc: "Show MCP server status & registered tools"},
+	{Value: "/mcp-reload", Label: "/mcp-reload", Desc: "Hot-reload all MCP server configurations"},
+	{Value: "/trace", Label: "/trace", Desc: "Show provenance trace for last turn's output"},
 }
 
 // DetectAutocomplete inspects the current prompt input text and cursor position

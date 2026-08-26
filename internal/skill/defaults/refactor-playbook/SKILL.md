@@ -6,6 +6,12 @@ version: 1
 
 # Refactor Playbook
 
+| Task | Action |
+|---|---|
+| Rename symbol / extract helper | ✅ Load this skill |
+| Restructure packages | ✅ Load this skill |
+| Add feature / fix bug | ❌ Skip — universal contract |
+
 **Use ONLY when the task is a refactor**: renaming symbols, extracting helpers, restructuring packages, or simplifying logic. Never for adding features or fixing bugs — those follow the universal contract.
 
 ## Rules of the game
@@ -21,5 +27,7 @@ version: 1
 - When moving code across packages, update the import graph in the same pass and verify per move.
 
 ## Verification per stage
-- After each stage: `go build`/`tsc --noEmit` (whichever applies) + the focused tests.
+- After each stage: run the project's own build/compile command + the focused tests.
+  - Go: `go build ./...` | TS/JS: `tsc --noEmit` | Python: `python -m py_compile` | Rust: `cargo check` | PHP: `php -l` | Java: `javac`/`mvn compile`
+  - Or simply use `lsp_scan` — it covers the project's language automatically.
 - Stop if the same error persists across attempts — change approach, do not repeat the fix.

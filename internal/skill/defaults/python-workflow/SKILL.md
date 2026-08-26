@@ -6,6 +6,12 @@ version: 1
 
 # Python Workflow
 
+| Task | Action |
+|---|---|
+| Python test/type error | ✅ Load this skill |
+| Python file edit | ✅ Load this skill |
+| Non-Python project | ❌ Skip — universal contract |
+
 **Use ONLY when this is a Python codebase** (pyproject.toml, setup.py, setup.cfg, requirements.txt, or *.py sources). If none exist, it is NOT a Python project — skip this skill and let the universal contract apply.
 
 ## First: detect the toolchain

@@ -6,6 +6,12 @@ version: 1
 
 # TypeScript / JavaScript Workflow
 
+| Task | Action |
+|---|---|
+| TS/JS type error or build failure | ✅ Load this skill |
+| TS/JS file edit | ✅ Load this skill |
+| Non-TS/JS project | ❌ Skip — universal contract |
+
 **Use ONLY when this is a TypeScript/JavaScript codebase** (package.json with *.ts/*.tsx/*.js sources). If the repo has no package.json, it is NOT a TS/JS project — skip this skill and let the universal contract apply.
 
 ## First: detect the package manager

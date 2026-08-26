@@ -6,6 +6,12 @@ version: 1
 
 # Rust Workflow
 
+| Task | Action |
+|---|---|
+| Rust build/test/clippy error | ✅ Load this skill |
+| Rust file edit | ✅ Load this skill |
+| Non-Rust project | ❌ Skip — universal contract |
+
 **Use ONLY when this is a Rust codebase** (Cargo.toml at the root or workspace). If the repo has no Cargo.toml, it is NOT a Rust project — skip this skill and let the universal contract apply.
 
 ## Verification (source of truth)

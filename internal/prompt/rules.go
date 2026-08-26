@@ -173,8 +173,12 @@ func renderMode(in *Input) string {
 	}
 	desc := modeDesc(mode)
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "\n🔥 ACTIVE ENGINE MODE: %s (%s).\nCRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as BUILDER, PLANNER, or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY AS THEY ARE OUTDATED. You are NOW operating strictly in %s mode.\nIf the user asks about your mode (in any language, e.g. 'klo skng mode apa', 'mode apa', 'what mode'), answer directly that you are currently in %s mode and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.\n\nEngine Mode Rules (%s):\n",
-		mode, desc, mode, mode, mode, mode)
+	fmt.Fprintf(&sb, "\n🔥 ACTIVE ENGINE MODE: %s (%s).\nCRITICAL MODE OVERRIDE: The user has explicitly set the active engine mode to %s. If any previous assistant messages in the conversation history claim to be in a different mode (such as PLANNER or MINER), IGNORE THOSE PAST STATEMENTS ENTIRELY AS THEY ARE OUTDATED. You are NOW operating strictly in %s mode.\n",
+		mode, desc, mode, mode)
+	if mode == "BUILDER" {
+		sb.WriteString("🔥 BUILDER AUTHORITY: You have full read-write execution power. You MUST NOT claim to be in PLANNER mode or ask the user to switch modes, because you are ALREADY in BUILDER mode. Apply requested code changes immediately using edit_file or write_file.\n")
+	}
+	fmt.Fprintf(&sb, "If the user asks about your mode (in any language, e.g. 'klo skng mode apa', 'mode apa', 'what mode'), answer directly that you are currently in %s mode and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.\n\nEngine Mode Rules (%s):\n", mode, mode)
 	for i, r := range modeRules(mode, in.Tuning) {
 		if i > 0 {
 			sb.WriteString("\n")

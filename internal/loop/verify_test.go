@@ -272,3 +272,25 @@ func TestPlanVerificationSkipsHeavyDirs(t *testing.T) {
 		t.Errorf("node_modules must be skipped, got %+v", cmds)
 	}
 }
+
+func TestAttachErrorSourceSnippets(t *testing.T) {
+	dir := t.TempDir()
+	code := "line 1\nline 2\nline 3\nline 4\nline 5\nconst x = {\n  broken: true\n}\nline 9\nline 10\n"
+	targetFile := filepath.Join(dir, "src", "Layout.tsx")
+	if err := os.MkdirAll(filepath.Dir(targetFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetFile, []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	vetErr := "src/Layout.tsx:6:11: error TS1005: ',' expected."
+	enriched := AttachErrorSourceSnippets(dir, vetErr, []string{"src/Layout.tsx"})
+
+	if !strings.Contains(enriched, "CODE CONTEXT AROUND ERROR") {
+		t.Errorf("expected enriched source context, got:\n%s", enriched)
+	}
+	if !strings.Contains(enriched, ">    6: const x = {") {
+		t.Errorf("expected failing line highlight (> 6:), got:\n%s", enriched)
+	}
+}

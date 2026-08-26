@@ -29,7 +29,11 @@ func (m *Model) reloadMCP() {
 		m.tools.Register(mt)
 	}
 	m.rebuildEngine()
-	m.appendNote(m.mcpStatus())
+	// Only append to chat history when the MCP modal is NOT open;
+	// the modal has its own inline status display.
+	if !m.showMCP {
+		m.appendNote(m.mcpStatus())
+	}
 }
 
 // mcpNames returns the sorted configured server names (empty when nil).
@@ -135,12 +139,12 @@ func (m *Model) mcpStatus() string {
 	}
 	names := m.mcpMgr.ServerNames()
 	if len(names) == 0 {
-		return "ℹ️ No MCP servers configured.\n\nCreate a `.mcp.json` in the project root or `~/.config/brocode/mcp.json` (same format as Claude/Cursor):\n```json\n{\"mcpServers\": {\"my-server\": {\"command\": \"npx\", \"args\": [\"-y\", \"pkg\"]}}}\n```\nThen run `/mcp-reload` to connect."
+		return mcpEmptyState()
 	}
 
 	errs := m.mcpMgr.Errors()
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🔌 MCP: %d server(s), %d tool(s)\n", len(names), len(m.mcpMgr.Tools())))
+	sb.WriteString(fmt.Sprintf("%d server(s), %d tool(s)\n", len(names), len(m.mcpMgr.Tools())))
 	toolNames := make(map[string][]string)
 	for _, t := range m.mcpMgr.Tools() {
 		toolNames[t.Server()] = append(toolNames[t.Server()], t.ToolName())
@@ -154,7 +158,24 @@ func (m *Model) mcpStatus() string {
 		sort.Strings(ts)
 		sb.WriteString(fmt.Sprintf("✅ %s — %d tool(s): %s\n", n, len(ts), strings.Join(ts, ", ")))
 	}
-	return strings.TrimSpace(sb.String())
+	return "MCP:\n" + strings.TrimSpace(sb.String())
+}
+
+// mcpEmptyState returns the formatted empty-state message for when no MCP
+// servers are configured. Separated from mcpStatus to avoid Go string
+// escaping issues with the JSON code block.
+func mcpEmptyState() string {
+	var sb strings.Builder
+	sb.WriteString("ℹ️  No MCP servers configured yet.\n\n")
+	sb.WriteString("**To add a server:**\n\n")
+	sb.WriteString("1. Create `.mcp.json` in project root (or `~/.config/brocode/mcp.json`)\n")
+	sb.WriteString("2. Add your server (same format as Claude/Cursor):\n\n")
+	sb.WriteString("```json\n")
+	sb.WriteString(`{"mcpServers": {"my-server": {"command": "npx", "args": ["-y", "pkg"]}}}` + "\n")
+	sb.WriteString("```\n\n")
+	sb.WriteString("3. Run `/mcp-reload` to connect\n\n")
+	sb.WriteString("[a] add server · [r] reload · ESC close")
+	return "MCP:\n" + sb.String()
 }
 
 // mcpServerDetail renders one server's full status (used by ENTER in the MCP
@@ -227,10 +248,17 @@ func (m *Model) renderMCPModal() string {
 		sb.WriteString("\n[y] confirm delete · [n / ESC] cancel")
 
 	case len(names) == 0:
-		// Empty state: nothing configured, show the way in.
-		sb.WriteString("\nNo MCP servers configured.\n")
-		sb.WriteString("Press [a] to add one — or configure " + mcp.ProjectMCPPath() + " directly.\n")
-		sb.WriteString("\n[a] add server · [r] reload · ESC close")
+		// Empty state: use the same formatted content as mcpEmptyState()
+		// but without the MCP:\n prefix (modal handles its own header).
+		sb.WriteString("\nℹ️  No MCP servers configured yet.\n\n")
+		sb.WriteString("**To add a server:**\n\n")
+		sb.WriteString("1. Create `.mcp.json` in project root (or `~/.config/brocode/mcp.json`)\n")
+		sb.WriteString("2. Add your server (same format as Claude/Cursor):\n\n")
+		sb.WriteString("```json\n")
+		sb.WriteString(`{"mcpServers": {"my-server": {"command": "npx", "args": ["-y", "pkg"]}}}` + "\n")
+		sb.WriteString("```\n\n")
+		sb.WriteString("3. Run `/mcp-reload` to connect\n\n")
+		sb.WriteString("[a] add server · [r] reload · ESC close")
 
 	default:
 		errs := m.mcpMgr.Errors()

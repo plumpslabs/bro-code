@@ -6,6 +6,13 @@ version: 1
 
 # Migration Playbook
 
+| Task | Action |
+|---|---|
+| Schema / data migration | ✅ Load this skill |
+| Framework upgrade | ✅ Load this skill |
+| API reshape / package move | ✅ Load this skill |
+| Ordinary edit / bug fix | ❌ Skip — universal contract |
+
 **Use ONLY when the task is a migration**: schema/data changes, framework upgrades, API reshapes, or moving code across packages. For ordinary edits or bug fixes, skip this skill.
 
 ## Before touching anything

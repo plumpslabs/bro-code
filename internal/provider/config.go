@@ -49,6 +49,9 @@ type AppConfig struct {
 	SearchKey      string `json:"search_key,omitempty"`      // Tavily or Exa API key
 	SearchProvider string `json:"search_provider,omitempty"` // "tavily" or "exa"
 	Context7Key    string `json:"context7_key,omitempty"`    // Context7 Documentation API key
+	// TurnTimeout overrides the default 10-minute turn watchdog timeout.
+	// Accepts Go duration strings like "5m", "10m", "15m", "30m".
+	TurnTimeout string `json:"turn_timeout,omitempty"`
 }
 
 // GlobalConfigPath returns the user's global config file path (machine-written

@@ -6,6 +6,12 @@ version: 1
 
 # Locale JSON Merge
 
+| Task | Action |
+|---|---|
+| Edit translation/locale JSON | ✅ Load this skill |
+| Merge new i18n keys | ✅ Load this skill |
+| General code edits | ❌ Skip — universal contract |
+
 **Use ONLY when editing translation/locale JSON files** (e.g. locales/id.json, en.json) or nested JSON config — never for general code edits.
 
 ## Before editing

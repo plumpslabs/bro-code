@@ -460,7 +460,7 @@ func (m *Model) buildLogChrome() (string, int) {
 	}
 	// Compact token/$ HUD: window usage, per-turn tokens+$ and per-session $.
 	// Short labels keep the footer on one line even on narrow terminals.
-	tokensStr := fmt.Sprintf("%s/%s", provider.FormatTokens(m.context.TotalTokens()), provider.FormatTokens(m.context.MaxWindow()))
+	tokensStr := fmt.Sprintf("%s/%s", provider.FormatTokens(m.context.TotalContextTokens()), provider.FormatTokens(m.context.MaxWindow()))
 	if m.engine != nil {
 		if tk, c := m.engine.TurnTokens(), m.engine.CostUSD(); tk > 0 || c > 0 {
 			tokensStr += fmt.Sprintf(" · T:%s $%.4f", provider.FormatTokens(tk), c)

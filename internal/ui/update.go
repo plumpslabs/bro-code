@@ -16,6 +16,12 @@ import (
 	"github.com/plumpslabs/bro-code/internal/version"
 )
 
+// turnTimeout is the maximum wall-clock duration a single turn may run before
+// the watchdog cancels it and recovers the UI. This prevents the spinner
+// from spinning forever when a stream silently drops (TCP reset, provider
+// hang) or the engine gets stuck between tool iterations.
+const turnTimeout = 10 * time.Minute
+
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -58,6 +64,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so BroCode consumes 0.0% CPU and zero battery while waiting for input.
 		if !m.turnRunning && (m.status == "Ready" || m.status == "Failed") {
 			return m, nil
+		}
+		// Turn watchdog: if a turn has been running for too long without
+		// completing (e.g. silent TCP drop, provider hang, stuck in a loop
+		// between tool calls), auto-cancel it so the UI recovers.
+		if m.turnRunning && !m.turnStart.IsZero() {
+			timeout := m.effectiveTurnTimeout()
+			if time.Since(m.turnStart) > timeout {
+				if m.cancelTurn != nil {
+					m.cancelTurn()
+				}
+				m.turnRunning = false
+				m.streaming = false
+				m.pendingStream = ""
+				m.activity = nil
+				m.status = "Ready"
+				m.appendMessages(fmt.Sprintf("⚠️ Turn timed out after %s — auto-recovered", timeout))
+				// Drain any pending queued turns that were waiting on this one.
+				if cmd := m.drainPendingQueue(); cmd != nil {
+					return m, cmd
+				}
+				return m, tickCmd()
+			}
 		}
 		// While any modal is open the content is static — keep ticker alive without advancing frames.
 		if m.showAsk || m.showModels || m.showConnect || m.showDebug || m.showSessions || m.showMCP {
@@ -253,23 +281,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// drains even after an interrupt/error — a queued message was
 		// explicitly requested and must not be silently dropped.
 		if len(m.pendingQueue) > 0 {
-			next := m.pendingQueue[0]
-			m.pendingQueue = m.pendingQueue[1:]
-			// The first item just ran; shift the queue selection onto the new
-			// head (or clamp) so Alt+K management stays on a valid row.
-			if m.queueSel > 0 {
-				m.queueSel--
-			}
-			if len(m.pendingQueue) == 0 {
-				m.queueMode = false
-				m.queueSel = 0
-			}
-			if next.Mode != "" {
-				m.mode = next.Mode
-				m.engine.SetMode(m.mode)
-				m.persistMode()
-			}
-			return m.startTurn(next.Text)
+			return m, m.drainPendingQueue()
 		}
 		// Queue fully drained — leave queue management mode if the last item
 		// was deleted by the user rather than drained.
@@ -1308,4 +1320,42 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// drainPendingQueue fires the next queued prompt, if any, after a turn
+// completes or is interrupted. This is the single exit point for queue
+// drain — called both from the normal turnResultMsg path and from the
+// watchdog timeout path. Returns the tea.Cmd from startTurn, or nil if
+// the queue is empty.
+func (m *Model) drainPendingQueue() tea.Cmd {
+	if len(m.pendingQueue) == 0 {
+		return nil
+	}
+	next := m.pendingQueue[0]
+	m.pendingQueue = m.pendingQueue[1:]
+	if m.queueSel > 0 {
+		m.queueSel--
+	}
+	if len(m.pendingQueue) == 0 {
+		m.queueMode = false
+		m.queueSel = 0
+	}
+	if next.Mode != "" {
+		m.mode = next.Mode
+		m.engine.SetMode(m.mode)
+		m.persistMode()
+	}
+	_, cmd := m.startTurn(next.Text)
+	return cmd
+}
+
+// effectiveTurnTimeout returns the configured turn timeout, falling back to
+// the default constant when the config value is empty or unparseable.
+func (m *Model) effectiveTurnTimeout() time.Duration {
+	if m.cfg.TurnTimeout != "" {
+		if d, err := time.ParseDuration(m.cfg.TurnTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return turnTimeout
 }

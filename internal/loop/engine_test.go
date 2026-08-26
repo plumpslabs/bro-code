@@ -313,6 +313,59 @@ func TestPreambleRepetitionLoopDetectionInBuilderMode(t *testing.T) {
 	}
 }
 
+type modeConfusionAdapter struct {
+	calls    int
+	target   string
+}
+
+func (a *modeConfusionAdapter) Complete(ctx context.Context, req provider.CompletionRequest) (*provider.CompletionResponse, error) {
+	a.calls++
+	if a.calls == 1 {
+		// First round: model hallucinates that it's in PLANNER mode
+		return &provider.CompletionResponse{
+			Content: "Maaf, saya sedang dalam mode PLANNER yang hanya bisa membaca. Saya perlu beralih ke mode BUILDER untuk melakukan perubahan.",
+		}, nil
+	}
+	// Second round: after engine corrects it, model applies write_file
+	return &provider.CompletionResponse{
+		ToolCalls: []provider.ToolCall{
+			{ID: "edit1", Name: "write_file", Arguments: fmt.Sprintf(`{"path":%q,"content":"// updated"}`, a.target)},
+		},
+	}, nil
+}
+
+func TestBuilderModeConfusionAutoRecovery(t *testing.T) {
+	tools := tool.NewRegistry()
+	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)
+
+	tmp := filepath.Join(t.TempDir(), "Layout.tsx")
+	adapter := &modeConfusionAdapter{target: tmp}
+	engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+	engine.SetMode("BUILDER")
+
+	_, err := engine.RunTurn(context.Background(), "terapkan perubahan di Layout.tsx", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+
+	msgs := ctxMgr.Messages()
+	foundOverride := false
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "MODE OVERRIDE") {
+			foundOverride = true
+			break
+		}
+	}
+
+	if !foundOverride {
+		t.Errorf("expected MODE OVERRIDE message when model falsely claims to be in PLANNER mode while BUILDER mode is active")
+	}
+
+	if adapter.calls < 2 {
+		t.Errorf("expected engine to prompt model again after mode correction, got %d calls", adapter.calls)
+	}
+}
+
 func TestUsageRecorderCalledAtTurnEnd(t *testing.T) {
 	tools := tool.NewRegistry()
 	ctxMgr := bcontext.NewManager("test_sess", nil, 128000)

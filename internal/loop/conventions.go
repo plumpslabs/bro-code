@@ -98,9 +98,9 @@ type conventionIssue struct {
 	Message string
 }
 
-// checkFileConventions scans a single file for convention issues. It is
-// deterministic and cheap (regex over content) — safe to run after every edit.
-func checkFileConventions(path string) []conventionIssue {
+// checkFileConventionsWithOld scans a single file for convention issues, skipping any
+// lines that already existed verbatim in oldContent so pre-existing legacy code is never flagged.
+func checkFileConventionsWithOld(path string, oldContent string) []conventionIssue {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -110,8 +110,19 @@ func checkFileConventions(path string) []conventionIssue {
 	lines := strings.Split(content, "\n")
 	patterns := patternsByExt[ext]
 
+	existingLines := make(map[string]bool)
+	if oldContent != "" {
+		for _, ol := range strings.Split(oldContent, "\n") {
+			existingLines[strings.TrimSpace(ol)] = true
+		}
+	}
+
 	var issues []conventionIssue
 	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if existingLines[trimmed] {
+			continue // skip pre-existing untouched legacy lines
+		}
 		for _, p := range patterns {
 			if p.ignoreRe != nil && p.ignoreRe.MatchString(line) {
 				continue
@@ -127,7 +138,16 @@ func checkFileConventions(path string) []conventionIssue {
 			}
 		}
 	}
+
+	// Structural checks: function length, file length, param count, nesting, TODO debt
+	issues = append(issues, structuralChecks(path, oldContent, lines)...)
+
 	return issues
+}
+
+// checkFileConventions scans a single file for convention issues.
+func checkFileConventions(path string) []conventionIssue {
+	return checkFileConventionsWithOld(path, "")
 }
 
 // ── language check builders (curated subset of matcha's registry) ────────
@@ -407,8 +427,17 @@ func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 	}
 	e.reviewPasses++
 	var issues []conventionIssue
+
+	// Build map of path -> old content to ignore pre-existing legacy issues
+	oldContents := make(map[string]string)
+	for _, c := range tool.PeekChanges() {
+		if _, ok := oldContents[c.Path]; !ok {
+			oldContents[c.Path] = c.Old
+		}
+	}
+
 	for _, p := range e.editedFiles {
-		issues = append(issues, checkFileConventions(p)...)
+		issues = append(issues, checkFileConventionsWithOld(p, oldContents[p])...)
 	}
 	var knownSyms map[string]map[string]bool
 	if e.symbolsProvider != nil {
@@ -506,15 +535,19 @@ func (e *Engine) llmReviewEditedFiles(ctx context.Context, angle reviewAngle) st
 	}
 	var sb strings.Builder
 	for _, p := range files {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
+		if diff := tool.CumulativeChangeDiff(p); diff != "" {
+			fmt.Fprintf(&sb, "=== DIFF FOR %s ===\n%s\n", p, diff)
+		} else {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			lines := strings.Split(string(data), "\n")
+			if len(lines) > 120 {
+				lines = lines[:120]
+			}
+			fmt.Fprintf(&sb, "=== %s ===\n%s\n", p, strings.Join(lines, "\n"))
 		}
-		lines := strings.Split(string(data), "\n")
-		if len(lines) > 120 {
-			lines = lines[:120]
-		}
-		fmt.Fprintf(&sb, "=== %s ===\n%s\n", p, strings.Join(lines, "\n"))
 	}
 	if sb.Len() == 0 {
 		return ""
@@ -525,16 +558,16 @@ func (e *Engine) llmReviewEditedFiles(ctx context.Context, angle reviewAngle) st
 	switch angle {
 	case llmReviewSecurity:
 		temperature = 0.3
-		prompt = `You are a senior security & robustness reviewer. Review ONLY the edited files below from a SECOND, different angle — security, edge cases, and regression risk:
+		prompt = `You are a senior security & robustness reviewer. Review ONLY the newly changed code/diff below from a SECOND, different angle — security, edge cases, and regression risk. Do NOT flag pre-existing lines outside the change:
 - Security: user input reaching SQL/shell/HTML/deserialization sinks; missing authz/validation on the new code path; secrets logged or committed; unsafe eval/exec of untrusted data
 - Edge cases: empty input, nil/zero values, off-by-one, race between check and use (TOCTOU), boundary loops, overflow
 - Performance regression: the change introducing quadratic behavior, repeated allocations in loops, blocking calls on hot paths
 - Cross-module side effects: the change breaking callers outside these files (signature changes, removed exports, changed return semantics)
-Be terse. Format: one line per issue as "file:line — problem → fix". If the code is clean on this angle too, reply exactly: CLEAN
+Be terse. Format: one line per issue as "file:line — problem → fix". If the changes are clean, reply exactly: CLEAN
 
 ` + sb.String()
 	default: // llmReviewCorrectness
-		prompt = `You are a senior code reviewer. Review ONLY the edited files below for real, high-signal problems a senior engineer would catch before merging:
+		prompt = `You are a senior code reviewer. Review ONLY the newly changed code/diff below for real, high-signal problems introduced in this change. Do NOT flag pre-existing lines outside the change:
 - N+1 query patterns (DB query inside a loop — flag the loop and suggest batch loading)
 - SQL: unbounded SELECT *, missing WHERE on updates/deletes, string-built queries (injection risk)
 - Error handling: swallowed errors, empty catch, ignoring return errors
@@ -542,7 +575,7 @@ Be terse. Format: one line per issue as "file:line — problem → fix". If the 
 - Reuse: reimplementing something that likely exists
 - Security: user input concatenated into SQL/shell/HTML
 - Obvious performance traps (quadratic loops, repeated work in loops)
-Be terse. Format: one line per issue as "file:line — problem → fix". If the code is clean, reply exactly: CLEAN
+Be terse. Format: one line per issue as "file:line — problem → fix". If the changes are clean, reply exactly: CLEAN
 
 ` + sb.String()
 	}
@@ -598,6 +631,229 @@ func formatConventionIssues(issues []conventionIssue) string {
 		res = res[:1500] + "… (review output capped)"
 	}
 	return res
+}
+
+// ── structural checks (file-level, not per-line regex) ───────────────
+
+const (
+	maxFuncLines   = 50  // warn when a function body exceeds this
+	maxFileLines   = 300 // warn when total file lines exceed this
+	maxParams      = 5   // warn when function signature has too many params
+	maxNestingDepth = 4  // warn when nesting exceeds this
+	maxTODOsPerFile = 5  // warn when TODO/FIXME count exceeds this
+)
+
+// structuralChecks runs file-level analysis that single-line regex cannot
+// catch: function length, file length, parameter count, nesting depth,
+// and TODO debt concentration. Only flags lines in NEWLY ADDED content
+// (lines not in oldContent) to avoid spamming legacy code.
+func structuralChecks(path string, oldContent string, lines []string) []conventionIssue {
+	ext := strings.ToLower(filepath.Ext(path))
+	// Only run structural checks on languages we have function-detection for.
+	if ext != ".go" && ext != ".js" && ext != ".ts" && ext != ".jsx" && ext != ".tsx" &&
+			ext != ".py" && ext != ".rs" && ext != ".java" && ext != ".cs" &&
+			ext != ".php" && ext != ".rb" && ext != ".swift" && ext != ".kt" && ext != ".dart" {
+		return nil
+	}
+
+	existingLines := make(map[int]bool)
+	if oldContent != "" {
+		for i, ol := range strings.Split(oldContent, "\n") {
+			existingLines[i] = strings.TrimSpace(ol) != ""
+		}
+	}
+
+	var issues []conventionIssue
+
+	// File length check
+	if len(lines) > maxFileLines {
+		issues = append(issues, conventionIssue{
+			Path:    path,
+			Kind:    "file-length",
+			Sev:     sevWarning,
+			Message: fmt.Sprintf("file has %d lines (threshold %d) — consider splitting into smaller modules", len(lines), maxFileLines),
+		})
+	}
+
+	// TODO/FIXME debt concentration
+	todoCount := 0
+	for _, line := range lines {
+		if re := regexp.MustCompile(`(?i)\b(TODO|FIXME|HACK|XXX)\b`); re.MatchString(line) {
+			todoCount++
+		}
+	}
+	if todoCount > maxTODOsPerFile {
+		issues = append(issues, conventionIssue{
+			Path:    path,
+			Kind:    "todo-debt",
+			Sev:     sevWarning,
+			Message: fmt.Sprintf("file has %d TODO/FIXME markers (threshold %d) — prioritize or remove stale markers", todoCount, maxTODOsPerFile),
+		})
+	}
+
+	// Function-level checks: length, parameter count, nesting depth
+	funcRanges := detectFunctions(path, lines)
+	for _, fr := range funcRanges {
+		// Skip if function body is entirely pre-existing
+		newLines := 0
+		for i := fr.start; i <= fr.end && i < len(lines); i++ {
+			if !existingLines[i] {
+				newLines++
+		}
+		}
+		if newLines == 0 {
+			continue
+		}
+
+		funcLen := fr.end - fr.start + 1
+		if funcLen > maxFuncLines {
+			issues = append(issues, conventionIssue{
+				Path:    path,
+				Line:    fr.start + 1,
+				Kind:    "function-length",
+				Sev:     sevWarning,
+				Message: fmt.Sprintf("function '%s' is %d lines (threshold %d) — extract helper functions or split logic", fr.name, funcLen, maxFuncLines),
+			})
+		}
+
+		if fr.params > maxParams {
+			issues = append(issues, conventionIssue{
+				Path:    path,
+				Line:    fr.start + 1,
+				Kind:    "too-many-params",
+				Sev:     sevInfo,
+				Message: fmt.Sprintf("function '%s' has %d parameters (threshold %d) — group into options/config struct", fr.name, fr.params, maxParams),
+			})
+		}
+
+		if fr.maxNesting > maxNestingDepth {
+			issues = append(issues, conventionIssue{
+				Path:    path,
+				Line:    fr.start + 1,
+				Kind:    "deep-nesting",
+				Sev:     sevInfo,
+				Message: fmt.Sprintf("function '%s' has %d levels of nesting (threshold %d) — use early returns or extract conditionals", fr.name, fr.maxNesting, maxNestingDepth),
+			})
+		}
+	}
+
+	return issues
+}
+
+// funcRange describes a detected function's span and metadata.
+type funcRange struct {
+	name       string
+	start      int // 0-indexed line
+	end        int // 0-indexed line
+	params     int
+	maxNesting int
+}
+
+// detectFunctions returns approximate function boundaries for the given file.
+// Uses language-specific function-start detection and brace-counting for end.
+func detectFunctions(path string, lines []string) []funcRange {
+	ext := strings.ToLower(filepath.Ext(path))
+	var startRe *regexp.Regexp
+	switch ext {
+	case ".go":
+		startRe = regexp.MustCompile(`^func\s+(?:\([^)]+\)\s+)?([A-Za-z_]\w*)\s*\(`)
+	case ".js", ".jsx", ".ts", ".tsx":
+		startRe = regexp.MustCompile(`(?m)^(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\s+([A-Za-z_$][\w$]*)|const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\()`)
+	case ".py":
+		startRe = regexp.MustCompile(`^(?:async\s+)?def\s+([a-zA-Z_]\w*)\s*\(`)
+	case ".rs":
+		startRe = regexp.MustCompile(`(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][\w]*)\s*\(`)
+	case ".java":
+		startRe = regexp.MustCompile(`\s*(?:public|protected|private)?\s*(?:static\s+)?(?:[A-Za-z_][\w<>\[\]]*\s+)+([A-Za-z_][\w]*)\s*\(`)
+	case ".cs":
+		startRe = regexp.MustCompile(`\s*(?:public|protected|private|internal)?\s*(?:static\s+)?(?:async\s+)?(?:[A-Za-z_][\w<>\[\]]*\s+)+([A-Za-z_][\w]*)\s*\(`)
+	case ".php":
+		startRe = regexp.MustCompile(`function\s+([A-Za-z_]\w*)\s*\(`)
+	case ".rb":
+		startRe = regexp.MustCompile(`(?:def\s+([\w.]+)|->\s*\()`)
+	case ".swift":
+		startRe = regexp.MustCompile(`(?:func\s+([A-Za-z_]\w*)|init\s*\()`)
+	case ".kt":
+		startRe = regexp.MustCompile(`(?:fun\s+([A-Za-z_]\w*))\s*\(`)
+	case ".dart":
+		startRe = regexp.MustCompile(`(?:[\w<>]+\s+)?([A-Za-z_]\w*)\s*\(`)
+	default:
+		return nil
+	}
+	if startRe == nil {
+		return nil
+	}
+
+	var ranges []funcRange
+	for i, line := range lines {
+		if m := startRe.FindStringSubmatch(line); m != nil {
+			name := "(anonymous)"
+			for _, g := range m[1:] {
+				if g != "" {
+					name = g
+					break
+				}
+			}
+			// Count parameters: text between first '(' and matching ')'
+			params := countParams(line)
+			// Find function end via brace counting
+			end, nesting := findFuncEnd(lines, i)
+			ranges = append(ranges, funcRange{name: name, start: i, end: end, params: params, maxNesting: nesting})
+		}
+	}
+	return ranges
+}
+
+// countParams counts comma-separated parameters in a function signature line.
+func countParams(line string) int {
+	start := strings.Index(line, "(")
+	if start < 0 {
+		return 0
+	}
+	// Find matching close paren
+	depth := 0
+	for i := start; i < len(line); i++ {
+		switch line[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				inner := line[start+1 : i]
+				if strings.TrimSpace(inner) == "" {
+					return 0
+				}
+				return strings.Count(inner, ",") + 1
+			}
+		}
+	}
+	return 0
+}
+
+// findFuncEnd finds the closing brace of a function starting at startLine.
+// Returns the end line index and maximum nesting depth encountered.
+func findFuncEnd(lines []string, startLine int) (int, int) {
+	depth := 0
+	maxNesting := 0
+	started := false
+	for i := startLine; i < len(lines); i++ {
+		for _, ch := range lines[i] {
+			switch ch {
+			case '{':
+				depth++
+				started = true
+				if depth > maxNesting {
+					maxNesting = depth
+				}
+			case '}':
+				depth--
+				if started && depth == 0 {
+					return i, maxNesting
+				}
+			}
+		}
+	}
+	return len(lines) - 1, maxNesting
 }
 
 func itoa(n int) string {

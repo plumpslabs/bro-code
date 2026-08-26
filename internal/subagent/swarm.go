@@ -30,13 +30,13 @@ type SwarmTask struct {
 
 // SwarmResult contains the combined synthesis from all swarm stages.
 type SwarmResult struct {
-	Goal           string      `json:"goal"`
-	ArchitectSpec  string      `json:"architect_spec"`
-	BuilderOutput  string      `json:"builder_output"`
-	AuditorVerdict string      `json:"auditor_verdict"`
-	Success        bool        `json:"success"`
-	TouchedFiles   []string    `json:"touched_files,omitempty"`
-	Duration       string      `json:"duration"`
+	Goal           string     `json:"goal"`
+	ArchitectSpec  string     `json:"architect_spec"`
+	BuilderOutput  string     `json:"builder_output"`
+	AuditorVerdict string     `json:"auditor_verdict"`
+	Success        bool       `json:"success"`
+	TouchedFiles   []string   `json:"touched_files,omitempty"`
+	Duration       string     `json:"duration"`
 	Architect      RunMetrics `json:"architect_metrics,omitempty"`
 	Builder        RunMetrics `json:"builder_metrics,omitempty"`
 	Auditor        RunMetrics `json:"auditor_metrics,omitempty"`
@@ -255,8 +255,16 @@ func (t *SwarmTool) Execute(ctx context.Context, argsJSON string) (string, error
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🐝 Swarm Pipeline Finished in %s\n\n", result.Duration))
-	sb.WriteString("=== 🏛️ ARCHITECT SPEC ===\n" + result.ArchitectSpec + "\n\n")
-	sb.WriteString("=== 🔨 BUILDER OUTPUT ===\n" + result.BuilderOutput + "\n\n")
-	sb.WriteString("=== 🕵️ AUDITOR VERDICT ===\n" + result.AuditorVerdict + "\n")
+	sb.WriteString("=== 🏛️ ARCHITECT SPEC ===\n")
+	sb.WriteString(result.ArchitectSpec)
+	sb.WriteString("\n\n")
+
+	sb.WriteString("=== 🔨 BUILDER OUTPUT ===\n")
+	sb.WriteString(result.BuilderOutput)
+	sb.WriteString("\n\n")
+
+	sb.WriteString("=== 🕵️ AUDITOR VERDICT ===\n")
+	sb.WriteString(result.AuditorVerdict)
+	sb.WriteString("\n")
 	return sb.String(), nil
 }

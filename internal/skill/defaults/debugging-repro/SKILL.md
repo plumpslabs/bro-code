@@ -6,6 +6,12 @@ version: 1
 
 # Debugging / Reproduce-First
 
+| Task | Action |
+|---|---|
+| Bug report / crash / regression | ✅ Load this skill |
+| Feature implementation | ❌ Skip — universal contract |
+| Lint / diagnostics only | ❌ Skip — universal contract |
+
 **Use ONLY when the user reports a bug, crash, regression, or "not working" behavior** — never for feature work, diagnostics-only tasks, or lint-cleanup (those follow the universal contract).
 
 ## Reproduce before editing

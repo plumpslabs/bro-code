@@ -42,7 +42,7 @@ func ProposeGotchasPatch(skillDir, skillName string, gotchas []string) int {
 		if g == "" || strings.Contains(sb.String(), g) {
 			continue
 		}
-		sb.WriteString("- " + g + "\n")
+		fmt.Fprintf(&sb, "- %s\n", g)
 		added++
 	}
 	if added == 0 {

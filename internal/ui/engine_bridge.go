@@ -48,23 +48,29 @@ func (m *Model) appendMessages(msgs ...string) {
 	}
 }
 
-// upsertDiffMessage appends a live DIFF entry, or replaces the most recent
-// one for the same path within the current turn. The engine emits a cumulative
-// diff per file for that turn, so repeated edits within a turn grow a single entry,
-// while edits across different turns get separate entries in chronological order.
+// upsertDiffMessage appends a DIFF entry to the chat history.
+// If the message prefix already appears in the current turn (same path AND same
+// sequence index), it is updated in-place. Each distinct edit_file call uses a
+// unique "path#idx" key, so multiple edits to the same file each get their own
+// permanent chat bubble instead of the later one overwriting the earlier one.
 func (m *Model) upsertDiffMessage(path, diff string) {
 	m.historyVersion++
+	// The key is the full prefix as emitted by the engine — either
+	// "DIFF:\n<path>\n" (legacy/cumulative) or "DIFF:\n<path>#<idx>\n" (per-edit).
+	// We only overwrite an entry when the prefix matches EXACTLY (same key).
 	prefix := "DIFF:\n" + path + "\n"
 	for i := len(m.messages) - 1; i >= 0; i-- {
-		// Stop at the turn boundary — never overwrite diffs from previous user turns
+		// Stop at the turn boundary — never overwrite diffs from previous user turns.
 		if strings.HasPrefix(m.messages[i], "YOU:\n") || strings.HasPrefix(m.messages[i], "👤 ") {
 			break
 		}
 		if strings.HasPrefix(m.messages[i], prefix) {
+			// Exact key match → update in-place (e.g. streaming diff growing).
 			m.messages[i] = prefix + diff
 			return
 		}
 	}
+	// No matching entry found → always append as a new bubble.
 	m.appendMessages(prefix + diff)
 }
 

@@ -209,9 +209,10 @@ var BuiltinProviders = []ProviderInfo{
 		ID:             "opencode",
 		Name:           "BroCode Free Gateway",
 		Protocol:       "openai-compatible",
-		APIKeyEnvVar:   "", // No key required
+		APIKeyEnvVar:   "",           // No key required
+		ModelsPublic:   true,          // /models endpoint is public — fetch live list
 		DefaultBaseURL: "https://opencode.ai/zen/v1",
-		DefaultModels:  OpenCodeFreeModels,
+		DefaultModels:  OpenCodeFreeModels, // fallback when live fetch fails
 		ContextLimits:  builtinContextLimits["opencode"],
 	},
 	{
@@ -591,6 +592,11 @@ func DiscoverModels(cfg AppConfig) map[string][]string {
 			for _, d := range providers {
 				fetched, liveLimits, err := FetchOpenAIModelsDetailed(d.Info.DefaultBaseURL, d.APIKey)
 				if err == nil && len(fetched) > 0 {
+					// OpenCode gateway returns ALL models (paid + free);
+					// filter to free-tier only so the picker stays clean.
+					if d.Info.ID == "opencode" {
+						fetched = FilterOpenCodeFreeModels(fetched)
+					}
 					recordLiveContextLimits(d.Info.ID, liveLimits)
 					liveModelsCacheMu.Lock()
 					liveModelsCache[d.Info.ID] = fetched
