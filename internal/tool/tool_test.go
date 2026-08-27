@@ -1017,3 +1017,69 @@ func TestWriteFileAutonomousAndInstant(t *testing.T) {
 		t.Fatalf("unexpected write_file result: %s", res)
 	}
 }
+
+func TestReadFilesBatch(t *testing.T) {
+	r := NewRegistry()
+	tmp := t.TempDir()
+	f1 := filepath.Join(tmp, "file1.txt")
+	f2 := filepath.Join(tmp, "file2.txt")
+	_ = os.WriteFile(f1, []byte("Content of file 1"), 0o644)
+	_ = os.WriteFile(f2, []byte("Content of file 2"), 0o644)
+
+	res, err := r.Execute(context.Background(), "read_files", fmt.Sprintf(`{"paths":[%q, %q]}`, f1, f2))
+	if err != nil {
+		t.Fatalf("read_files failed: %v", err)
+	}
+	if !strings.Contains(res, "Content of file 1") || !strings.Contains(res, "Content of file 2") {
+		t.Fatalf("expected both file contents in output, got: %s", res)
+	}
+	if !strings.Contains(res, "=== "+f1+" ===") || !strings.Contains(res, "=== "+f2+" ===") {
+		t.Fatalf("expected header demarcations, got: %s", res)
+	}
+}
+
+func TestWriteTodosChecklistAndPlanSync(t *testing.T) {
+	r := NewRegistry()
+	tmp := t.TempDir()
+	r.SetRepoRoot(tmp)
+
+	var capturedProgress string
+	ctx := WithProgress(context.Background(), func(state string, info string) {
+		capturedProgress = info
+	})
+
+	input := `{"todos":[
+		{"task":"Initialize payment schema","status":"completed"},
+		{"task":"Add webhook listener","status":"in_progress"},
+		{"task":"Verify Midtrans signature","status":"pending"}
+	]}`
+
+	res, err := r.Execute(ctx, "write_todos", input)
+	if err != nil {
+		t.Fatalf("write_todos failed: %v", err)
+	}
+
+	if !strings.Contains(res, "✓  Initialize payment schema") {
+		t.Errorf("expected completed glyph ✓ in result, got: %s", res)
+	}
+	if !strings.Contains(res, "⏳  Add webhook listener") {
+		t.Errorf("expected in_progress glyph ⏳ in result, got: %s", res)
+	}
+	if !strings.Contains(res, "○  Verify Midtrans signature") {
+		t.Errorf("expected pending glyph ○ in result, got: %s", res)
+	}
+
+	if !strings.Contains(capturedProgress, "TODOS:\n") {
+		t.Errorf("expected progress notice with TODOS:, got: %s", capturedProgress)
+	}
+
+	// Verify .brocode/current_plan.md was created
+	planPath := filepath.Join(tmp, ".brocode", "current_plan.md")
+	planData, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("expected current_plan.md to exist: %v", err)
+	}
+	if !strings.Contains(string(planData), "Initialize payment schema") {
+		t.Errorf("expected plan file to contain todo item, got: %s", string(planData))
+	}
+}

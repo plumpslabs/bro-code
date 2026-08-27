@@ -2462,11 +2462,9 @@ func (e *Engine) buildSystemPrompt(currentMode string, iteration int, onUpdate T
 		ModelTier:     prompt.ClassifyModelTier(e.model),
 		Tuning:        e.tuning,
 	}
-	// Inject session edit summary: when files have been changed in this session
-	// (e.g. BUILDER edits), surface the compact list so MINER/PLANNER modes
-	// can reference prior changes without re-scanning. Skipped for BUILDER
-	// mode since it already knows what it edited.
-	if currentMode != "BUILDER" && tool.ChangesLen() > 0 {
+	// Inject session edit summary: when files have been changed in this session,
+	// surface the compact list so the agent maintains spatial memory across turns.
+	if tool.ChangesLen() > 0 {
 		var parts []string
 		for _, ch := range tool.PeekChanges() {
 			parts = append(parts, fmt.Sprintf("%s (%s)", ch.Path, ch.Action))
@@ -3164,6 +3162,9 @@ func (e *Engine) fitMessages(sysPrompt string) []provider.Message {
 	start := len(msgs)
 	for i, msg := range slices.Backward(msgs) {
 		c := bcontext.EstimateTokens(msg.Content) + bcontext.EstimateTokens(msg.Reasoning)
+		for _, tc := range msg.ToolCalls {
+			c += bcontext.EstimateTokens(tc.Name) + bcontext.EstimateTokens(tc.Arguments) + 16
+		}
 		if total+c > budget && start < len(msgs) {
 			break
 		}

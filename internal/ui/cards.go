@@ -172,6 +172,34 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 		return diffBarStyle.Render(labelStyle.Render(actionLabel) + "  " + path + "  " + statStyle.Render(fmt.Sprintf("(+%d −%d) · [press Ctrl+F for diff]", add, del)))
 	}
 
+	if strings.HasPrefix(msg, "TODOS:\n") {
+		body := strings.TrimPrefix(msg, "TODOS:\n")
+		todoBarStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).BorderForeground(lipgloss.Color("86")).Padding(0, 1)
+		if width > 0 {
+			todoBarStyle = todoBarStyle.Width(width)
+		}
+		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+		lines := strings.Split(strings.TrimSpace(body), "\n")
+		var formatted []string
+		for _, l := range lines {
+			trimmed := strings.TrimSpace(l)
+			if strings.HasPrefix(trimmed, "✓") || strings.HasPrefix(trimmed, "[x]") {
+				desc := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "✓"), "[x]"))
+				formatted = append(formatted, lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("  ✓  "+desc))
+			} else if strings.HasPrefix(trimmed, "⏳") || strings.HasPrefix(trimmed, "[/]") {
+				desc := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "⏳"), "[/]"))
+				formatted = append(formatted, lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("  ⏳ "+desc))
+			} else if strings.HasPrefix(trimmed, "✖") {
+				desc := strings.TrimSpace(strings.TrimPrefix(trimmed, "✖"))
+				formatted = append(formatted, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("  ✖  "+desc))
+			} else {
+				desc := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "○"), "[ ]"))
+				formatted = append(formatted, lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("  ○  "+desc))
+			}
+		}
+		return todoBarStyle.Render(labelStyle.Render("📋 TODOs") + "\n" + strings.Join(formatted, "\n"))
+	}
+
 	if strings.HasPrefix(msg, "ASK:\n") {
 		body := strings.TrimPrefix(msg, "ASK:\n")
 		query, answer, _ := strings.Cut(body, "\n---\n")

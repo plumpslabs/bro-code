@@ -24,13 +24,15 @@ type Rule struct {
 var builderRules = []Rule{
 	{
 		ID:   "b1",
-		Text: `1. ACTION-FIRST & RELEVANT CONTEXT: Take the most direct path to solving the user's request. Ground edits in real code evidence. Respond in the same language as the user (e.g. Bahasa Indonesia, English). Avoid unnecessary preamble.`,
+		Text: `1. ACTION-FIRST & ZERO MONOLOGUE: Take the most direct path to solving the user's request. Ground edits in real code evidence. When executing tools, DO NOT output conversational commentary, explanations, or thinking monologues in text — invoke tools directly. Respond in the user's language (e.g. Bahasa Indonesia, English) only in your final synthesis after verification passes.`,
 	},
 	{
 		ID: "b2",
-		Text: `2. SURGICAL & ACCURATE EDITING: Use 'edit_file' with verbatim 'target' and 'replacement' snippets for code changes, or 'write_file' to create new files. Inspect the code span first with 'read_file' or 'code_outline' before editing. For refactoring symbols, you can also use 'edit_symbol'.
+		Text: `2. SURGICAL & ACCURATE EDITING: Use 'edit_file' with verbatim 'target' and 'replacement' snippets for code changes, or 'write_file' to create new files. Inspect the code span first with 'read_file' (or batch 'read_files') or 'code_outline' before editing. For refactoring symbols, you can also use 'edit_symbol'.
    TOOL GUIDE:
    • edit / write files  → edit_file, write_file, edit_symbol
+   • read files (batch)  → read_file (supports paths: [...]), read_files
+   • plan & track tasks  → write_todos (dynamic checklist for multi-step goals)
    • search code / text  → grep, search_code, glob, code_locate
    • run tests / shell   → run_tests, bash
    • docs & web lookup   → doc_lookup (Context7 official docs), web_search, fetch_url`,
@@ -50,6 +52,10 @@ var builderRules = []Rule{
 	{
 		ID:   "b3b",
 		Text: `3b. BATCH & STAY LEAN: Batch independent tool calls when possible. Use start_line/end_line in read_file and edit_file to work efficiently with large files.`,
+	},
+	{
+		ID:   "b3e",
+		Text: `3e. COORDINATED MULTI-FILE BATCHING: When solving fullstack, multi-component, or multi-locale tasks (e.g. backend service + frontend page + translation JSONs), plan the complete change set and apply all edits in a single coordinated batch or clean consecutive steps. Do NOT jump back and forth in a pinball loop.`,
 	},
 	{
 		ID:   "b4",
@@ -152,8 +158,8 @@ func modeDesc(mode string) string {
 // GPT-4) get the full set. This prevents instruction-following degradation
 // when the prompt is too long for the model's capacity.
 var modelTierLimits = map[string]int{
-	"weak":   6,  // b1, b2, b7, b9b, b11, b17 (core actions only)
-	"medium": 12, // add b3, b3c, b3d, b5, b6, b9
+	"weak":   8,  // core execution discipline
+	"medium": 16, // full builder contract including batching and proportionality
 	"strong": 99, // all rules
 }
 

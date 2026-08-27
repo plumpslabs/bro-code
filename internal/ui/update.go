@@ -112,6 +112,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.upsertDiffMessage(path, diff)
 			return m, nil
 		}
+		if strings.HasPrefix(msg.info, "TODOS:\n") {
+			m.upsertTodosMessage(msg.info)
+			return m, nil
+		}
 		str := msg.info
 		// Progress events that land AFTER the turn has already settled (the
 		// adapter's stderr goroutine may still flush lines after turnResultMsg)

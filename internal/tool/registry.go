@@ -25,6 +25,7 @@ import (
 	"github.com/hexops/gotextdiff/span"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/memory"
+	"github.com/plumpslabs/bro-code/internal/plan"
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/search"
 	"github.com/plumpslabs/bro-code/internal/store"
@@ -246,6 +247,8 @@ func NewRegistry() *Registry {
 	r.Register(&RefactorClusterTool{})
 	r.Register(&BlastRadiusTool{})
 	r.Register(&DocLookupTool{})
+	r.Register(&WriteTodosTool{repoRoot: r.repoRoot})
+	r.Register(&ReadFilesTool{readTool: &ReadFileTool{}})
 	return r
 }
 
@@ -267,6 +270,9 @@ func (r *Registry) SetRepoRoot(path string) {
 	r.repoRoot = path
 	if bt, ok := r.tools["bash"].(*BashTool); ok {
 		bt.WorkDir = path
+	}
+	if wt, ok := r.tools["write_todos"].(*WriteTodosTool); ok {
+		wt.repoRoot = path
 	}
 }
 
@@ -914,22 +920,47 @@ func (t *ReadFileTool) Parameters() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"path":       map[string]any{"type": "string", "description": "Relative or absolute file path"},
+			"paths":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional list of file paths to read in a single batch"},
 			"start_line": map[string]any{"type": "integer", "description": "1-based start line (optional)"},
 			"end_line":   map[string]any{"type": "integer", "description": "1-based end line (optional)"},
 			"shrinkwrap": map[string]any{"type": "boolean", "description": "When true, returns an AST-compressed view of a large file: signatures, types, imports and docstrings retained, bodies stripped (~70% token reduction). Use to understand a big file's structure in one read instead of many range reads."},
 		},
-		"required": []string{"path"},
 	}
 }
+
 func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
-		Path       string `json:"path"`
-		StartLine  int    `json:"start_line"`
-		EndLine    int    `json:"end_line"`
-		Shrinkwrap bool   `json:"shrinkwrap"`
+		Path       string   `json:"path"`
+		Paths      []string `json:"paths"`
+		StartLine  int      `json:"start_line"`
+		EndLine    int      `json:"end_line"`
+		Shrinkwrap bool     `json:"shrinkwrap"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
+	}
+
+	if len(args.Paths) > 0 {
+		var sb strings.Builder
+		for i, p := range args.Paths {
+			subArgs, _ := json.Marshal(map[string]any{
+				"path":       p,
+				"shrinkwrap": args.Shrinkwrap,
+			})
+			res, err := t.Execute(ctx, string(subArgs))
+			if err != nil {
+				res = fmt.Sprintf("Error reading %s: %v", p, err)
+			}
+			if i > 0 {
+				sb.WriteString("\n\n")
+			}
+			sb.WriteString(fmt.Sprintf("=== %s ===\n%s", p, res))
+		}
+		return CapOutput(sb.String()), nil
+	}
+
+	if args.Path == "" {
+		return "", fmt.Errorf("missing required 'path' or 'paths' parameter")
 	}
 
 	// Leading-slash paths (" /crm_sales_backend/src/...") are a common LLM
@@ -1053,6 +1084,132 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 
 	out := jsonWarning + CapOutput(string(data))
 	return out, nil
+}
+
+// ReadFilesTool reads multiple files in a single batch.
+type ReadFilesTool struct {
+	readTool *ReadFileTool
+}
+
+func (t *ReadFilesTool) Name() string { return "read_files" }
+func (t *ReadFilesTool) Description() string {
+	return "Read multiple files in a single batch. Returns all file contents with clear file header boundaries."
+}
+func (t *ReadFilesTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"paths": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "List of relative or absolute file paths to read in one round",
+			},
+		},
+		"required": []string{"paths"},
+	}
+}
+func (t *ReadFilesTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	if t.readTool == nil {
+		t.readTool = &ReadFileTool{}
+	}
+	return t.readTool.Execute(ctx, argsJSON)
+}
+
+// WriteTodosTool manages an ordered checklist of objectives for multi-step tasks.
+type WriteTodosTool struct {
+	repoRoot string
+}
+
+func (t *WriteTodosTool) Name() string { return "write_todos" }
+func (t *WriteTodosTool) Description() string {
+	return "Track multi-step objectives through an ordered checklist. Call this tool after gathering context to plan tasks, or when completing subtasks (e.g. status: pending, in_progress, completed, cancelled)."
+}
+func (t *WriteTodosTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"todos": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"task": map[string]any{
+							"type":        "string",
+							"description": "Clear actionable description of the subtask",
+						},
+						"status": map[string]any{
+							"type":        "string",
+							"enum":        []string{"pending", "in_progress", "completed", "cancelled"},
+							"description": "Current status of the todo item",
+						},
+					},
+					"required": []string{"task", "status"},
+				},
+				"description": "The updated list of todo items",
+			},
+		},
+		"required": []string{"todos"},
+	}
+}
+
+func (t *WriteTodosTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Todos []struct {
+			Task   string `json:"task"`
+			Status string `json:"status"`
+		} `json:"todos"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	if len(args.Todos) == 0 {
+		return "No todos provided.", nil
+	}
+
+	var sb strings.Builder
+	var planSteps []plan.PlanStep
+	for i, item := range args.Todos {
+		glyph := "○"
+		normStatus := strings.ToLower(strings.TrimSpace(item.Status))
+		switch normStatus {
+		case "completed", "done":
+			glyph = "✓"
+			normStatus = "done"
+		case "in_progress", "progress":
+			glyph = "⏳"
+			normStatus = "in_progress"
+		case "cancelled", "skipped":
+			glyph = "✖"
+			normStatus = "skipped"
+		default:
+			glyph = "○"
+			normStatus = "pending"
+		}
+		sb.WriteString(fmt.Sprintf("%s  %s\n", glyph, item.Task))
+		planSteps = append(planSteps, plan.PlanStep{
+			ID:          fmt.Sprintf("step-%d", i+1),
+			Description: item.Task,
+			Status:      normStatus,
+		})
+	}
+
+	root := t.repoRoot
+	if root == "" {
+		root, _ = os.Getwd()
+	}
+	p := &plan.Plan{
+		Goal:      "Active Task Objectives",
+		Status:    "IN_PROGRESS",
+		CreatedAt: time.Now(),
+		Steps:     planSteps,
+	}
+	_ = plan.SaveCurrentPlan(root, p)
+
+	out := strings.TrimSpace(sb.String())
+	if cb := ProgressFromContext(ctx); cb != nil {
+		cb("acting", "TODOS:\n"+out)
+	}
+	return "Updated TODOs:\n" + out, nil
 }
 
 // detectFileLanguage returns a short stack label ("go", "ts", "python", ...)

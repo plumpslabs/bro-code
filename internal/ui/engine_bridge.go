@@ -74,6 +74,21 @@ func (m *Model) upsertDiffMessage(path, diff string) {
 	m.appendMessages(prefix + diff)
 }
 
+// upsertTodosMessage appends or updates the live TODOs checklist card in chat.
+func (m *Model) upsertTodosMessage(todosContent string) {
+	m.historyVersion++
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if strings.HasPrefix(m.messages[i], "YOU:\n") || strings.HasPrefix(m.messages[i], "👤 ") {
+			break
+		}
+		if strings.HasPrefix(m.messages[i], "TODOS:\n") {
+			m.messages[i] = todosContent
+			return
+		}
+	}
+	m.appendMessages(todosContent)
+}
+
 // appendNote adds a UI/informational message to the chat AND persists it as a
 // system_msg event so slash-command output (e.g. /help, /diagnose) survives a
 // -c resume instead of disappearing on reload.

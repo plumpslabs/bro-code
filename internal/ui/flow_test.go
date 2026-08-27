@@ -1579,3 +1579,34 @@ func TestNormalizeEmojiSpacing(t *testing.T) {
 		}
 	}
 }
+
+func TestTodosLiveUpdateInTUI(t *testing.T) {
+	m := newTestApp()
+	m.width = 100
+	m.height = 30
+
+	// 1. Initial TODOs step progress
+	todo1 := "TODOS:\n✓  Step 1 Done\n⏳ Step 2 Working\n○  Step 3 Waiting"
+	m.Update(stepProgressMsg{state: loop.StateActing, info: todo1})
+
+	if len(m.messages) == 0 {
+		t.Fatal("expected message added")
+	}
+	if !strings.Contains(m.messages[len(m.messages)-1], "TODOS:\n") {
+		t.Fatalf("expected last message to be TODOS, got: %s", m.messages[len(m.messages)-1])
+	}
+
+	// 2. Updated TODOs in the same turn should update in-place (no duplicate card)
+	todo2 := "TODOS:\n✓  Step 1 Done\n✓  Step 2 Done\n⏳ Step 3 Working"
+	msgCountBefore := len(m.messages)
+	m.Update(stepProgressMsg{state: loop.StateActing, info: todo2})
+
+	if len(m.messages) != msgCountBefore {
+		t.Fatalf("expected in-place update without extra bubble, got count: %d, want: %d", len(m.messages), msgCountBefore)
+	}
+
+	rendered := m.View().Content
+	if !strings.Contains(rendered, "TODOs") {
+		t.Fatalf("expected rendered TUI to show TODOs card, got: %s", rendered)
+	}
+}
