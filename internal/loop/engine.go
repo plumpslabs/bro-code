@@ -1389,20 +1389,28 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			return "", err
 		}
 
-		// Automatic Mode Confusion Recovery: if the user is in BUILDER mode,
-		// but the model hallucinates that it is in PLANNER mode because of old
-		// messages in conversation history, correct it immediately and let it execute edits.
+		// Automatic Mode Confusion & Unexecuted Plan Interception:
+		// When the user is in BUILDER mode and requested an implementation/fix, but the model
+		// emits a text response outlining a plan without making any edits or tool calls (or claims
+		// to be read-only), intercept it immediately and force direct tool execution.
 		if len(resp.ToolCalls) == 0 && e.Mode() == "BUILDER" && iteration <= 2 && resp.Content != "" {
 			lower := strings.ToLower(resp.Content)
-			if strings.Contains(lower, "mode planner") &&
-				(strings.Contains(lower, "beralih ke mode builder") ||
-					strings.Contains(lower, "bisa membaca") ||
-					strings.Contains(lower, "read-only") ||
-					strings.Contains(lower, "hanya read-only") ||
-					strings.Contains(lower, "hanya bisa membaca")) {
-				e.context.InjectContextMessage("⚡ [MODE OVERRIDE]: You are ALREADY in BUILDER mode (🟢) with full permission to edit and write files. Do NOT ask the user to switch modes or output an unimplemented plan. Apply the requested code changes directly using 'edit_file' or 'write_file' NOW.")
+			isClaimingReadOnly := strings.Contains(lower, "mode planner") ||
+				strings.Contains(lower, "beralih ke mode builder") ||
+				strings.Contains(lower, "read-only") ||
+				strings.Contains(lower, "hanya read-only") ||
+				strings.Contains(lower, "hanya bisa membaca")
+			isEmittingPurePlan := (strings.Contains(lower, "rencana implementasi") ||
+				strings.Contains(lower, "langkah implementasi") ||
+				strings.Contains(lower, "berikut rencana") ||
+				strings.Contains(lower, "akan menambahkan") ||
+				strings.Contains(lower, "akan mengubah")) &&
+				(strings.Contains(lower, "- [ ]") || strings.Contains(lower, "1.") || strings.Contains(lower, "2."))
+
+			if isClaimingReadOnly || (isEmittingPurePlan && looksLikeImplTask(e.context.LastUserPrompt())) {
+				e.context.InjectContextMessage("⚡ [MODE OVERRIDE & BUILDER EXECUTION MANDATE]: You are ALREADY in BUILDER mode (🟢) with full permission to edit and write files. Do NOT output unimplemented plans, bulleted checklists, or commentary without action. Take immediate action NOW: invoke 'edit_file' or 'write_file' to apply the required code modifications directly.")
 				if onUpdate != nil {
-					onUpdate(e.state, "⚡ Mode correction: model alerted that BUILDER mode is active")
+					onUpdate(e.state, "⚡ Mode correction: direct action enforcement — instructing model to apply edits")
 				}
 				continue
 			}

@@ -1,6 +1,6 @@
 # BroCode CLI & Command Reference
 
-> **Version**: v0.1.52  
+> **Version**: v0.1.54  
 > **Status**: Comprehensive Reference Guide for CLI Flags, Interactive Slash Commands, Keyboard Shortcuts, Operating Modes, and Environment Variables.
 
 ---

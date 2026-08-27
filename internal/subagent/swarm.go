@@ -109,7 +109,7 @@ TASK:
 4. Highlight any edge cases or risks.
 DO NOT write full replacement code files; keep the specification clear and actionable for the BUILDER agent.`, task.Goal, task.Context)
 
-	archRun, err := r.runOneResult(tctx, "architect", archPrompt, "PLANNER", "", "", onUpdate)
+	archRun, err := r.runOneResult(tctx, "architect", archPrompt, "PLANNER", "", "", onUpdate, false)
 	if err != nil {
 		return nil, fmt.Errorf("architect phase failed: %w", err)
 	}
@@ -134,7 +134,7 @@ TASK:
 2. Avoid over-engineering; keep changes minimal, robust, and DRY.
 3. Once edits are made, summarize exactly what was modified.`, task.Goal, res.ArchitectSpec)
 
-	buildRun, err := r.runOneResult(tctx, "builder", buildPrompt, "BUILDER", "", r.CheapModel, onUpdate)
+	buildRun, err := r.runOneResult(tctx, "builder", buildPrompt, "BUILDER", "", r.CheapModel, onUpdate, false)
 	if err != nil {
 		return nil, fmt.Errorf("builder phase failed: %w", err)
 	}
@@ -159,7 +159,7 @@ TASK:
 2. If project tests exist, verify them or check LSP diagnostics.
 3. Provide a final verdict (PASSED or ISSUES_FOUND) with concise findings.`, task.Goal, res.BuilderOutput)
 
-	auditRun, err := r.runOneResult(tctx, "auditor", auditPrompt, "PLANNER", "", r.CheapModel, onUpdate)
+	auditRun, err := r.runOneResult(tctx, "auditor", auditPrompt, "PLANNER", "", r.CheapModel, onUpdate, false)
 	if err != nil {
 		return nil, fmt.Errorf("auditor phase failed: %w", err)
 	}

@@ -87,7 +87,7 @@ type RunMetrics struct {
 // final answer plus usage metrics. onUpdate (may be nil) receives progress
 // lines from the sub-loop. model overrides the runner's default for this run
 // ("" = Runner.Model) so the swarm can route per-role models.
-func (r *Runner) runOneResult(ctx context.Context, id, task, mode, targetDir, model string, onUpdate loop.TurnOutputHandler) (RunMetrics, error) {
+func (r *Runner) runOneResult(ctx context.Context, id, task, mode, targetDir, model string, onUpdate loop.TurnOutputHandler, allowStream bool) (RunMetrics, error) {
 	var metrics RunMetrics
 	if strings.TrimSpace(task) == "" {
 		return metrics, fmt.Errorf("empty task for sub-agent %q", id)
@@ -121,7 +121,7 @@ func (r *Runner) runOneResult(ctx context.Context, id, task, mode, targetDir, mo
 	if r.BudgetUSD > 0 {
 		eng.SetBudgetUSD(r.BudgetUSD)
 	}
-	if r.StreamHandler != nil {
+	if allowStream && r.StreamHandler != nil {
 		eng.SetStreamHandler(r.StreamHandler)
 	}
 	if r.UsageTracker != nil {
@@ -137,7 +137,7 @@ func (r *Runner) runOneResult(ctx context.Context, id, task, mode, targetDir, mo
 
 // runOne is the convenience wrapper for callers that only want the answer.
 func (r *Runner) runOne(ctx context.Context, id, task, mode, targetDir, model string, onUpdate loop.TurnOutputHandler) (string, error) {
-	m, err := r.runOneResult(ctx, id, task, mode, targetDir, model, onUpdate)
+	m, err := r.runOneResult(ctx, id, task, mode, targetDir, model, onUpdate, false)
 	return m.Answer, err
 }
 
@@ -159,7 +159,7 @@ func (r *Runner) RunWithProgressMetrics(ctx context.Context, task, mode string, 
 	if mode == "" {
 		mode = "BUILDER"
 	}
-	return r.runOneResult(ctx, "1", task, mode, "", "", onUpdate)
+	return r.runOneResult(ctx, "1", task, mode, "", "", onUpdate, false)
 }
 
 // RunMany executes the given tasks — concurrently when parallel is true,
@@ -313,7 +313,7 @@ func (r *Runner) RunManyMetrics(ctx context.Context, agents []SubAgent, parallel
 				onUpdate(state, prefix+" "+info)
 			}
 		}
-		results[i], errs[i] = r.runOneResult(ctx, id, agents[i].Task, agents[i].Mode, agents[i].TargetDir, "", agentUpdate)
+		results[i], errs[i] = r.runOneResult(ctx, id, agents[i].Task, agents[i].Mode, agents[i].TargetDir, "", agentUpdate, false)
 		if onUpdate != nil {
 			status := "DONE"
 			if errs[i] != nil {

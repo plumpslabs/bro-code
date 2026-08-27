@@ -1083,3 +1083,36 @@ func TestWriteTodosChecklistAndPlanSync(t *testing.T) {
 		t.Errorf("expected plan file to contain todo item, got: %s", string(planData))
 	}
 }
+
+func TestStrReplaceToolAndParameterAliases(t *testing.T) {
+	r := NewRegistry()
+	tmp := t.TempDir()
+	f := filepath.Join(tmp, "service.js")
+	_ = os.WriteFile(f, []byte("function calculate(a, b) {\n  return a + b;\n}\n"), 0o644)
+
+	// 1. Test str_replace with old_str and new_str (Claude style)
+	input1 := fmt.Sprintf(`{"path":%q,"old_str":"return a + b;","new_str":"return (a + b) * 1.1;"}`, f)
+	res1, err := r.Execute(context.Background(), "str_replace", input1)
+	if err != nil {
+		t.Fatalf("str_replace failed: %v", err)
+	}
+	if !strings.Contains(res1, "Successfully updated") {
+		t.Errorf("expected successful update, got: %s", res1)
+	}
+
+	// 2. Test edit_file with replacements array (Codebuff style)
+	input2 := fmt.Sprintf(`{"path":%q,"replacements":[{"search":"function calculate(a, b)","replace":"function calculateWithTax(a, b)"}]}`, f)
+	res2, err := r.Execute(context.Background(), "edit_file", input2)
+	if err != nil {
+		t.Fatalf("edit_file with replacements alias failed: %v", err)
+	}
+	if !strings.Contains(res2, "Successfully updated") {
+		t.Errorf("expected successful update, got: %s", res2)
+	}
+
+	// Verify disk contents
+	updated, _ := os.ReadFile(f)
+	if !strings.Contains(string(updated), "calculateWithTax") || !strings.Contains(string(updated), "* 1.1") {
+		t.Fatalf("expected both edits applied, got: %s", string(updated))
+	}
+}

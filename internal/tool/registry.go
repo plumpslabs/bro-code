@@ -249,6 +249,12 @@ func NewRegistry() *Registry {
 	r.Register(&DocLookupTool{})
 	r.Register(&WriteTodosTool{repoRoot: r.repoRoot})
 	r.Register(&ReadFilesTool{readTool: &ReadFileTool{}})
+	r.Register(&StrReplaceTool{editTool: &EditFileTool{}})
+	r.Register(&CheckpointTool{})
+	r.Register(&SpawnTaskTool{})
+	r.Register(&TaskStatusTool{})
+	r.Register(&TaskLogsTool{})
+	r.Register(&KillTaskTool{})
 	return r
 }
 
@@ -1387,19 +1393,55 @@ func (t *EditFileTool) Parameters() map[string]any {
 }
 func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
-		Path        string `json:"path"`
-		Target      string `json:"target"`
-		Replacement string `json:"replacement"`
-		StartLine   int    `json:"start_line"`
-		EndLine     int    `json:"end_line"`
-		Edits       []struct {
+		Path         string `json:"path"`
+		Target       string `json:"target"`
+		OldStr       string `json:"old_str"`
+		Search       string `json:"search"`
+		Replacement  string `json:"replacement"`
+		NewStr       string `json:"new_str"`
+		Replace      string `json:"replace"`
+		StartLine    int    `json:"start_line"`
+		EndLine      int    `json:"end_line"`
+		Edits        []struct {
 			Target      string `json:"target"`
+			OldStr      string `json:"old_str"`
+			Search      string `json:"search"`
 			Replacement string `json:"replacement"`
+			NewStr      string `json:"new_str"`
+			Replace     string `json:"replace"`
 		} `json:"edits"`
+		Replacements []struct {
+			Target      string `json:"target"`
+			OldStr      string `json:"old_str"`
+			Search      string `json:"search"`
+			Replacement string `json:"replacement"`
+			NewStr      string `json:"new_str"`
+			Replace     string `json:"replace"`
+		} `json:"replacements"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
 	}
+
+	// Alias normalizations
+	if args.Target == "" {
+		if args.OldStr != "" {
+			args.Target = args.OldStr
+		} else if args.Search != "" {
+			args.Target = args.Search
+		}
+	}
+	if args.Replacement == "" {
+		if args.NewStr != "" {
+			args.Replacement = args.NewStr
+		} else if args.Replace != "" {
+			args.Replacement = args.Replace
+		}
+	}
+	if len(args.Edits) == 0 && len(args.Replacements) > 0 {
+		args.Edits = args.Replacements
+	}
+
 	args.Path = resolvePath(args.Path)
 
 	// Native guard: never edit heavy dirs or sensitive files.
@@ -1427,13 +1469,29 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 	if len(args.Edits) > 0 {
 		// Multi-chunk atomic transaction
 		for idx, hunk := range args.Edits {
-			if hunk.Target == "" {
+			t := hunk.Target
+			if t == "" {
+				if hunk.OldStr != "" {
+					t = hunk.OldStr
+				} else if hunk.Search != "" {
+					t = hunk.Search
+				}
+			}
+			r := hunk.Replacement
+			if r == "" {
+				if hunk.NewStr != "" {
+					r = hunk.NewStr
+				} else if hunk.Replace != "" {
+					r = hunk.Replace
+				}
+			}
+			if t == "" {
 				continue
 			}
-			res, _, err := ApplyResilientEdit(newContent, hunk.Target, hunk.Replacement)
+			res, _, err := ApplyResilientEdit(newContent, t, r)
 			if err != nil {
 				diag := ""
-				if closest, startL, endL := FindClosestBlockWithLines(newContent, hunk.Target); closest != "" {
+				if closest, startL, endL := FindClosestBlockWithLines(newContent, t); closest != "" {
 					diag = fmt.Sprintf("\n💡 Closest match in %s at lines %d-%d:\n---\n%s\n---\n👉 Tip: pass 'start_line': %d, 'end_line': %d in edit_file or copy the exact block above into 'target'.", filepath.Base(args.Path), startL, endL, closest, startL, endL)
 				}
 				return "", fmt.Errorf("chunk #%d failed in %s: %w.%s", idx+1, args.Path, err, diag)
@@ -1538,6 +1596,28 @@ func (t *EditFileTool) Execute(ctx context.Context, argsJSON string) (string, er
 		result += "\n⚠️ LOW-CONFIDENCE MATCH: The edit matched via fuzzy similarity. Please re-read the file to confirm the replacement was applied correctly."
 	}
 	return result, nil
+}
+
+// StrReplaceTool is an alias for edit_file matching Claude/Codebuff tool calling habits.
+type StrReplaceTool struct {
+	editTool *EditFileTool
+}
+
+func (t *StrReplaceTool) Name() string { return "str_replace" }
+func (t *StrReplaceTool) Description() string {
+	return "Perform surgical search & replace on a file using exact verbatim match or multi-chunk edits. Alias for edit_file."
+}
+func (t *StrReplaceTool) Parameters() map[string]any {
+	if t.editTool == nil {
+		t.editTool = &EditFileTool{}
+	}
+	return t.editTool.Parameters()
+}
+func (t *StrReplaceTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	if t.editTool == nil {
+		t.editTool = &EditFileTool{}
+	}
+	return t.editTool.Execute(ctx, argsJSON)
 }
 
 // DeleteFileTool permanently removes a file. It is gated (GateAction asks the

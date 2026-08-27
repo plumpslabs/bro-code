@@ -139,7 +139,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// When transitioning to tool execution (StateActing), commit the streamed
 		// assistant text for this iteration as its own distinct block with vertical line border.
-		if msg.state == loop.StateActing && m.streaming && strings.TrimSpace(m.pendingStream) != "" {
+		// Subagents and tournament runners must never trigger main-turn assistant bubble commits.
+		isSubagentEvent := strings.HasPrefix(str, "🤖") || strings.HasPrefix(str, "[Alpha]") || strings.HasPrefix(str, "[Beta]") || strings.HasPrefix(str, "[Swarm]")
+		if msg.state == loop.StateActing && m.turnRunning && m.streaming && !isSubagentEvent && strings.TrimSpace(m.pendingStream) != "" {
 			useMode := m.turnMode
 			if useMode == "" {
 				useMode = m.mode
@@ -361,6 +363,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.logViewport, _ = m.logViewport.Update(msg)
+		if m.logViewport.AtBottom() {
+			m.userScrolledUp = false
+		} else {
+			m.userScrolledUp = true
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1048,6 +1055,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
 				m.logViewport.PageUp()
+				m.userScrolledUp = !m.logViewport.AtBottom()
 				return m, nil
 			}
 
@@ -1058,24 +1066,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
 				m.logViewport.PageDown()
+				m.userScrolledUp = !m.logViewport.AtBottom()
 				return m, nil
 			}
 
 		case "shift+up", "ctrl+up", "alt+up":
 			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
 				m.logViewport.ScrollUp(3)
+				m.userScrolledUp = !m.logViewport.AtBottom()
 				return m, nil
 			}
 
 		case "shift+down", "ctrl+down", "alt+down":
 			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
 				m.logViewport.ScrollDown(3)
+				m.userScrolledUp = !m.logViewport.AtBottom()
 				return m, nil
 			}
 
 		case "ctrl+e":
 			if !m.showAsk && !m.showModels && !m.showConnect && !m.showDebug && !m.showSessions && !m.showMCP {
 				m.logViewport.ScrollDown(1)
+				m.userScrolledUp = !m.logViewport.AtBottom()
 				return m, nil
 			}
 

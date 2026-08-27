@@ -94,30 +94,36 @@ func executeTournamentCommand(runner *subagent.Runner, task string, prog *tea.Pr
 		agents := []subagent.SubAgent{
 			{
 				ID: "Candidate-Alpha (Minimal Surgical Fix)",
-				Task: "Goal: " + task + "\n" +
-					"Context: You are ALREADY in the repository root. Use codebase tools (code_locate, grep, read_file, glob) to inspect files directly without 'cd'.\n" +
-					"Language: Formulate your explanations and analysis in the SAME language as the task (use Bahasa Indonesia if the prompt is in Indonesian).\n" +
-					"Efficiency: Locate key functions and schemas directly using code_locate and grep. Read targeted function sections instead of small repetitive micro-slices.\n" +
-					"Strategy: Find the exact root cause and formulate the most MINIMAL, high-precision surgical fix with zero collateral damage.\n" +
-					"Structure your output cleanly with:\n" +
-					"1. 🔍 Root Cause & Evidence (cite file:Lxx)\n" +
-					"2. 💡 Proposed Surgical Patch / Fix\n" +
-					"3. 📊 Risk Assessment (Blast Radius: LOW, minimal churn)\n" +
-					"Do NOT edit source files yet. Formulate precise analysis and diff.",
+				Task: "Goal: " + task + "\n\n" +
+					"Role: You are Principal Staff Engineer Alpha. Your mandate is to find the exact root cause and formulate the cleanest, lowest-risk SURGICAL HOTFIX with zero collateral damage.\n\n" +
+					"Evidence-First Grounding:\n" +
+					"1. Language: Formulate your reasoning and response in the SAME language as the task (use Bahasa Indonesia if the prompt is in Indonesian).\n" +
+					"2. Working Directory: You are ALREADY in the repository root. Use codebase tools (code_locate, grep, read_file, read_files, glob) directly without 'cd'.\n" +
+					"3. Deep Root Cause Analysis: Trace callers, routes, payload schemas, and sanitization logic. Cite exact file paths and line numbers (e.g. service.js:L123).\n" +
+					"4. Formulate Hypothesis: Clearly state WHY the bug happens (e.g. unescaped characters, missing return fields, wrong type mapping).\n" +
+					"5. Verbatim Surgical Patch: Provide exact target and replacement code snippets so the fix can be applied instantly.\n\n" +
+					"Output Structure:\n" +
+					"### 🔍 1. Root Cause & Code Evidence (cite file:Lxx)\n" +
+					"### 💡 2. Proposed Surgical Patch (verbatim code diff)\n" +
+					"### 📊 3. Risk & Blast Radius Assessment (Regression risk: LOW)\n" +
+					"Do NOT edit source files directly. Produce complete, production-grade analysis.",
 				Mode: "PLANNER",
 			},
 			{
 				ID: "Candidate-Beta (Defensive Robust Refactor)",
-				Task: "Goal: " + task + "\n" +
-					"Context: You are ALREADY in the repository root. Use codebase tools (code_locate, grep, read_file, glob) to inspect files directly without 'cd'.\n" +
-					"Language: Formulate your explanations and analysis in the SAME language as the task (use Bahasa Indonesia if the prompt is in Indonesian).\n" +
-					"Efficiency: Locate key functions and schemas directly using code_locate and grep. Read targeted function sections instead of small repetitive micro-slices.\n" +
-					"Strategy: Find the root cause and formulate a ROBUST, defensive fix with comprehensive type safety, input validation, and edge-case handling.\n" +
-					"Structure your output cleanly with:\n" +
-					"1. 🔍 Root Cause & Architecture Vulnerabilities (cite file:Lxx)\n" +
-					"2. 💡 Proposed Robust Implementation & Defensive Guard\n" +
-					"3. 📊 Long-term Trade-offs (Blast Radius: MEDIUM/HIGH, future-proof)\n" +
-					"Do NOT edit source files yet. Formulate precise analysis and diff.",
+				Task: "Goal: " + task + "\n\n" +
+					"Role: You are Principal Architect Beta. Your mandate is to eliminate the root cause while building ROBUST, DEFENSIVE ARCHITECTURAL GUARDS against future regressions.\n\n" +
+					"Evidence-First Grounding:\n" +
+					"1. Language: Formulate your reasoning and response in the SAME language as the task (use Bahasa Indonesia if the prompt is in Indonesian).\n" +
+					"2. Working Directory: You are ALREADY in the repository root. Use codebase tools (code_locate, grep, read_file, read_files, glob) directly without 'cd'.\n" +
+					"3. Architectural Root Cause: Audit not just the immediate symptom, but also upstream callers, input validation, and downstream handlers.\n" +
+					"4. Defensive Hardening: Formulate robust sanitization, fallback defaults, strict type-checking, and comprehensive error boundaries.\n" +
+					"5. Verbatim Implementation: Provide exact target and replacement code snippets and test verification steps.\n\n" +
+					"Output Structure:\n" +
+					"### 🔍 1. Root Cause & Architectural Flaws (cite file:Lxx)\n" +
+					"### 💡 2. Defensive Solution & Hardened Guard (verbatim code diff)\n" +
+					"### 📊 3. Long-term Stability & Trade-offs (Future-proof: HIGH)\n" +
+					"Do NOT edit source files directly. Produce complete, production-grade analysis.",
 				Mode: "PLANNER",
 			},
 		}
