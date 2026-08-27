@@ -1313,6 +1313,9 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 			}
 			_ = e.context.Compact(summary)
+			if onUpdate != nil {
+				onUpdate(e.state, "📦 [COMPACTED] Context window pruned to retain active goal & recent working memory")
+			}
 			// Auto-extract: durable session context is merged into project
 			// memory so a future session starts warm instead of cold.
 			if e.mem != nil {
@@ -1842,21 +1845,24 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			// editing more files. Only inject after the first edit (not after
 			// every single edit in a batch) to avoid noise.
 			if e.phaseEdits == 1 {
-				e.context.InjectContextMessage("[AUTO-VERIFY] You just edited a file. After completing all edits for this task, run the appropriate verification command (tsc --noEmit / go build / npm test / cargo check) before declaring done. The model MUST verify builds pass.")
+				e.context.InjectContextMessage("[AUTO-VERIFY] You just edited a file. After completing related edits for this task, run the project verification command (e.g. tsc / npm run build / go test / pytest) before declaring done.")
+			} else if e.phaseEdits >= 4 && e.phaseEdits%3 == 1 {
+				e.context.InjectContextMessage(fmt.Sprintf("⚡ [CHECKPOINT VERIFICATION]: You have applied %d edits across the codebase. Run project tests / build command now to verify compiler and type integrity.", e.phaseEdits))
 			}
 		} else if allReadOnly {
 			// Read-only round: if we're in execute phase and have made edits,
-			// the model is re-reading after editing — nudge toward verification.
+			// the model is re-reading after editing — nudge immediately toward verification.
 			if e.execPhase == phaseExecute && e.phaseEdits > 0 {
 				e.phaseReads++
-				if e.phaseReads >= 2 && !e.readOnlyReminderSent {
+				if e.phaseReads >= 1 && !e.readOnlyReminderSent {
+					e.readOnlyReminderSent = true
 					e.context.InjectContextMessage(
-						fmt.Sprintf("[PHASE: VERIFY] You have made %d edit(s) and are now reading files again. "+
-							"STOP reading. Run the build/test command (e.g. tsc --noEmit, go build, npm test) "+
-							"to verify your edits are correct. Do NOT edit or read more files until verification passes.",
+						fmt.Sprintf("[PHASE: VERIFY] You have made %d edit(s). STOP re-reading files. "+
+							"Run the project build/test command (e.g. tsc, npm run build, go test, pytest) "+
+							"to verify your edits compile and pass tests.",
 						e.phaseEdits))
 					if onUpdate != nil {
-						onUpdate(e.state, "[VERIFY] Suggesting verification after edits")
+						onUpdate(e.state, "[VERIFY] Directing model to run build/test verification")
 					}
 				}
 			}

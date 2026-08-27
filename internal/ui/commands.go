@@ -647,6 +647,8 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.messages = []string{fmt.Sprintf("MODE:BUILDER\n✅ **Started fresh session:** `%s`\n\nActive chat context has been reset to zero.", newSessID)}
 
 	case "/models":
+		m.modelOptions = provider.DiscoverModels(m.cfg)
+		m.modelListCache = nil
 		m.showModels = true
 		m.modelsQuery = ""
 		m.modelsSel = 0

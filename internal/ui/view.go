@@ -87,7 +87,7 @@ func (m *Model) View() tea.View {
 				if log != m.renderedLog {
 					wasAtBottom := m.logViewport.AtBottom()
 					m.logViewport.SetContent(log)
-					if wasAtBottom {
+					if wasAtBottom && !m.userScrolledUp {
 						m.logViewport.GotoBottom()
 					}
 					m.renderedLog = log
@@ -96,9 +96,9 @@ func (m *Model) View() tea.View {
 				wasAtBottom := m.logViewport.AtBottom()
 				m.logViewport.SetContent(log)
 				if key != m.renderedKey || m.renderedH == 0 {
-					// Only auto-scroll when the user is already at the bottom.
+					// Only auto-scroll when the user is already at the bottom and hasn't scrolled up.
 					// Never yank the viewport away from a user who is reading history.
-					if wasAtBottom {
+					if wasAtBottom && !m.userScrolledUp {
 						m.parkLogAfterNewContent(log, vpHeight, contentWidth)
 					}
 				}
@@ -173,9 +173,24 @@ func truncatePrompt(s string) string {
 func (m *Model) buildLog(contentWidth int) string {
 	key := fmt.Sprintf("%s|%d|%v", m.logKey(), contentWidth, m.filesExpanded)
 	if key != m.historyKey {
+		if m.cachedWidth != contentWidth || m.cachedExpanded != m.filesExpanded || len(m.messages) < len(m.renderedMsgCache) {
+			m.renderedMsgCache = nil
+			m.cachedWidth = contentWidth
+			m.cachedExpanded = m.filesExpanded
+		}
+		// Format only newly arrived messages (incremental O(1) instead of O(N) formatting)
+		for i := len(m.renderedMsgCache); i < len(m.messages); i++ {
+			m.renderedMsgCache = append(m.renderedMsgCache, formatMessage(m.messages[i], contentWidth, m.filesExpanded))
+		}
 		var sb strings.Builder
-		for _, msg := range m.messages {
-			sb.WriteString(formatMessage(msg, contentWidth, m.filesExpanded) + "\n\n")
+		for i, formatted := range m.renderedMsgCache {
+			sb.WriteString(formatted)
+			if i < len(m.renderedMsgCache)-1 {
+				sb.WriteString("\n\n")
+			}
+		}
+		if len(m.renderedMsgCache) > 0 {
+			sb.WriteString("\n\n")
 		}
 		m.renderedHistory = sb.String()
 		m.historyKey = key

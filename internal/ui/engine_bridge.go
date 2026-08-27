@@ -101,6 +101,7 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 	m.turnStart = time.Now()
 	// Classify task complexity early so the watchdog can use an adaptive timeout.
 	m.turnTier = loop.ClassifyTaskComplexity(userQuery)
+	m.userScrolledUp = false
 	// Clear any stale streaming state from a previous interrupted turn.
 	m.streaming = false
 	m.pendingStream = ""
@@ -446,12 +447,7 @@ func NewApp(
 	m.modelOptions = provider.DiscoverModels(cfg)
 	m.modelListCache = nil
 	m.lastLiveModelsVersion = provider.LiveModelsVersion()
-
-	// If global index is still building or live models haven't arrived yet,
-	// show a spinner so the user knows something is happening.
-	if (m.globalIndex != nil && !m.globalIndex.IsReady()) || m.lastLiveModelsVersion == 0 {
-		m.status = "Initializing..."
-	}
+	m.status = "Ready"
 	m.rebuildEngine()
 	m.initialized = true
 	return m
@@ -742,5 +738,5 @@ func checkUpdateCmd() tea.Msg {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.promptInput.Focus(), checkUpdateCmd, liveModelsRefreshCmd(), tickCmd(), startupReadinessCheckCmd())
+	return tea.Batch(m.promptInput.Focus(), checkUpdateCmd)
 }

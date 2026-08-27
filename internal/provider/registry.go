@@ -502,9 +502,8 @@ func AutoDetect(cfg AppConfig) []DetectedProvider {
 
 		if p.ID == "ollama" {
 			// Healthcheck Ollama endpoint before auto-detecting it.
-			// Run concurrently — the check itself is bounded to 200ms so
-			// a missing Ollama never stalls startup for a full second.
-			if isEndpointAlive("http://localhost:11434/v1/models") {
+			// Run with direct IPv4 127.0.0.1 to avoid Windows DNS resolution stalls (localhost -> ::1).
+			if isEndpointAlive("http://127.0.0.1:11434/v1/models") {
 				detected = append(detected, DetectedProvider{
 					Info:   p,
 					APIKey: "",
@@ -589,6 +588,11 @@ func DiscoverModels(cfg AppConfig) map[string][]string {
 	// Trigger background non-blocking fetch for providers that have live endpoints
 	if len(needFetch) > 0 {
 		go func(providers []DetectedProvider) {
+			defer func() {
+				liveModelsCacheMu.Lock()
+				liveModelsVersion++
+				liveModelsCacheMu.Unlock()
+			}()
 			for _, d := range providers {
 				fetched, liveLimits, err := FetchOpenAIModelsDetailed(d.Info.DefaultBaseURL, d.APIKey)
 				if err == nil && len(fetched) > 0 {
@@ -600,7 +604,6 @@ func DiscoverModels(cfg AppConfig) map[string][]string {
 					recordLiveContextLimits(d.Info.ID, liveLimits)
 					liveModelsCacheMu.Lock()
 					liveModelsCache[d.Info.ID] = fetched
-					liveModelsVersion++
 					liveModelsCacheMu.Unlock()
 				}
 			}

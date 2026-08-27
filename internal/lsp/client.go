@@ -196,15 +196,37 @@ func (m *Manager) InstallHints() map[string]string {
 	return out
 }
 
+var (
+	availMu    sync.RWMutex
+	availCache []string
+	availTime  time.Time
+)
+
 // AvailableServers returns the language names whose server binary is on
-// PATH — these are the languages LSP tools can actually use right now.
+// PATH — cached with a 30s TTL to prevent expensive LookPath filesystem searches
+// on every TUI render frame (critical on Windows NTFS).
 func (m *Manager) AvailableServers() []string {
+	availMu.RLock()
+	if time.Since(availTime) < 30*time.Second && availCache != nil {
+		res := availCache
+		availMu.RUnlock()
+		return res
+	}
+	availMu.RUnlock()
+
+	availMu.Lock()
+	defer availMu.Unlock()
+	if time.Since(availTime) < 30*time.Second && availCache != nil {
+		return availCache
+	}
 	var out []string
 	for _, s := range specs {
 		if binaryExists(s.Command) && !containsStr(out, s.Language) {
 			out = append(out, s.Language)
 		}
 	}
+	availCache = out
+	availTime = time.Now()
 	return out
 }
 

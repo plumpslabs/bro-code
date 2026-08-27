@@ -33,33 +33,6 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-// liveModelsRefreshMsg fires periodically to re-read the live models cache
-// and update m.modelOptions so providers whose background /models fetch
-// completes after startup (OpenRouter, custom gateways) appear in the
-// model picker without requiring a /models modal reopen.
-type liveModelsRefreshMsg struct{}
-
-// liveModelsRefreshCmd polls every 5 seconds for live model updates.
-// It stops automatically once the background fetch has populated the cache
-// (detected via LiveModelsVersion) and the UI has refreshed at least once.
-func liveModelsRefreshCmd() tea.Cmd {
-	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
-		return liveModelsRefreshMsg{}
-	})
-}
-
-// startupReadinessCheckCmd polls periodically to detect when background
-// initialization (global index build, live model fetch) has completed.
-func startupReadinessCheckCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		return startupReadinessCheckMsg{}
-	})
-}
-
-type startupReadinessCheckMsg struct{}
-
-
-
 // Model defines the Bubble Tea v2 TUI state.
 type Model struct {
 	width          int
@@ -176,9 +149,13 @@ type Model struct {
 	// renderedHistory/historyKey cache the rendered message history so
 	// streaming only rebuilds the cheap streaming box, not the whole log,
 	// every frame — that is what makes long unbounded history viable.
-	renderedHistory string
-	historyKey      string
-	historyVersion  uint64
+	renderedHistory  string
+	historyKey       string
+	historyVersion   uint64
+	renderedMsgCache []string
+	cachedWidth      int
+	cachedExpanded   bool
+	userScrolledUp   bool
 	// trimNoticeShown records whether the "older messages pruned" notice has
 	// already been inserted into the chat log, so a pathological session that
 	// hits the safety ceiling announces it once instead of silently dropping
