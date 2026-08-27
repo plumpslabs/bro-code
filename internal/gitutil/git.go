@@ -5,6 +5,7 @@
 package gitutil
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,7 @@ var (
 )
 
 // IsGitRepo reports whether root is inside a git working tree.
-// Result is cached per directory for the process lifetime.
+// Checks if the directory itself or any ancestor has a .git directory/file.
 func IsGitRepo(root string) bool {
 	isRepoMu.RLock()
 	if cached, ok := isRepoCache[root]; ok {
@@ -28,13 +29,11 @@ func IsGitRepo(root string) bool {
 	}
 	isRepoMu.RUnlock()
 
-	// Walk up to 8 parent dirs looking for .git (matches workspace.go logic)
+	// Check local .git directly with os.Stat
 	cur := root
 	for i := 0; i < 8; i++ {
-		cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-		cmd.Dir = cur
-		out, err := cmd.Output()
-		if err == nil && strings.TrimSpace(string(out)) == "true" {
+		gitPath := filepath.Join(cur, ".git")
+		if _, err := os.Stat(gitPath); err == nil {
 			isRepoMu.Lock()
 			isRepoCache[root] = true
 			isRepoMu.Unlock()
@@ -47,10 +46,36 @@ func IsGitRepo(root string) bool {
 		cur = parent
 	}
 
+	// Fallback to git rev-parse with --show-toplevel to ensure root is inside repo
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err == nil && len(out) > 0 {
+		topLevel := filepath.Clean(strings.TrimSpace(string(out)))
+		cleanRoot := filepath.Clean(root)
+		if cleanRoot == topLevel || strings.HasPrefix(cleanRoot, topLevel+string(filepath.Separator)) {
+			isRepoMu.Lock()
+			isRepoCache[root] = true
+			isRepoMu.Unlock()
+			return true
+		}
+	}
+
 	isRepoMu.Lock()
 	isRepoCache[root] = false
 	isRepoMu.Unlock()
 	return false
+}
+
+// InvalidateCache clears the git metadata cache for a directory.
+func InvalidateCache(root string) {
+	isRepoMu.Lock()
+	delete(isRepoCache, root)
+	isRepoMu.Unlock()
+
+	lsFilesMu.Lock()
+	delete(lsFilesCache, root)
+	lsFilesMu.Unlock()
 }
 
 // lsFilesCache caches git ls-files results per root directory.
