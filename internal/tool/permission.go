@@ -122,10 +122,17 @@ func AllowKey(cmd string) string {
 		}
 		return "" // plain git operations are safe
 	case "curl", "wget":
-		// Only dangerous when piped straight into a shell.
+		// Gated when piped straight into a shell OR sending data outbound (anti-exfiltration)
+		lowerCmd := strings.ToLower(cmd)
 		if strings.Contains(cmd, "| sh") || strings.Contains(cmd, "| bash") ||
 			strings.Contains(cmd, "| zsh") || strings.Contains(cmd, "| fish") {
 			return first + " | shell"
+		}
+		if strings.Contains(lowerCmd, " -d ") || strings.Contains(lowerCmd, " --data") ||
+			strings.Contains(lowerCmd, " -f ") || strings.Contains(lowerCmd, " --form") ||
+			strings.Contains(lowerCmd, " -t ") || strings.Contains(lowerCmd, " --upload-file") ||
+			strings.Contains(lowerCmd, " --post-data") || strings.Contains(lowerCmd, " --post-file") {
+			return first + " outbound-upload"
 		}
 		return ""
 	case "cd", "pushd":

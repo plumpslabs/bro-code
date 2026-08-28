@@ -228,7 +228,24 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 	if strings.HasPrefix(msg, "SPEC:\n") {
 		body := strings.TrimPrefix(msg, "SPEC:\n")
 		specPath, specContent, _ := strings.Cut(body, "\n---\n")
-		return renderBorderedCard("📋 ARCHITECTURAL BLUEPRINT CONTRACT", "("+specPath+")", specContent, "💡 Next: Switch to BUILDER (Shift+Tab) and say 'Implement spec in "+specPath+"'", "141", width)
+		// Living Artifacts Pattern (Zero Chat Clutter):
+		// If spec is detailed (>40 lines), extract concise summary preview + section highlights
+		displayBody := specContent
+		lines := strings.Split(strings.TrimSpace(specContent), "\n")
+		if len(lines) > 40 {
+			var summaryLines []string
+			for _, l := range lines {
+				trimmed := strings.TrimSpace(l)
+				if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "- [ ]") || strings.HasPrefix(trimmed, "- [x]") {
+					summaryLines = append(summaryLines, trimmed)
+				}
+			}
+			if len(summaryLines) >= 3 {
+				displayBody = fmt.Sprintf("### 📜 Specification Blueprint Saved\nFull architectural contract persisted to **`%s`** (%d lines).\n\n### 📑 Blueprint Structure & Phased Plan:\n%s\n\n> 💡 *Full unabridged spec with interface types & DB queries stored in file artifact.*",
+					specPath, len(lines), strings.Join(summaryLines, "\n"))
+			}
+		}
+		return renderBorderedCard("📋 ARCHITECTURAL BLUEPRINT CONTRACT", "("+specPath+")", displayBody, "💡 Next: Switch to BUILDER (Shift+Tab) and say 'Implement spec in "+specPath+"'", "141", width)
 	}
 
 	if strings.HasPrefix(msg, "TOURNAMENT:\n") {

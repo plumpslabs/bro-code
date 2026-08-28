@@ -782,7 +782,15 @@ func RestoreSession(m *Manager, events []store.Event) []string {
 			m.ImportUserMessage(text)
 			if !isEngineReminder(text) {
 				flushPendingTools()
-				display = append(display, "YOU:\n"+text)
+				displayText := text
+				if strings.HasPrefix(text, "Goal: Execute Candidate-") {
+					if strings.Contains(text, "Candidate-Alpha") {
+						displayText = "Apply Alpha"
+					} else if strings.Contains(text, "Candidate-Beta") {
+						displayText = "Apply Beta"
+					}
+				}
+				display = append(display, "YOU:\n"+displayText)
 			}
 		case "assistant_msg":
 			m.ImportAssistantTurn(msg.Mode, msg.Model, msg.Reasoning, msg.Content, msg.ToolCalls)

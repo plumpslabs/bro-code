@@ -1522,3 +1522,43 @@ func TestCumulativeChangeDiff(t *testing.T) {
 		t.Fatalf("modified→deleted must render - markers, got %q", got)
 	}
 }
+
+func TestAutonomousModeSwitchInEngine(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.SetAskHandler(func(ctx context.Context, questions []tool.AskQuestion) ([]tool.AskResult, error) {
+		return []tool.AskResult{
+			{Answers: []string{"✅ Ya, ganti mode"}},
+		}, nil
+	})
+
+	adapter := &mockAdapter{
+		toolCalls: []provider.ToolCall{
+			{
+				ID:        "call-switch-1",
+				Name:      "switch_mode",
+				Arguments: `{"target_mode":"MINER","reason":"Need deep project memory indexing"}`,
+			},
+		},
+	}
+
+	ctxMgr := bcontext.NewManager("test_sess", nil, 10000)
+	eng := NewEngine(adapter, reg, ctxMgr, "test-model")
+	eng.SetMode("BUILDER")
+
+	if eng.Mode() != "BUILDER" {
+		t.Fatalf("initial mode should be BUILDER, got %s", eng.Mode())
+	}
+
+	ans, err := eng.RunTurn(context.Background(), "Mine project structure", nil)
+	if err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if ans != "Done testing" {
+		t.Errorf("unexpected answer: %s", ans)
+	}
+
+	// Engine mode must now be dynamically updated to MINER
+	if eng.Mode() != "MINER" {
+		t.Errorf("expected engine mode to switch to MINER, got %s", eng.Mode())
+	}
+}

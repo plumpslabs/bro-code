@@ -1116,3 +1116,66 @@ func TestStrReplaceToolAndParameterAliases(t *testing.T) {
 		t.Fatalf("expected both edits applied, got: %s", string(updated))
 	}
 }
+
+func TestSwitchModeTool(t *testing.T) {
+	// 1. Test Headless / Nil Ask
+	toolWithoutAsk := &SwitchModeTool{}
+	res1, err := toolWithoutAsk.Execute(context.Background(), `{"target_mode":"MINER","reason":"Explore project schema"}`)
+	if err != nil {
+		t.Fatalf("switch_mode failed: %v", err)
+	}
+	if !strings.Contains(res1, "Autonomous mode switch to MINER requested") {
+		t.Errorf("unexpected headless result: %s", res1)
+	}
+
+	// 2. Test User Approved
+	toolWithApproved := &SwitchModeTool{
+		Ask: func(ctx context.Context, questions []AskQuestion) ([]AskResult, error) {
+			return []AskResult{
+				{Answers: []string{"✅ Ya, ganti mode"}},
+			}, nil
+		},
+	}
+	res2, err := toolWithApproved.Execute(context.Background(), `{"target_mode":"PLANNER","reason":"Create architectural roadmap"}`)
+	if err != nil {
+		t.Fatalf("switch_mode failed: %v", err)
+	}
+	if !strings.HasPrefix(res2, "MODE_SWITCH_APPROVED:PLANNER") {
+		t.Errorf("expected MODE_SWITCH_APPROVED, got: %s", res2)
+	}
+
+	// 3. Test User Declined
+	toolWithDeclined := &SwitchModeTool{
+		Ask: func(ctx context.Context, questions []AskQuestion) ([]AskResult, error) {
+			return []AskResult{
+				{Answers: []string{"❌ Tidak, tetap di mode sekarang"}},
+			}, nil
+		},
+	}
+	res3, err := toolWithDeclined.Execute(context.Background(), `{"target_mode":"MINER","reason":"Mine background jobs"}`)
+	if err != nil {
+		t.Fatalf("switch_mode failed: %v", err)
+	}
+	if !strings.Contains(res3, "User declined") {
+		t.Errorf("expected decline message, got: %s", res3)
+	}
+}
+
+func TestGrepWithContextLines(t *testing.T) {
+	tmp := t.TempDir()
+	f := filepath.Join(tmp, "math.go")
+	content := "package math\n\n// Add calculates sum\nfunc Add(a, b int) int {\n\treturn a + b\n}\n"
+	if err := os.WriteFile(f, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gt := &GrepTool{}
+	// Test grep with context_lines=2
+	res, err := gt.Execute(context.Background(), fmt.Sprintf(`{"pattern":"return a \\+ b","path":%q,"context_lines":2}`, tmp))
+	if err != nil {
+		t.Fatalf("grep with context_lines failed: %v", err)
+	}
+	if !strings.Contains(res, "func Add") || !strings.Contains(res, "return a + b") {
+		t.Errorf("expected context lines around match, got: %s", res)
+	}
+}

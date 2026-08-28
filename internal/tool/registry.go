@@ -255,7 +255,22 @@ func NewRegistry() *Registry {
 	r.Register(&TaskStatusTool{})
 	r.Register(&TaskLogsTool{})
 	r.Register(&KillTaskTool{})
+	r.Register(&SwitchModeTool{Ask: r.askFunc})
 	return r
+}
+
+// SetAskHandler wires the interactive confirmation function to tools that support user prompting.
+func (r *Registry) SetAskHandler(fn func(context.Context, []AskQuestion) ([]AskResult, error)) {
+	r.askFunc = fn
+	if t, ok := r.tools["switch_mode"].(*SwitchModeTool); ok {
+		t.Ask = fn
+	}
+	if t, ok := r.tools["ask_user"].(*AskUserTool); ok {
+		t.Ask = fn
+	}
+	if t, ok := r.tools["review_changes"].(*ReviewChangesTool); ok {
+		t.Ask = fn
+	}
 }
 
 // SetSearchEmbedder wires an OpenAI-compatible embeddings endpoint onto the
@@ -534,6 +549,8 @@ var commandDescriptions = map[string]string{
 	"pip install":     "📥 Install Python packages",
 	"go install":      "📥 Install Go binaries",
 	"cargo install":   "📥 Install Rust binaries",
+	"curl outbound-upload": "🌐 Transmit data payload / files to external URL via curl",
+	"wget outbound-upload": "🌐 Transmit data payload / files to external URL via wget",
 }
 
 // askViaModal presents a gated command to the user via the interactive modal
@@ -1727,16 +1744,18 @@ func (t *GrepTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"pattern": map[string]any{"type": "string", "description": "Search pattern"},
-			"path":    map[string]any{"type": "string", "description": "Search directory path"},
+			"pattern":       map[string]any{"type": "string", "description": "Search pattern"},
+			"path":          map[string]any{"type": "string", "description": "Search directory path"},
+			"context_lines": map[string]any{"type": "integer", "description": "Number of surrounding context lines to show around each match (e.g. 2 or 3 for instant code insight without extra read_file)"},
 		},
 		"required": []string{"pattern"},
 	}
 }
 func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error) {
 	var args struct {
-		Pattern string `json:"pattern"`
-		Path    string `json:"path"`
+		Pattern      string `json:"pattern"`
+		Path         string `json:"path"`
+		ContextLines int    `json:"context_lines"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", err
@@ -1792,7 +1811,16 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 		excl = append(excl, "--exclude-dir="+d)
 	}
 
-	cmdArgs := append([]string{"-E", "-rn", "-I"}, append(excl, args.Pattern, args.Path)...)
+	baseFlags := []string{"-E", "-rn", "-I"}
+	if args.ContextLines > 0 {
+		cLines := args.ContextLines
+		if cLines > 10 {
+			cLines = 10
+		}
+		baseFlags = append(baseFlags, fmt.Sprintf("-C%d", cLines))
+	}
+
+	cmdArgs := append(baseFlags, append(excl, args.Pattern, args.Path)...)
 	cmd := exec.CommandContext(ctx, "grep", cmdArgs...)
 	output, err := cmd.Output()
 	// grep exits 1 when there are NO matches — that is a normal result, not an
@@ -1805,7 +1833,15 @@ func (t *GrepTool) Execute(ctx context.Context, argsJSON string) (string, error)
 			output = nil // no matches: fall through to the empty-result path
 		} else if len(output) == 0 {
 			// Fallback to fixed strings match (-F) if regex pattern parsing failed
-			cmdArgsF := append([]string{"-rn", "-I", "-F"}, append(excl, args.Pattern, args.Path)...)
+			baseFlagsF := []string{"-rn", "-I", "-F"}
+			if args.ContextLines > 0 {
+				cLines := args.ContextLines
+				if cLines > 10 {
+					cLines = 10
+				}
+				baseFlagsF = append(baseFlagsF, fmt.Sprintf("-C%d", cLines))
+			}
+			cmdArgsF := append(baseFlagsF, append(excl, args.Pattern, args.Path)...)
 			cmdFixed := exec.CommandContext(ctx, "grep", cmdArgsF...)
 			output, _ = cmdFixed.Output()
 		}
@@ -2096,6 +2132,10 @@ func (t *BashTool) Execute(ctx context.Context, argsJSON string) (string, error)
 	if runtime.GOOS == "windows" {
 		if bashPath, err := exec.LookPath("bash"); err == nil {
 			cmd = SafeCommandContext(tctx, bashPath, "-c", cmdStr)
+		} else if pwshPath, err := exec.LookPath("pwsh"); err == nil {
+			cmd = SafeCommandContext(tctx, pwshPath, "-NoProfile", "-NonInteractive", "-Command", cmdStr)
+		} else if psPath, err := exec.LookPath("powershell"); err == nil {
+			cmd = SafeCommandContext(tctx, psPath, "-NoProfile", "-NonInteractive", "-Command", cmdStr)
 		} else {
 			cmd = SafeCommandContext(tctx, "cmd.exe", "/c", cmdStr)
 		}
@@ -2584,4 +2624,65 @@ func (t *DocLookupTool) Execute(ctx context.Context, argsJSON string) (string, e
 		return "", err
 	}
 	return fmt.Sprintf("📚 Documentation for **%s** (%s):\n\n%s", args.Library, source, docs), nil
+}
+
+// SwitchModeTool allows the agent to autonomously propose switching operational modes (BUILDER, PLANNER, MINER)
+// with interactive user confirmation when the task characteristics demand a different mode.
+type SwitchModeTool struct {
+	Ask func(ctx context.Context, questions []AskQuestion) ([]AskResult, error)
+}
+
+func (t *SwitchModeTool) Name() string { return "switch_mode" }
+func (t *SwitchModeTool) Description() string {
+	return "Propose switching the active operational mode (BUILDER 🟢, PLANNER 🟣, MINER 🟡) with user confirmation when a task strictly requires a different mode's persona (e.g. switching to MINER for deep project exploration/memory extraction, or switching to PLANNER for architectural design)."
+}
+func (t *SwitchModeTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"target_mode": map[string]any{
+				"type":        "string",
+				"enum":        []string{"BUILDER", "PLANNER", "MINER"},
+				"description": "The target operational mode ('BUILDER', 'PLANNER', or 'MINER').",
+			},
+			"reason": map[string]any{
+				"type":        "string",
+				"description": "Clear explanation to the user why switching to this mode is more appropriate for the current task.",
+			},
+		},
+		"required": []string{"target_mode", "reason"},
+	}
+}
+
+func (t *SwitchModeTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		TargetMode string `json:"target_mode"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", err
+	}
+	args.TargetMode = strings.ToUpper(strings.TrimSpace(args.TargetMode))
+	if args.TargetMode != "BUILDER" && args.TargetMode != "PLANNER" && args.TargetMode != "MINER" {
+		return "", fmt.Errorf("invalid target_mode %q: must be BUILDER, PLANNER, or MINER", args.TargetMode)
+	}
+
+	if t.Ask == nil {
+		return fmt.Sprintf("Autonomous mode switch to %s requested: %s", args.TargetMode, args.Reason), nil
+	}
+
+	q := fmt.Sprintf("🔀 Agent mengusulkan beralih ke mode %s:\n%s", args.TargetMode, args.Reason)
+	res, err := t.Ask(ctx, []AskQuestion{
+		{
+			Question: q,
+			Options:  []string{"✅ Ya, ganti mode", "❌ Tidak, tetap di mode sekarang"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("mode switch confirmation failed: %w", err)
+	}
+	if len(res) > 0 && len(res[0].Answers) > 0 && strings.HasPrefix(res[0].Answers[0], "✅") {
+		return fmt.Sprintf("MODE_SWITCH_APPROVED:%s:%s", args.TargetMode, args.Reason), nil
+	}
+	return "User declined the mode switch proposal. Continue in current mode.", nil
 }

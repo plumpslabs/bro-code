@@ -51,13 +51,18 @@ func executeSpecCommand(runner *subagent.Runner, feature string, prog *tea.Progr
 				"4. ZERO ASSUMPTIONS ON MIDDLEWARE: Trace route definitions to handler chains to verify the exact middleware attaching request context (e.g. req.user, req.workspaceSubscription) rather than assuming standard JWT auth middlewares.\n"+
 				"5. EXACT PAYLOAD & MAPPING KEYS: For third-party webhooks and services (e.g. Midtrans, Stripe, payment gateways), read the exact controller and service files to cite the actual payload keys (e.g. transaction_status vs generic notification_type) and mapping constants.\n"+
 				"6. EXACT GUARD & CONDITIONAL LOGIC: Cite exact file paths (e.g. file.js:Lxx) for state transitions, guard conditions, and error branches.\n"+
-				"7. Output ONLY structured markdown with these 5 sections:\n"+
+				"7. Output ONLY structured markdown with these 6 sections:\n"+
 				"## 🎯 1. Objective & Architecture Context\n"+
 				"## 📐 2. Interface Contracts, Functions & Data Types\n"+
 				"## 🗄️ 3. Database Schema & State Changes\n"+
 				"## ⚠️ 4. Blast Radius & Affected Callers\n"+
-				"## ✅ 5. Verification & Acceptance Criteria\n\n"+
-				"Do NOT write or edit source code files. Focus on architectural precision.",
+				"## ✅ 5. Verification & Acceptance Criteria\n"+
+				"## 🚀 6. Phased Implementation Checklist\n"+
+				"- [ ] Phase 1: Core Data Models & Migrations\n"+
+				"- [ ] Phase 2: Internal Services, Domain Logic & Business Rules\n"+
+				"- [ ] Phase 3: Route Handlers, Middlewares & Controllers\n"+
+				"- [ ] Phase 4: Integration Verification, Tests & Final Blast Radius Check\n\n"+
+				"Do NOT write or edit source code files. Focus on architectural precision and actionable phased steps.",
 			feature,
 		)
 
@@ -85,11 +90,16 @@ func executeSpecCommand(runner *subagent.Runner, feature string, prog *tea.Progr
 	})
 }
 
-// executeTournamentCommand runs 2 parallel candidate agents to solve a difficult task or bug.
+// executeTournamentCommand runs 2 parallel candidate agents to solve a difficult task or bug,
+// followed by an autonomous Arbiter evaluation to score and recommend the best patch.
 func executeTournamentCommand(runner *subagent.Runner, task string, prog *tea.Program) tea.Cmd {
 	return tea.Batch(tickCmd(), func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 360*time.Second)
 		defer cancel()
+
+		if prog != nil {
+			prog.Send(stepProgressMsg{state: loop.StateThinking, info: "🥊 [Tournament Arena]: Initializing Candidate-Alpha & Candidate-Beta..."})
+		}
 
 		agents := []subagent.SubAgent{
 			{
@@ -142,10 +152,55 @@ func executeTournamentCommand(runner *subagent.Runner, task string, prog *tea.Pr
 			agentID := agents[i].ID
 			sb.WriteString(fmt.Sprintf("### 🥊 %s\n%s\n\n---\n\n", agentID, rep.Answer))
 		}
-		sb.WriteString("### ⚖️ ARBITER DECISION MATRIX\n")
-		sb.WriteString("- **Choose Candidate-Alpha**: Best for urgent production hotfixes, lowest regression risk, and minimal lines of code changed.\n")
-		sb.WriteString("- **Choose Candidate-Beta**: Best for long-term architectural stability, deep edge-case guards, and paying down technical debt.\n\n")
-		sb.WriteString("👉 **Next Action:** In **BUILDER** mode (`Shift+Tab`), simply say `Apply Alpha` or `Apply Beta` to execute the chosen patch.")
+
+		// Phase 3: Autonomous Arbiter Judge
+		if prog != nil {
+			prog.Send(stepProgressMsg{state: loop.StateThinking, info: "⚖️ [Arbiter Judge]: Evaluating Candidate solutions & scoring trade-offs..."})
+		}
+
+		alphaAns := ""
+		betaAns := ""
+		if len(metricsList) > 0 {
+			alphaAns = metricsList[0].Answer
+		}
+		if len(metricsList) > 1 {
+			betaAns = metricsList[1].Answer
+		}
+
+		judgePrompt := fmt.Sprintf(
+			"You are the Chief Technology Arbiter. Evaluate these two competing engineering solutions for the following problem:\n\n"+
+				"PROBLEM STATEMENT:\n%s\n\n"+
+				"CANDIDATE-ALPHA (Minimal Surgical Fix):\n%s\n\n"+
+				"CANDIDATE-BETA (Defensive Robust Refactor):\n%s\n\n"+
+				"Analyze both solutions impartially and output a concise, structured evaluation in the user's language (Bahasa Indonesia if the problem statement is in Indonesian):\n\n"+
+				"### ⚖️ ARBITER VERDICT & SCORING MATRIX\n"+
+				"| Criterion | Candidate-Alpha (Surgical) | Candidate-Beta (Robust) |\n"+
+				"| :--- | :--- | :--- |\n"+
+				"| 🎯 Root Cause Accuracy | [Score 1-10 & note] | [Score 1-10 & note] |\n"+
+				"| 🛡️ Blast Radius / Risk | [Low/Med/High & note] | [Low/Med/High & note] |\n"+
+				"| ⚡ Implementation Speed | [Immediate / Moderate] | [Moderate / High Effort] |\n"+
+				"| 💎 Code Cleanliness | [Score 1-10] | [Score 1-10] |\n\n"+
+				"🏆 **RECOMMENDED CHOICE**: State clearly whether Alpha or Beta is recommended and WHY.\n"+
+				"👉 **APPLY INSTRUCTION**: State clearly how the user can apply it in BUILDER mode (e.g. `Apply Alpha` or `Apply Beta`).",
+			task, alphaAns, betaAns,
+		)
+
+		judgeMetrics, jErr := runner.RunWithProgressMetrics(ctx, judgePrompt, "PLANNER", func(state loop.LoopState, info string) {
+			if prog != nil {
+				prog.Send(stepProgressMsg{state: state, info: "⚖️ Arbiter: " + info})
+			}
+		})
+
+		if jErr == nil && strings.TrimSpace(judgeMetrics.Answer) != "" {
+			sb.WriteString(judgeMetrics.Answer)
+		} else {
+			// Deterministic fallback matrix
+			sb.WriteString("### ⚖️ ARBITER DECISION MATRIX\n")
+			sb.WriteString("- **Choose Candidate-Alpha**: Best for urgent production hotfixes, lowest regression risk, and minimal lines of code changed.\n")
+			sb.WriteString("- **Choose Candidate-Beta**: Best for long-term architectural stability, deep edge-case guards, and paying down technical debt.\n\n")
+			sb.WriteString("👉 **Next Action:** In **BUILDER** mode (`Shift+Tab`), simply say `Apply Alpha` or `Apply Beta` to execute the chosen patch.")
+		}
+
 		return tournamentResultMsg(fmt.Sprintf("TOURNAMENT:\n%s\n---\n%s", task, sb.String()))
 	})
 }

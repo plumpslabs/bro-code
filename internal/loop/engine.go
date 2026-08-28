@@ -2066,6 +2066,17 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				if err := e.context.AppendToolResult(pending[i].tc.ID, pending[i].output); err != nil {
 					return "", err
 				}
+				// Handle autonomous mode switch approval
+				if pending[i].tc.Name == "switch_mode" && strings.HasPrefix(pending[i].output, "MODE_SWITCH_APPROVED:") {
+					parts := strings.SplitN(pending[i].output, ":", 3)
+					if len(parts) >= 2 {
+						targetMode := parts[1]
+						e.SetMode(targetMode)
+						if onUpdate != nil {
+							onUpdate(e.state, fmt.Sprintf("🔀 Autonomous mode switched to %s (🟢/🟣/🟡)", targetMode))
+						}
+					}
+				}
 				// A failing tool result is a REPRODUCTION: the bug is confirmed
 				// by a command/test that actually failed, so the TSR reproduce
 				// gate opens and the model may fix it. Only real outputs count —
@@ -2267,6 +2278,23 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			_ = plan.SaveCurrentPlan(e.repoRoot, parsedPlan)
 			if onUpdate != nil {
 				onUpdate(e.state, fmt.Sprintf("📋 Active plan saved with %d step(s) to .brocode/current_plan.md", len(parsedPlan.Steps)))
+				// Also emit live visual TODOS card to TUI chat
+				var todoSb strings.Builder
+				for _, step := range parsedPlan.Steps {
+					glyph := "○"
+					switch strings.ToLower(step.Status) {
+					case "done", "completed":
+						glyph = "✓"
+					case "in_progress", "working":
+						glyph = "⏳"
+					case "skipped", "cancelled":
+						glyph = "✖"
+					}
+					todoSb.WriteString(fmt.Sprintf("%s  %s\n", glyph, step.Description))
+				}
+				if todoText := strings.TrimSpace(todoSb.String()); todoText != "" {
+					onUpdate(e.state, "TODOS:\n"+todoText)
+				}
 			}
 		}
 
@@ -3279,6 +3307,20 @@ func formatToolCallInfo(name, argsJSON string) string {
 				rawURL = rawURL[:37] + "…"
 			}
 			return fmt.Sprintf("🌐 fetch_url %s", rawURL)
+		}
+		if name == "git" {
+			action, _ := m["action"].(string)
+			if action == "commit" {
+				msg, _ := m["message"].(string)
+				if len(msg) > 35 {
+					msg = msg[:32] + "…"
+				}
+				return fmt.Sprintf("📦 git commit \"%s\"", msg)
+			}
+			if action != "" {
+				return fmt.Sprintf("🌿 git %s", action)
+			}
+			return "🌿 git"
 		}
 		if path, ok := m["path"].(string); ok && path != "" {
 			return fmt.Sprintf("🔧 %s %s", name, shortenPath(path))

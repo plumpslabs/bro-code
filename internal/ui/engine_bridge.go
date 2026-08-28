@@ -237,32 +237,56 @@ func phaseBadge(s loop.LoopState) string {
 	}
 }
 
-// startsWithEmoji reports whether the first rune is a symbol/emoji glyph.
-func startsWithEmoji(s string) bool {
-	r, _ := utf8.DecodeRuneInString(strings.TrimSpace(s))
-	return r >= 0x2000
+// isEmojiRune reports whether a rune belongs to Unicode emoji / symbol blocks.
+func isEmojiRune(r rune) bool {
+	return (r >= 0x1F000 && r <= 0x1FFFF) || // Supplemental Symbols and Pictographs, Emoticons, Transport, Alphanumeric
+		(r >= 0x2600 && r <= 0x27BF) || // Miscellaneous Symbols (⚙️, ⚠️, ⚡), Dingbats (✓, ✖)
+		(r >= 0x2300 && r <= 0x23FF) || // Miscellaneous Technical (⏳, ⌛)
+		(r >= 0x2B00 && r <= 0x2BFF) || // Miscellaneous Symbols and Arrows
+		(r >= 0x2000 && r <= 0x32FF)    // General punctuation, letterlike symbols, enclosed CJK, box drawing
 }
 
-// normalizeEmojiSpacing ensures that leading emojis have clean 1-space separation.
+// startsWithEmoji reports whether the string leads with an emoji/symbol glyph.
+func startsWithEmoji(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(trimmed)
+	return isEmojiRune(r)
+}
+
+// normalizeEmojiSpacing ensures that leading emojis have clean 1-space separation with following text.
 func normalizeEmojiSpacing(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
 	r, size := utf8.DecodeRuneInString(s)
-	if r >= 0x2000 {
-		rest := s[size:]
-		if len(rest) > 0 {
-			r2, size2 := utf8.DecodeRuneInString(rest)
-			if r2 == 0xfe0f || r2 == 0xfe0e {
-				size += size2
-				rest = s[size:]
+	if isEmojiRune(r) {
+		// Consume full emoji sequence (including variation selectors, skin tone, ZWJ sequences, combined emojis)
+		pos := size
+		for pos < len(s) {
+			nr, nsize := utf8.DecodeRuneInString(s[pos:])
+			if nr == 0xfe0f || nr == 0xfe0e || (nr >= 0x1f3fb && nr <= 0x1f3ff) || nr == 0x200d {
+				pos += nsize
+				if nr == 0x200d && pos < len(s) { // ZWJ: consume joined rune too
+					_, jsize := utf8.DecodeRuneInString(s[pos:])
+					pos += jsize
+				}
+				continue
 			}
+			// If consecutive emoji runes exist (e.g. ⚙️⚠️), consume them together
+			if isEmojiRune(nr) {
+				pos += nsize
+				continue
+			}
+			break
 		}
-		emoji := s[:size]
-		trimmedRest := strings.TrimLeft(rest, " ")
-		if trimmedRest != "" {
-			return emoji + " " + trimmedRest
+		emoji := strings.TrimSpace(s[:pos])
+		rest := strings.TrimLeft(s[pos:], " \t\r\n")
+		if rest != "" {
+			return emoji + " " + rest
 		}
 		return emoji
 	}

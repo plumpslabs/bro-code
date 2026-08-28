@@ -33,6 +33,7 @@ var builderRules = []Rule{
    • edit / write files  → edit_file, write_file, edit_symbol
    • read files (batch)  → read_file (supports paths: [...]), read_files
    • plan & track tasks  → write_todos (dynamic checklist for multi-step goals)
+   • switch persona/mode → switch_mode (propose switching to PLANNER or MINER with user confirmation)
    • search code / text  → grep, search_code, glob, code_locate
    • run tests / shell   → run_tests, bash
    • docs & web lookup   → doc_lookup (Context7 official docs), web_search, fetch_url`,
@@ -95,7 +96,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID:   "b12",
-		Text: `12. PLAN-THEN-ACT (multi-step tasks): When an active task plan (.brocode/current_plan.md) is present, follow the checklist steps and mark completed items cleanly.`,
+		Text: `12. PLAN-THEN-ACT (multi-step tasks): When an active task plan (.brocode/current_plan.md) is present, follow the checklist steps and mark completed items cleanly. MANDATORY REAL-TIME OBJECTIVES (write_todos): For ANY task involving ≥2 files or ≥3 logical steps (refactor, feature, multi-step fix), you MUST invoke 'write_todos' at the beginning of the task to register the objective checklist, and update its status ('in_progress' → 'completed') as you progress.`,
 	},
 	{
 		ID:   "b13",
