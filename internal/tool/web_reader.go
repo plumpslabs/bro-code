@@ -18,6 +18,9 @@ var (
 	boilerClassIDRe = regexp.MustCompile(`(?i)(cookie|banner|advert|sidebar|social|share|breadcrumb|popup|modal|disclaimer|footer|header|menu|nav)`)
 	multipleNewlineRe = regexp.MustCompile(`\n{3,}`)
 	spaceCollapseRe   = regexp.MustCompile(`[ \t]+`)
+	// dangerousAttrRe matches event handler attributes (on*) and javascript: URIs
+	dangerousAttrRe = regexp.MustCompile(`(?i)on\w+`)
+	javascriptSchemeRe = regexp.MustCompile(`(?i)^javascript:`)
 )
 
 // ExtractCleanMarkdownFromHTML parses raw HTML into a DOM tree, prunes boilerplate (scripts, ads, nav),
@@ -78,6 +81,22 @@ func shouldPruneNode(n *html.Node) bool {
 			atom.Iframe, atom.Object, atom.Embed, atom.Dialog:
 			return true
 		}
+
+		// Sanitize dangerous attributes: remove event handlers (on*) and javascript: URIs
+		// to prevent XSS when rendering extracted content.
+		sanitizedAttrs := n.Attr[:0]
+		for _, attr := range n.Attr {
+			// Strip event handler attributes (onclick, onerror, onload, etc.)
+			if dangerousAttrRe.MatchString(attr.Key) {
+				continue
+			}
+			// Strip javascript: URIs from href/src attributes
+			if (attr.Key == "href" || attr.Key == "src") && javascriptSchemeRe.MatchString(attr.Val) {
+				continue
+			}
+			sanitizedAttrs = append(sanitizedAttrs, attr)
+		}
+		n.Attr = sanitizedAttrs
 
 		// Check classes and IDs for boilerplate markers
 		for _, attr := range n.Attr {
@@ -221,11 +240,32 @@ func renderRawText(n *html.Node, sb *strings.Builder) {
 	}
 }
 
+// validateURL checks that a parsed URL is safe to fetch, blocking IPv6 Zone IDs
+// which can be used for SSRF/proxy bypass attacks.
+func validateURL(parsed *url.URL) error {
+	if parsed == nil {
+		return fmt.Errorf("nil URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("only http(s) URLs are supported")
+	}
+	// Block IPv6 Zone IDs (e.g., http://[::1%25eth0]/ or http://[fe80::1%eth0]/)
+	// These can bypass proxy/SSRF protections by referencing link-local interfaces.
+	host := parsed.Hostname()
+	if strings.Contains(host, "%") {
+		return fmt.Errorf("URL contains IPv6 Zone ID (potential SSRF/proxy bypass): %s", host)
+	}
+	return nil
+}
+
 // FetchAndCleanURL fetches a remote webpage and returns clean, DOM-pruned Markdown.
 func FetchAndCleanURL(ctx context.Context, targetURL string) (string, error) {
 	parsed, err := url.Parse(targetURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", fmt.Errorf("only http(s) URLs are supported: %s", targetURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+	if err := validateURL(parsed); err != nil {
+		return "", err
 	}
 
 	tctx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -256,7 +296,7 @@ func FetchAndCleanURL(ctx context.Context, targetURL string) (string, error) {
 		return "", fmt.Errorf("HTTP_ERROR_%d: Website returned status %s", resp.StatusCode, resp.Status)
 	}
 
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {
 		return "", err
 	}

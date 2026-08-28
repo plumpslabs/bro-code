@@ -57,6 +57,14 @@ func (c *Context7Client) ResolveLibrary(ctx context.Context, libraryName string)
 	}
 
 	endpoint := fmt.Sprintf("%s/search?query=%s", c.baseURL, url.QueryEscape(libraryName))
+	parsedURL, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid context7 endpoint URL: %w", err)
+	}
+	if err := validateContext7URL(parsedURL); err != nil {
+		return "", fmt.Errorf("context7 URL security validation failed: %w", err)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
@@ -120,6 +128,13 @@ func (c *Context7Client) GetDocs(ctx context.Context, libraryID, query string) (
 	if query != "" {
 		endpoint += fmt.Sprintf("?query=%s", url.QueryEscape(query))
 	}
+	parsedURL, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid context7 docs URL: %w", err)
+	}
+	if err := validateContext7URL(parsedURL); err != nil {
+		return "", fmt.Errorf("context7 docs URL security validation failed: %w", err)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -182,6 +197,22 @@ func (c *Context7Client) GetDocs(ctx context.Context, libraryID, query string) (
 
 	// Plain text / markdown fallback
 	return strings.TrimSpace(string(raw)), nil
+}
+
+// validateContext7URL checks that a Context7 API URL is safe, blocking IPv6 Zone IDs.
+// Used by ResolveLibrary and GetDocs to validate constructed API URLs before requests.
+func validateContext7URL(parsed *url.URL) error {
+	if parsed == nil {
+		return fmt.Errorf("nil URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("only http(s) URLs are supported")
+	}
+	host := parsed.Hostname()
+	if strings.Contains(host, "%") {
+		return fmt.Errorf("URL contains IPv6 Zone ID (potential SSRF/proxy bypass): %s", host)
+	}
+	return nil
 }
 
 // FetchUnifiedDocs executes 3-tier docs resolution cascade:

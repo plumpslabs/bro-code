@@ -112,6 +112,13 @@ func parseDDGHTML(html string, maxResults int) []WebSearchResult {
 			rawURL = "https://" + strings.TrimPrefix(rawURL, "//")
 		}
 
+		// Validate URL to block IPv6 Zone IDs (SSRF/proxy bypass prevention)
+		if parsed, perr := url.Parse(rawURL); perr == nil {
+			if host := parsed.Hostname(); strings.Contains(host, "%") {
+				continue // skip URLs with IPv6 Zone IDs
+			}
+		}
+
 		title := strings.TrimSpace(htmlTagStripRe.ReplaceAllString(m[2], ""))
 		if title == "" {
 			title = rawURL

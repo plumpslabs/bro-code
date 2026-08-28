@@ -185,19 +185,27 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 			trimmed := strings.TrimSpace(l)
 			if strings.HasPrefix(trimmed, "✓") || strings.HasPrefix(trimmed, "[x]") {
 				desc := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "✓"), "[x]"))
-				formatted = append(formatted, lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("  ✓  "+desc))
+				checkGlyph := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true).Render("  ✓  ")
+				strikethroughText := lipgloss.NewStyle().Foreground(lipgloss.Color("242")).Strikethrough(true).Render(desc)
+				formatted = append(formatted, checkGlyph+strikethroughText)
 			} else if strings.HasPrefix(trimmed, "⏳") || strings.HasPrefix(trimmed, "[/]") {
 				desc := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "⏳"), "[/]"))
-				formatted = append(formatted, lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("  ⏳ "+desc))
+				inProgGlyph := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render("  ⏳ ")
+				activeText := lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true).Render(desc)
+				formatted = append(formatted, inProgGlyph+activeText)
 			} else if strings.HasPrefix(trimmed, "✖") {
 				desc := strings.TrimSpace(strings.TrimPrefix(trimmed, "✖"))
-				formatted = append(formatted, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("  ✖  "+desc))
+				cancelGlyph := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("  ✖  ")
+				cancelText := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Strikethrough(true).Render(desc)
+				formatted = append(formatted, cancelGlyph+cancelText)
 			} else {
 				desc := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "○"), "[ ]"))
-				formatted = append(formatted, lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("  ○  "+desc))
+				pendingGlyph := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("  ○  ")
+				pendingText := lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(desc)
+				formatted = append(formatted, pendingGlyph+pendingText)
 			}
 		}
-		return todoBarStyle.Render(labelStyle.Render("📋 TODOs") + "\n" + strings.Join(formatted, "\n"))
+		return todoBarStyle.Render(labelStyle.Render("📋 OBJECTIVES / TODOS") + "\n" + strings.Join(formatted, "\n"))
 	}
 
 	if strings.HasPrefix(msg, "ASK:\n") {

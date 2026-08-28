@@ -1686,7 +1686,7 @@ func TestTodosLiveUpdateInTUI(t *testing.T) {
 	}
 
 	rendered := m.View().Content
-	if !strings.Contains(rendered, "TODOs") {
+	if !strings.Contains(rendered, "TODOS") && !strings.Contains(rendered, "OBJECTIVES") {
 		t.Fatalf("expected rendered TUI to show TODOs card, got: %s", rendered)
 	}
 }

@@ -97,7 +97,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID:   "b12",
-		Text: `12. PLAN-THEN-ACT (multi-step tasks): When an active task plan (.brocode/current_plan.md) is present, follow the checklist steps and mark completed items cleanly. MANDATORY REAL-TIME OBJECTIVES (write_todos): For ANY task involving ≥2 files or ≥3 logical steps (refactor, feature, multi-step fix), you MUST invoke 'write_todos' at the beginning of the task to register the objective checklist, and update its status ('in_progress' → 'completed') as you progress.`,
+		Text: `12. PLAN-THEN-ACT (multi-step tasks): For ANY task involving ≥2 files or ≥2 logical steps (refactor, feature, multi-step fix), you MUST invoke 'write_todos' at the beginning to initialize the task checklist. CRITICAL LIFECYCLE DISCIPLINE: As you execute each step, IMMEDIATELY call 'write_todos' to transition the finished item to 'completed' and the active item to 'in_progress'. The user sees this live strikethrough checklist in real-time. NEVER leave all items pending while performing edits.`,
 	},
 	{
 		ID:   "b13",

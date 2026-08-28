@@ -6,14 +6,14 @@
 └─┘┴└─└─┘╚═╝└─┘─┴┘└─┘
 ship less, ship right
 
-BroCode v0.1.58
+BroCode v0.1.59
 ```
 
 **Autonomous AI Coding Agent for High-Performance Software Engineering**  
 *Deterministic, token-efficient, zero-data-race coding assistant for real-world production codebases.*
 
 <p align="center">
-  <a href="https://github.com/plumpslabs/bro-code/releases"><img src="https://img.shields.io/badge/release-v0.1.58-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/plumpslabs/bro-code/releases"><img src="https://img.shields.io/badge/release-v0.1.59-blue.svg?style=flat-square" alt="Version"></a>
   <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.24+-00ADD8.svg?style=flat-square&logo=go" alt="Go Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
   <a href="#-platform-compatibility"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20BSD-lightgrey.svg?style=flat-square" alt="Platforms"></a>
