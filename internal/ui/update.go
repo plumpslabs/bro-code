@@ -87,7 +87,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingStream = ""
 				m.activity = nil
 				m.status = "Ready"
-				m.appendMessages(fmt.Sprintf("⚠️ Turn timed out after %s — auto-recovered", timeout))
+				m.appendNote(fmt.Sprintf("NOTE:\n⏱️ **Turn Timeout — Auto-recovered**\n\nTurn timed out after %s and was automatically recovered.\n\nBroCode is ready for your next prompt.", timeout))
 				// Drain any pending queued turns that were waiting on this one.
 				if cmd := m.drainPendingQueue(); cmd != nil {
 					return m, cmd
@@ -193,7 +193,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// stalling into an empty response). Surface it so the UI never
 			// looks stuck on "Thinking..." with no entry — and the queue can
 			// still drain below.
-			m.appendMessages("⚠️ The model returned an empty response — try rephrasing your request or switching models.")
+			m.appendNote("NOTE:\n⚠️ **Model Returned Empty Response**\n\nThe model returned no content — try rephrasing your prompt or switching models via `/models`.")
 			m.status = "Ready"
 		} else {
 			display := strings.TrimSpace(partial)
@@ -227,21 +227,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// model, auth error) so the user can act on it — e.g. switch
 				// model or provider — instead of wondering.
 				reason := m.engine.LastFallbackReason()
-				msg := fmt.Sprintf("⚠️ Primary provider failed — this answer came from fallback model %s.", fb)
+				noteMsg := fmt.Sprintf("NOTE:\n⚠️ **Fallback Provider Active**\n\nPrimary provider failed — this response was served by fallback model: **`%s`**.", fb)
 				if reason != "" && len(reason) < 300 {
-					msg += "\nReason: " + reason
+					noteMsg += "\n\n**Reason:** " + reason
 				}
 				// Adaptive routing status: the circuit breaker's cooldown means
 				// the primary is temporarily skipped (it will be retried
 				// automatically), and the running fallback count shows whether
 				// this is a one-off blip or a persistent condition.
 				if cd := m.engine.PrimaryCooldownRemaining(); cd > 0 {
-					msg += fmt.Sprintf("\nPrimary is cooling down (%s) — will be retried automatically.", cd.Round(time.Second))
+					noteMsg += fmt.Sprintf("\n\n**Cooldown:** Primary is cooling down (%s) — will be retried automatically.", cd.Round(time.Second))
 				}
 				if n := m.engine.FallbackCount(); n > 1 {
-					msg += fmt.Sprintf("\nFallbacks so far this session: %d turn(s).", n)
+					noteMsg += fmt.Sprintf("\n\n**Fallback count this session:** %d turn(s).", n)
 				}
-				m.appendMessages(msg)
+				m.appendNote(noteMsg)
 			}
 			m.status = "Ready"
 		}
@@ -325,7 +325,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case versionCheckResultMsg:
 		if msg.hasUpdate {
-			m.appendNote(fmt.Sprintf("✨ New version available: **%s** → **%s**! Type `/update` to upgrade instantly.", version.Version, msg.latest))
+			m.appendNote(fmt.Sprintf("NOTE:\n✨ **Update Available!**\n\nA new version of BroCode is available: **%s** → **%s**\n\nType `/update` to upgrade now.", version.Version, msg.latest))
 		}
 
 	case diagnoseFixMsg:
@@ -333,7 +333,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendNote(diag)
 		// Nothing to fix — don't spawn a pointless turn.
 		if strings.Contains(diag, "No diagnostics found") {
-			m.appendNote("✅ No diagnostics to fix.")
+			m.appendNote("NOTE:\n✅ **No Diagnostics Found**\n\nAll code is clean — no warnings or errors to fix.")
 			m.status = "Ready"
 			return m, nil
 		}
@@ -630,9 +630,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = m.pendingMode
 				m.engine.SetMode(m.mode)
 				m.persistMode()
-				m.appendMessages(fmt.Sprintf("✅ Mode → %s", m.mode))
+				m.appendNote(fmt.Sprintf("NOTE:\n✅ **Mode Switched**\n\nActive mode is now: **%s**", m.mode))
 			case "n", "N", "esc":
-				m.appendMessages("❌ Ganti mode dibatalkan.")
+				m.appendNote("NOTE:\n❌ **Mode Switch Cancelled**\n\nMode unchanged.")
 			}
 			m.showModeConfirm = false
 			m.pendingMode = ""
@@ -649,10 +649,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+m":
 			if m.mouseMode == "SCROLL" {
 				m.mouseMode = "SELECT"
-				m.appendMessages("🖱️ Mouse Mode: SELECT (Native mouse drag highlight & copy enabled)")
+				m.appendNote("NOTE:\n🖱️ **Mouse Mode: SELECT**\n\nNative mouse drag highlight & copy is now active. You can click-drag text **without holding `Shift`**.")
 			} else {
 				m.mouseMode = "SCROLL"
-				m.appendMessages("🖱️ Mouse Mode: SCROLL (Mouse wheel viewport scrolling enabled)")
+				m.appendNote("NOTE:\n🖱️ **Mouse Mode: SCROLL**\n\nMouse wheel viewport scrolling is now active. Use `/mouse` or `Ctrl+M` to switch back to SELECT mode.")
 			}
 			return m, nil
 
@@ -660,8 +660,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			lastAns := m.lastAssistantAnswer()
 			if lastAns != "" {
 				if err := clipboard.WriteAll(lastAns); err == nil {
-					m.appendMessages("📋 Copied last assistant response to OS clipboard!")
+					m.appendNote("NOTE:\n📋 **Copied to Clipboard!**\n\nThe last BroCode response has been copied to your OS clipboard. Paste anywhere with `Cmd+V` / `Ctrl+V`.")
+				} else {
+					m.appendNote("NOTE:\n❌ **Clipboard Error**\n\nFailed to copy to clipboard: " + err.Error())
 				}
+			} else {
+				m.appendNote("NOTE:\n⚠️ **Nothing to Copy**\n\nNo BroCode response found in this session yet.")
 			}
 			return m, nil
 
@@ -728,6 +732,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.showAsk {
+				if m.askCustomQ >= 0 {
+					m.askCustomQ = -1
+					m.askCustomInput.Blur()
+				}
 				if keyStr == "shift+tab" {
 					m.askMoveRow(-1)
 				} else {
@@ -775,6 +783,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.askCustomQ = -1
 					m.askCustomInput.Blur()
 					m.askCustomInput.SetValue("")
+					m.refreshAskModal()
 				} else {
 					m.skipAsk()
 				}
@@ -840,7 +849,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if partial != "" {
 					m.appendMessages("BROCODE:\n💭 (interrupted — partial response)\n\n" + partial)
 				}
-				m.appendMessages("⚡ Interrupted turn execution.")
+				m.appendNote("NOTE:\n⚡ **Turn Interrupted**\n\nTurn execution stopped. BroCode is ready for your next prompt.")
 				if len(m.pendingQueue) > 0 {
 					next := m.pendingQueue[0]
 					m.pendingQueue = m.pendingQueue[1:]
@@ -1100,7 +1109,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.showAsk && m.askCustomQ < 0 {
+			if m.showAsk {
+				if m.askCustomQ >= 0 {
+					m.askCustomQ = -1
+					m.askCustomInput.Blur()
+				}
 				m.askMove(-1)
 				return m, nil
 			}
@@ -1176,7 +1189,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.showAsk && m.askCustomQ < 0 {
+			if m.showAsk {
+				if m.askCustomQ >= 0 {
+					m.askCustomQ = -1
+					m.askCustomInput.Blur()
+				}
 				m.askMove(1)
 				return m, nil
 			}

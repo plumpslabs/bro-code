@@ -70,6 +70,8 @@ var BuiltinSlashCommands = []AutocompleteItem{
 	{Value: "/mcp", Label: "/mcp", Desc: "Show MCP server status & registered tools"},
 	{Value: "/mcp-reload", Label: "/mcp-reload", Desc: "Hot-reload all MCP server configurations"},
 	{Value: "/trace", Label: "/trace", Desc: "Show provenance trace for last turn's output"},
+	{Value: "/copy", Label: "/copy", Desc: "Copy last assistant response directly to OS clipboard"},
+	{Value: "/mouse", Label: "/mouse", Desc: "Toggle mouse mode: SELECT (drag copy) ↔ SCROLL (wheel scrolling)"},
 }
 
 // DetectAutocomplete inspects the current prompt input text and cursor position

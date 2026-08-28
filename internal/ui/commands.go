@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/atotto/clipboard"
 	"github.com/plumpslabs/bro-code/internal/agent"
 	bcontext "github.com/plumpslabs/bro-code/internal/context"
 	"github.com/plumpslabs/bro-code/internal/loop"
@@ -42,6 +43,8 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 - **` + "`/cost`" + `** — Live token usage & spend telemetry (USD & IDR)
 
 ### ⚙️ Sessions & Configuration
+- **` + "`/copy`" + `** — Copy the latest assistant response directly to OS clipboard
+- **` + "`/mouse`" + `** — Toggle mouse mode (SELECT for native drag copy vs SCROLL for wheel)
 - **` + "`/models`" + `** — Interactive model picker
 - **` + "`/model <id>`" + `** — Quick model switch (e.g. ` + "`/model deepseek-v4-flash-free`" + `)
 - **` + "`/connect`" + `** — 2-step API Key & provider setup wizard
@@ -151,11 +154,11 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "/ask":
 		query := strings.TrimSpace(strings.TrimPrefix(cmd, "/ask"))
 		if query == "" {
-			m.appendMessages("Usage: `/ask <question>`\nAsk an isolated question about the codebase without polluting your active task's conversation context.\n\nExample: `/ask Where is the WhatsApp webhook handler defined?`")
+			m.appendNote("NOTE:\n❓ **Usage: `/ask <question>`**\n\nAsk an isolated question about the codebase without polluting your active task context.\n\n**Example:** `/ask Where is the WhatsApp webhook handler defined?`")
 			return m, nil
 		}
 		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
-			m.appendNote("⚠️ Subagent runner is not initialized for /ask.")
+			m.appendNote("NOTE:\n⚠️ **Subagent runner is not initialized for /ask.**")
 			return m, nil
 		}
 		m.appendNote("CMD:/ask\n" + query)
@@ -196,11 +199,11 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "/spec":
 		feature := strings.TrimSpace(strings.TrimPrefix(cmd, "/spec"))
 		if feature == "" {
-			m.appendNote("Usage: `/spec <feature description>`\nDraft a structured Architectural Blueprint Specification Contract (ADR, endpoints, data models, blast radius) before writing code.\n\nExample: `/spec Multi-channel Webhook Dispatcher`")
+			m.appendNote("NOTE:\n📋 **Usage: `/spec <feature description>`**\n\nDraft an Architectural Blueprint Specification Contract (ADR, endpoints, data models, blast radius) before writing code.\n\n**Example:** `/spec Multi-channel Webhook Dispatcher`")
 			return m, nil
 		}
 		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
-			m.appendNote("⚠️ Subagent runner is not initialized for /spec.")
+			m.appendNote("NOTE:\n⚠️ **Subagent runner is not initialized for /spec.**")
 			return m, nil
 		}
 		m.appendNote("CMD:/spec\n" + feature)
@@ -211,11 +214,11 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "/tournament":
 		task := strings.TrimSpace(strings.TrimPrefix(cmd, "/tournament"))
 		if task == "" {
-			m.appendNote("Usage: `/tournament <bug or complex task>`\nRuns 2 parallel candidate agents with distinct solving strategies to find the cleanest, verified solution.\n\nExample: `/tournament Fix race condition in connection pooling`")
+			m.appendNote("NOTE:\n🏆 **Usage: `/tournament <bug or complex task>`**\n\nRun 2 parallel candidate agents with distinct strategies to find the cleanest verified solution.\n\n**Example:** `/tournament Fix race condition in connection pooling`")
 			return m, nil
 		}
 		if m.scoutMgr == nil || m.scoutMgr.Runner == nil {
-			m.appendNote("⚠️ Subagent runner is not initialized for /tournament.")
+			m.appendNote("NOTE:\n⚠️ **Subagent runner is not initialized for /tournament.**")
 			return m, nil
 		}
 		m.appendNote("CMD:/tournament\n" + task)
@@ -519,17 +522,17 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		agentName := strings.TrimSpace(strings.TrimPrefix(cmd, "/agent"))
 		if agentName == "" {
 			if m.activeAgent != nil {
-				m.appendNote(fmt.Sprintf("🟢 Active Custom Agent: **%s** (%s)\nMode: %s\nPath: %s\n\nType `/agent reset` to deactivate.",
+				m.appendNote(fmt.Sprintf("NOTE:\n🟢 **Custom Agent Active: %s**\n\n- **Description:** %s\n- **Mode:** %s\n- **Path:** `%s`\n\nType `/agent reset` to deactivate.",
 					m.activeAgent.Name, m.activeAgent.Description, m.activeAgent.Mode, m.activeAgent.Path))
 			} else {
-				m.appendNote("No custom agent currently active.\n\nUsage: `/agent <name>` or `/agent reset`\nList all available agents with `/agents`.")
+				m.appendNote("NOTE:\nℹ️ **No custom agent active**\n\nUsage: `/agent <name>` or `/agent reset`\nList all available agents with `/agents`.")
 			}
 			return m, nil
 		}
 		if agentName == "reset" || agentName == "clear" || agentName == "off" || agentName == "none" {
 			m.activeAgent = nil
 			m.rebuildEngine()
-			m.appendNote("⚪ Custom agent deactivated. Reverted to standard " + m.mode + " mode.")
+			m.appendNote("NOTE:\n⚪ **Custom Agent Deactivated**\n\nReverted to standard mode: **" + m.mode + "**")
 			return m, nil
 		}
 
@@ -539,7 +542,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 		targetAg := m.agentLoader.Find(agentName)
 		if targetAg == nil {
-			m.appendNote(fmt.Sprintf("❌ Custom agent %q not found.\n\nType `/agents` to view all available custom agents in project and global locations.", agentName))
+			m.appendNote(fmt.Sprintf("NOTE:\n❌ **Custom Agent Not Found: `%s`**\n\nType `/agents` to view all available custom agents.", agentName))
 			return m, nil
 		}
 
@@ -548,7 +551,7 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.mode = targetAg.Mode
 		}
 		m.rebuildEngine()
-		m.appendNote(fmt.Sprintf("🟢 Switched to Custom Agent: **%s**\nDescription: %s\nMode: %s\nDirectives: Loaded from `%s`",
+		m.appendNote(fmt.Sprintf("NOTE:\n🟢 **Switched to Custom Agent: %s**\n\n- **Description:** %s\n- **Mode:** %s\n- **Directives:** Loaded from `%s`",
 			targetAg.Name, targetAg.Description, targetAg.Mode, targetAg.Path))
 		return m, nil
 
@@ -664,6 +667,27 @@ func (m *Model) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.connectCustom = false
 			m.connectTextInput.SetValue("")
 			m.connectProviderSel = 0
+		}
+
+	case "/copy":
+		lastAns := m.lastAssistantAnswer()
+		if lastAns != "" {
+			if err := clipboard.WriteAll(lastAns); err == nil {
+				m.appendNote("NOTE:\n📋 **Copied to Clipboard!**\n\nThe last BroCode response has been copied to your OS clipboard. Paste anywhere with `Cmd+V` / `Ctrl+V`.")
+			} else {
+				m.appendNote("NOTE:\n❌ **Clipboard Error**\n\nFailed to copy to clipboard: " + err.Error())
+			}
+		} else {
+			m.appendNote("NOTE:\n⚠️ **Nothing to Copy**\n\nNo BroCode response found in this session yet.")
+		}
+
+	case "/mouse":
+		if m.mouseMode == "SCROLL" {
+			m.mouseMode = "SELECT"
+			m.appendNote("NOTE:\n🖱️ **Mouse Mode: SELECT**\n\nNative mouse drag highlight & copy is now active. You can click-drag text **without holding `Shift`**.\n\nType `/mouse` or press `Ctrl+M` to switch back to SCROLL mode.")
+		} else {
+			m.mouseMode = "SCROLL"
+			m.appendNote("NOTE:\n🖱️ **Mouse Mode: SCROLL**\n\nMouse wheel viewport scrolling is now active.\n\nType `/mouse` or press `Ctrl+M` to switch to SELECT mode (drag to copy without Shift).")
 		}
 
 	case "/debug-context":

@@ -195,8 +195,22 @@ func (m *Model) refreshAskModal() {
 		cw = 10
 	}
 	m.askCustomInput.SetWidth(cw)
-	if m.askCustomQ >= 0 {
+
+	// Multi-question dynamic autoscroll: keep active cursor visible in viewport
+	total := m.askTotalRows()
+	if m.askOnSubmit() || m.askCustomQ >= 0 {
 		m.askViewport.GotoBottom()
+	} else if total > 0 && m.askFlat > 0 {
+		lines := strings.Count(body, "\n") + 1
+		if lines > h {
+			// Estimate cursor line position proportionally
+			targetLine := (m.askFlat * lines) / total
+			if targetLine > h/2 {
+				m.askViewport.SetYOffset(targetLine - (h / 2))
+			} else {
+				m.askViewport.GotoTop()
+			}
+		}
 	} else {
 		m.askViewport.GotoTop()
 	}
@@ -359,8 +373,20 @@ func (m *Model) appendAskToHistory(results []tool.AskResult) {
 		}
 		q := strings.TrimSpace(r.Question)
 		if cmd, ok := extractCommandFromQuestion(q); ok {
-			// Clean terminal command card without raw backticks
-			entries = append(entries, fmt.Sprintf("• Command Approval: %s\n  $ %s", ans, cmd))
+			var details []string
+			// Extract extra human context lines (e.g. "📝 Commit message: ...", "📂 Staging: ...")
+			lines := strings.Split(q, "\n")
+			for _, l := range lines {
+				l = strings.TrimSpace(l)
+				if (strings.HasPrefix(l, "📝") || strings.HasPrefix(l, "📂") || strings.HasPrefix(l, "📦") || strings.HasPrefix(l, "🌐") || strings.HasPrefix(l, "🗑️") || strings.HasPrefix(l, "📥")) && !strings.Contains(l, "```") {
+					details = append(details, "    "+l)
+				}
+			}
+			if len(details) > 0 {
+				entries = append(entries, fmt.Sprintf("• Command Approval: %s\n    $ %s\n%s", ans, cmd, strings.Join(details, "\n")))
+			} else {
+				entries = append(entries, fmt.Sprintf("• Command Approval: %s\n    $ %s", ans, cmd))
+			}
 		} else if strings.Contains(q, "\n") {
 			lines := strings.Split(q, "\n")
 			firstLine := strings.TrimSpace(lines[0])
@@ -370,7 +396,11 @@ func (m *Model) appendAskToHistory(results []tool.AskResult) {
 		}
 	}
 	if len(entries) > 0 {
-		m.appendMessages("YOU:\n" + strings.Join(entries, "\n\n"))
+		entryText := strings.Join(entries, "\n\n")
+		m.appendMessages("YOU:\n" + entryText)
+		if m.context != nil {
+			_ = m.context.AppendUserMessage(entryText)
+		}
 	}
 }
 

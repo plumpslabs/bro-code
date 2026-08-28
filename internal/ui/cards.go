@@ -429,6 +429,27 @@ func formatMessage(msg string, width int, filesExpanded bool) string {
 		return errStyle.Render(msg)
 	}
 
+	// NOTE:\n card — system notifications (mouse mode, clipboard, etc.)
+	// Renders with a teal left border and full Markdown rendering so bold,
+	// emoji, and bullet lists all look clean in the chat history.
+	if strings.HasPrefix(msg, "NOTE:\n") {
+		content := strings.TrimPrefix(msg, "NOTE:\n")
+		noteBarStyle := lipgloss.NewStyle().
+			Border(lipgloss.ThickBorder(), false, false, false, true).
+			BorderForeground(lipgloss.Color("86")).
+			Padding(0, 1)
+		if width > 0 {
+			noteBarStyle = noteBarStyle.Width(width)
+		}
+		labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+		wrap := width - 6
+		if wrap < 30 {
+			wrap = 30
+		}
+		rendered := renderMarkdown(strings.TrimSpace(content), wrap)
+		return noteBarStyle.Render(labelStyle.Render("ℹ️  BROCODE") + "\n\n" + rendered)
+	}
+
 	if width > 0 {
 		return lipgloss.NewStyle().Width(width).Render(msg)
 	}
