@@ -153,12 +153,10 @@ func TestGateActionApprovalFlow(t *testing.T) {
 	}
 }
 
-// TestGateActionAllowOnceRemembersExactCommand verifies that an "Allow once"
-// approval also remembers the EXACT command, so an identical re-run within the
-// session does NOT re-prompt (previously every re-run popped a fresh gated
-// prompt — the "Allow once / Allow once" loop). A DIFFERENT gated command must
-// still prompt.
-func TestGateActionAllowOnceRemembersExactCommand(t *testing.T) {
+// TestGateActionAllowOnceRequiresRePrompt verifies that an "Allow once"
+// approval does NOT remember the command for subsequent calls (Allow once = truly once).
+// Only "Always allow" skips re-prompting for the session.
+func TestGateActionAllowOnceRequiresRePrompt(t *testing.T) {
 	ctx := context.Background()
 	r := NewRegistry()
 
@@ -176,19 +174,11 @@ func TestGateActionAllowOnceRemembersExactCommand(t *testing.T) {
 		t.Fatalf("expected exactly 1 prompt, got %d", calls)
 	}
 
-	// Identical command re-run must skip the handler (no second prompt).
+	// Identical command re-run MUST prompt again for Allow once.
 	if approved, _, _ := r.GateAction(ctx, providerToolCall("bash", fmt.Sprintf(`{"command":%q}`, cmd))); !approved {
-		t.Fatalf("identical re-run should be auto-approved via session memory")
-	}
-	if calls != 1 {
-		t.Fatalf("identical re-run must not re-prompt, prompts=%d", calls)
-	}
-
-	// A DIFFERENT gated command still requires approval.
-	if approved, _, _ := r.GateAction(ctx, providerToolCall("bash", `{"command":"rm -rf dist"}`)); !approved {
-		t.Fatalf("different gated command should still be approved on prompt")
+		t.Fatalf("second allow-once should approve")
 	}
 	if calls != 2 {
-		t.Fatalf("different gated command must prompt again, prompts=%d", calls)
+		t.Fatalf("identical re-run must prompt again for Allow once, prompts=%d", calls)
 	}
 }

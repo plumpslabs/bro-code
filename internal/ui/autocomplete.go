@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/plumpslabs/bro-code/internal/agent"
+	"github.com/plumpslabs/bro-code/internal/skill"
 )
 
 // AutocompleteKind distinguishes between slash commands and file mentions.
@@ -38,60 +40,85 @@ var BuiltinSlashCommands = []AutocompleteItem{
 	{Value: "/ask", Label: "/ask", Desc: "Isolated QA: Ask codebase questions without context pollution"},
 	{Value: "/spec", Label: "/spec", Desc: "Spec-First Gate: Draft an architectural blueprint contract"},
 	{Value: "/tournament", Label: "/tournament", Desc: "Multi-Candidate: Run 2 parallel candidate agents to solve tasks"},
+	{Value: "/repair", Label: "/repair", Desc: "Autonomous pipeline repair doctor for build/test failures"},
 	{Value: "/help", Label: "/help", Desc: "Help commands & keyboard shortcuts"},
 	{Value: "/plan", Label: "/plan", Desc: "View or archive active plan (/plan, /plan archive)"},
 	{Value: "/undo", Label: "/undo", Desc: "Time-Travel Rollback: Revert file changes from last turn"},
+	{Value: "/diff", Label: "/diff", Desc: "Side-by-side visual diff viewer for modified files"},
+	{Value: "/diagnose", Label: "/diagnose", Desc: "Run autonomous codebase diagnostics (/diagnose, /diagnose fix)"},
+	{Value: "/trace", Label: "/trace", Desc: "Show provenance trace for last turn's output"},
+	{Value: "/cost", Label: "/cost", Desc: "Token statistics & estimated spend (USD & IDR)"},
 	{Value: "/report", Label: "/report", Desc: "View or export privacy-safe benchmark/activity report"},
 	{Value: "/memory", Label: "/memory", Desc: "View learned project knowledge & gotchas"},
-	{Value: "/sessions", Label: "/sessions", Desc: "Switch / manage session history"},
-	{Value: "/models", Label: "/models", Desc: "Select active AI model"},
+	{Value: "/sessions", Label: "/sessions", Desc: "Switch / manage session history (/sessions, /history)"},
+	{Value: "/models", Label: "/models", Desc: "Select active AI model interactively"},
 	{Value: "/model", Label: "/model", Desc: "Switch model directly (/model <name>)"},
 	{Value: "/connect", Label: "/connect", Desc: "Configure providers & API keys"},
-	{Value: "/cost", Label: "/cost", Desc: "Token statistics & estimated spend (USD & IDR)"},
-	{Value: "/lsp", Label: "/lsp", Desc: "Language Server Protocol status"},
-	{Value: "/diagnose", Label: "/diagnose", Desc: "Run autonomous codebase diagnostics (/diagnose, /diagnose fix)"},
-	{Value: "/lsp-install", Label: "/lsp-install", Desc: "LSP binary installation guide"},
+	{Value: "/copy", Label: "/copy", Desc: "Copy last assistant response directly to OS clipboard"},
+	{Value: "/mouse", Label: "/mouse", Desc: "Toggle mouse mode: SELECT (drag copy) ↔ SCROLL (wheel scrolling)"},
 	{Value: "/builder", Label: "/builder", Desc: "BUILDER mode: autonomous coding & file editing"},
 	{Value: "/planner", Label: "/planner", Desc: "PLANNER mode: read-only architecture analysis"},
 	{Value: "/miner", Label: "/miner", Desc: "MINER mode: deep codebase exploration & memory persistence"},
 	{Value: "/mode", Label: "/mode", Desc: "Switch engine mode (/mode builder|planner|miner)"},
-	{Value: "/workspace", Label: "/workspace", Desc: "Manage multi-repo workspace & repos"},
-	{Value: "/clear", Label: "/clear", Desc: "Clear chat history screen"},
-	{Value: "/new", Label: "/new", Desc: "Start a new conversation session"},
-	{Value: "/search-key", Label: "/search-key", Desc: "Configure web search API key (Tavily/Exa) for documentation research"},
-	{Value: "/context7-key", Label: "/context7-key", Desc: "Configure Context7 API key for native official library documentation"},
-	{Value: "/diff", Label: "/diff", Desc: "Side-by-side visual diff viewer for modified files"},
-	{Value: "/repair", Label: "/repair", Desc: "Autonomous pipeline repair doctor for build/test failures"},
-	{Value: "/worktree", Label: "/worktree", Desc: "Git worktree sandboxing for isolated agent experiments"},
-	{Value: "/update", Label: "/update", Desc: "Check and perform autonomous in-place self-update"},
-	{Value: "/debug-context", Label: "/debug-context", Desc: "Dump active context tokens"},
-	{Value: "/agents", Label: "/agents", Desc: "List active subagents & their status"},
-	{Value: "/agent", Label: "/agent", Desc: "Control a subagent (/agent <id> stop|status)"},
+	{Value: "/lsp", Label: "/lsp", Desc: "Language Server Protocol status"},
+	{Value: "/lsp-install", Label: "/lsp-install", Desc: "LSP binary installation guide"},
 	{Value: "/mcp", Label: "/mcp", Desc: "Show MCP server status & registered tools"},
 	{Value: "/mcp-reload", Label: "/mcp-reload", Desc: "Hot-reload all MCP server configurations"},
-	{Value: "/trace", Label: "/trace", Desc: "Show provenance trace for last turn's output"},
-	{Value: "/copy", Label: "/copy", Desc: "Copy last assistant response directly to OS clipboard"},
-	{Value: "/mouse", Label: "/mouse", Desc: "Toggle mouse mode: SELECT (drag copy) ↔ SCROLL (wheel scrolling)"},
+	{Value: "/workspace", Label: "/workspace", Desc: "Manage multi-repo workspace & repos (/workspace, /repos)"},
+	{Value: "/worktree", Label: "/worktree", Desc: "Git worktree sandboxing for isolated agent experiments"},
+	{Value: "/search-key", Label: "/search-key", Desc: "Configure web search API key (Tavily/Exa)"},
+	{Value: "/context7-key", Label: "/context7-key", Desc: "Configure Context7 API key for library docs"},
+	{Value: "/clear", Label: "/clear", Desc: "Clear chat history screen"},
+	{Value: "/new", Label: "/new", Desc: "Start a new conversation session"},
+	{Value: "/update", Label: "/update", Desc: "Check and perform autonomous in-place self-update"},
+	{Value: "/debug-context", Label: "/debug-context", Desc: "Dump active context tokens"},
+	{Value: "/agents", Label: "/agents", Desc: "List all detected custom subagents"},
 }
 
 // DetectAutocomplete inspects the current prompt input text and cursor position
-// to determine if slash command or file mention completion should activate.
+// to determine if slash command, custom skill, agent mention, or file mention completion should activate.
 // It preserves previous selection index if the query has not changed.
-func DetectAutocomplete(input string, allFiles []string, prev AutocompleteState) AutocompleteState {
+func DetectAutocomplete(input string, allFiles []string, customAgents []agent.CustomAgent, customSkills []skill.Skill, prev AutocompleteState) AutocompleteState {
 	text := input
 	if text == "" {
 		return AutocompleteState{}
 	}
 
-	// 1. Slash command detection (input starts with '/' and has no whitespace yet)
+	// 1. Slash command & Custom Skill detection (input starts with '/' and has no whitespace yet)
 	if strings.HasPrefix(text, "/") && !strings.ContainsAny(text, " \t\n") {
 		query := strings.ToLower(text)
 		var matches []AutocompleteItem
-		for _, cmd := range BuiltinSlashCommands {
-			if strings.HasPrefix(strings.ToLower(cmd.Value), query) || strings.Contains(strings.ToLower(cmd.Value), query[1:]) {
-				matches = append(matches, cmd)
+
+		// Priority A: Custom Skills (/skill-name)
+		for _, sk := range customSkills {
+			val := "/" + sk.Name
+			if strings.HasPrefix(strings.ToLower(val), query) || strings.Contains(strings.ToLower(sk.Name), query[1:]) || strings.Contains(strings.ToLower(sk.Description), query[1:]) {
+				desc := sk.Description
+				if desc == "" {
+					desc = "Custom Workflow Skill"
+				}
+				matches = append(matches, AutocompleteItem{
+					Value: val,
+					Label: val,
+					Desc:  "✨ " + desc,
+				})
 			}
 		}
+
+		// Priority B: Builtin Slash Commands (exact prefix matches first, then substring matches)
+		var prefixMatches []AutocompleteItem
+		var subMatches []AutocompleteItem
+		for _, cmd := range BuiltinSlashCommands {
+			cmdVal := strings.ToLower(cmd.Value)
+			if strings.HasPrefix(cmdVal, query) {
+				prefixMatches = append(prefixMatches, cmd)
+			} else if strings.Contains(cmdVal, query[1:]) || strings.Contains(strings.ToLower(cmd.Desc), query[1:]) {
+				subMatches = append(subMatches, cmd)
+			}
+		}
+		matches = append(matches, prefixMatches...)
+		matches = append(matches, subMatches...)
+
 		if len(matches) > 0 {
 			sel := 0
 			if prev.Active && prev.Kind == AutoKindSlash && prev.Query == text {
@@ -114,7 +141,7 @@ func DetectAutocomplete(input string, allFiles []string, prev AutocompleteState)
 		return AutocompleteState{}
 	}
 
-	// 2. File mention detection (find last '@' token in current line)
+	// 2. Mention detection (agents and files via '@')
 	lastLine := text
 	if idx := strings.LastIndex(text, "\n"); idx >= 0 {
 		lastLine = text[idx+1:]
@@ -126,6 +153,27 @@ func DetectAutocomplete(input string, allFiles []string, prev AutocompleteState)
 		if !strings.ContainsAny(query, " \t") {
 			lQuery := strings.ToLower(query)
 			var matches []AutocompleteItem
+
+			// Priority A: Custom Subagents (@agentName)
+			for _, ag := range customAgents {
+				agName := ag.Name
+				if agName == "" {
+					continue
+				}
+				if lQuery == "" || strings.Contains(strings.ToLower(agName), lQuery) || strings.Contains(strings.ToLower(ag.Description), lQuery) {
+					desc := ag.Description
+					if desc == "" {
+						desc = fmt.Sprintf("Custom %s Agent", ag.Mode)
+					}
+					matches = append(matches, AutocompleteItem{
+						Value: agName,
+						Label: "@" + agName,
+						Desc:  desc,
+					})
+				}
+			}
+
+			// Priority B: Project Files (@filename)
 			for _, f := range allFiles {
 				base := filepath.Base(f)
 				if lQuery == "" || strings.Contains(strings.ToLower(f), lQuery) || strings.Contains(strings.ToLower(base), lQuery) {
@@ -139,6 +187,7 @@ func DetectAutocomplete(input string, allFiles []string, prev AutocompleteState)
 					}
 				}
 			}
+
 			if len(matches) > 0 {
 				sel := 0
 				if prev.Active && prev.Kind == AutoKindFile && prev.Query == query {
@@ -205,7 +254,7 @@ func RenderAutocomplete(state AutocompleteState, width int) string {
 	if state.Kind == AutoKindSlash {
 		header = fmt.Sprintf("⚡ Slash Commands (%d/%d):", state.Selected+1, len(state.Items))
 	} else if state.Kind == AutoKindFile {
-		header = fmt.Sprintf("📂 File Mention (%d/%d):", state.Selected+1, len(state.Items))
+		header = fmt.Sprintf("📂 Mentions — Files & Agents (%d/%d):", state.Selected+1, len(state.Items))
 	}
 	rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true).Render(header))
 

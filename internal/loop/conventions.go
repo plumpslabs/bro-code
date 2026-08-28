@@ -477,16 +477,14 @@ func (e *Engine) reviewEditedFiles(ctx context.Context) string {
 		}
 	}
 
-	// Layer 2: senior LLM review only when the free checks are clean and we
-	// are still inside the per-turn budget. If Layer 1 already found problems,
-	// don't spend tokens — the model must fix those first. Two bounded angles
-	// run on successive clean review rounds: correctness (round 1) then
-	// security/edge/regression (round 2, AFTER the model fixed round 1's
-	// findings) — so the same code is seen from two lenses and the fix itself
-	// is re-reviewed. Small edits (≤30 lines) never reach the second angle.
+	// Layer 2: Adaptive Verification Ladder (Prompt-Induced Waste Mitigation).
+	// When Layer 1 deterministic checks (regex syntax, duplicates, LSP) are clean,
+	// run Layer 2 (senior LLM review): correctness angle (round 1).
+	// The second angle (security/edge review in round 2) is adaptively reserved
+	// for high-complexity tasks (>30 lines touched) to prevent excessive review loops.
 	if len(issues) == 0 && e.reviewLLMEnabled && e.reviewPasses <= maxReviewPasses {
 		if e.reviewPasses == 1 || highComplexity {
-			var angle  = llmReviewCorrectness
+			var angle = llmReviewCorrectness
 			if e.reviewPasses > 1 {
 				angle = llmReviewSecurity
 			}

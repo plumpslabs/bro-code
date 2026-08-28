@@ -199,7 +199,9 @@ func (m *Model) buildLog(contentWidth int) string {
 	out.WriteString(m.renderedHistory)
 	if m.streaming && m.pendingStream != "" {
 		streamMode := m.turnMode
-		if streamMode == "" {
+		if m.engine != nil && m.engine.Mode() != "" {
+			streamMode = m.engine.Mode()
+		} else if streamMode == "" {
 			streamMode = m.mode
 		}
 		if streamMode == "" {

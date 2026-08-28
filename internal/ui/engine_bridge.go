@@ -177,7 +177,12 @@ func (m *Model) startTurn(userQuery string) (tea.Model, tea.Cmd) {
 		if m.quitting {
 			return nil
 		}
-		return turnResultMsg{content: res, err: err, mode: thisMode, gen: thisGen}
+		// Stamp the answer with the engine's CURRENT mode, not the mode
+		// captured at turn start: an autonomous switch_mode approval can flip
+		// the engine mode mid-turn, and the badge must reflect the mode the
+		// turn actually ended in (otherwise it keeps showing the stale
+		// pre-switch mode, e.g. MINER after switching to BUILDER).
+		return turnResultMsg{content: res, err: err, mode: m.engine.Mode(), gen: thisGen}
 	}
 
 	return m, tea.Batch(runTurnCmd, tickCmd())
@@ -415,6 +420,12 @@ func NewApp(
 		askTool.Ask = brk.Ask
 	}
 	tools.SetUserAskHandler(brk.Ask)
+	// Wire the registry-level ask handler too: switch_mode (and any other
+	// tool that gates on user confirmation) reads t.Ask from r.askFunc, which
+	// is only set here. Without this, switch_mode runs with Ask == nil and
+	// silently returns "Autonomous mode switch requested" — no approval modal
+	// and the engine never actually switches mode.
+	tools.SetAskHandler(brk.Ask)
 	fbrk := newFileConfirmBroker()
 	tools.SetFileActionHandler(fbrk.Confirm)
 
@@ -524,6 +535,34 @@ func (m *Model) allProjectFiles() []string {
 			}
 		}
 		return res
+	}
+	return nil
+}
+
+func (m *Model) allCustomAgents() []agent.CustomAgent {
+	if m.agentLoader == nil {
+		cwd, _ := os.Getwd()
+		m.agentLoader = agent.NewLoader(cwd)
+	}
+	if m.agentLoader != nil {
+		return m.agentLoader.All()
+	}
+	return nil
+}
+
+func (m *Model) allCustomSkills() []skill.Skill {
+	if m.skillLoader == nil {
+		cwd, _ := os.Getwd()
+		m.skillLoader = skill.NewLoader(cwd)
+	}
+	if m.skillLoader != nil {
+		var custom []skill.Skill
+		for _, s := range m.skillLoader.All() {
+			if !s.Builtin {
+				custom = append(custom, s)
+			}
+		}
+		return custom
 	}
 	return nil
 }

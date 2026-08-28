@@ -369,7 +369,7 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 		return false, fmt.Sprintf("⚠️ [READ-ONLY MODE]: Tool '%s' is disabled in PLANNER mode. You do NOT need to write any plan file to disk yourself. Simply output your plan directly as markdown text in your chat response and BroCode will automatically save it to .brocode/current_plan.md. Do NOT attempt to write to .agents/ or any other folders.", tc.Name), nil
 	}
 	if r.readOnlyBash && tc.Name == "bash" {
-		return false, "⚠️ [READ-ONLY MODE]: Tool 'bash' is disabled in PLANNER mode (read-only architecture mode). Switch to BUILDER (Shift+Tab) to execute commands.", nil
+		return false, "⚠️ [READ-ONLY MODE]: Tool 'bash' is disabled in PLANNER mode (read-only architecture mode). To execute commands, call `switch_mode` to propose BUILDER mode — the user is asked to confirm automatically. Do NOT tell the user to switch modes manually.", nil
 	}
 
 	// Sandbox policy first: a blocked tool is hard-denied, never prompted.
@@ -490,10 +490,10 @@ func (r *Registry) GateAction(ctx context.Context, tc provider.ToolCall) (approv
 	}
 
 	allowed, reason, err := r.askViaModal(ctx, cmd, gateContext)
-	// Record approval for graduated trust: when the user approves a command,
-	// increment the trust counter for its pattern. After trustThreshold
-	// approvals, the pattern is auto-approved next time.
-	if allowed && r.trustEnabled {
+	// Record approval for graduated trust ONLY when the user explicitly chose "Always allow"
+	// (reflected by cmd being stored in allowExact). "Allow once" must NEVER accumulate
+	// auto-approval trust — it must prompt every single time unless Always is chosen.
+	if allowed && r.trustEnabled && r.allowExact != nil && r.allowExact[cmd] {
 		pattern := normalizeCommandPattern(cmd)
 		if pattern != "" {
 			if r.trustCounts == nil {
@@ -603,12 +603,9 @@ func (r *Registry) askViaModal(ctx context.Context, cmd string, context ...strin
 		}
 		return true, "", nil
 	default:
-		// "Allow once": approve this invocation AND remember the exact command so
-		// an identical re-run within the session doesn't re-prompt.
-		if r.allowExact == nil {
-			r.allowExact = map[string]bool{}
-		}
-		r.allowExact[cmd] = true
+		// "Allow once": approve ONLY this single invocation.
+		// Do NOT persist to allowExact or allow — the next time the same
+		// command appears (even in the same session), the gate will ask again.
 		return true, "", nil
 	}
 }
@@ -2668,14 +2665,18 @@ func (t *SwitchModeTool) Execute(ctx context.Context, argsJSON string) (string, 
 	}
 
 	if t.Ask == nil {
-		return fmt.Sprintf("Autonomous mode switch to %s requested: %s", args.TargetMode, args.Reason), nil
+		// No interactive confirmation handler is available (headless / external
+		// adapter). The switch cannot be confirmed, so do NOT imply it happened —
+		// tell the agent to ask the user to switch explicitly instead of
+		// hallucinating a mode change.
+		return fmt.Sprintf("Cannot switch to %s without user approval: %s. Ask the user to switch mode (e.g. /%s or Shift+Tab) before proceeding.", args.TargetMode, args.Reason, strings.ToLower(args.TargetMode)), nil
 	}
 
-	q := fmt.Sprintf("🔀 Agent mengusulkan beralih ke mode %s:\n%s", args.TargetMode, args.Reason)
+	q := fmt.Sprintf("🔀 Agent proposes switching to %s mode:\n%s", args.TargetMode, args.Reason)
 	res, err := t.Ask(ctx, []AskQuestion{
 		{
 			Question: q,
-			Options:  []string{"✅ Ya, ganti mode", "❌ Tidak, tetap di mode sekarang"},
+			Options:  []string{"✅ Switch mode", "🚫 Keep current mode"},
 		},
 	})
 	if err != nil {

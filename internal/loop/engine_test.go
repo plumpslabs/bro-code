@@ -194,6 +194,44 @@ func TestMinerModeToolGuard(t *testing.T) {
 	}
 }
 
+// TestGuardInstructsSwitchMode verifies that when a mutating tool is blocked by
+// the PLANNER/MINER read-only guard, the injected guard message tells the agent
+// to call `switch_mode` (which auto-confirms) instead of pushing a manual UI
+// shortcut (Shift+Tab) onto the user. This is the fix for agents telling the
+// user to switch modes manually instead of requesting the switch themselves.
+func TestGuardInstructsSwitchMode(t *testing.T) {
+	for _, mode := range []string{"PLANNER", "MINER"} {
+		tools := tool.NewRegistry()
+		ctxMgr := bcontext.NewManager("test_"+mode, nil, 128000)
+		adapter := &mockAdapter{
+			toolCalls: []provider.ToolCall{
+				{ID: "tc1", Name: "write_file", Arguments: `{"path":"test.txt","content":"hello"}`},
+			},
+		}
+		engine := NewEngine(adapter, tools, ctxMgr, "test-model")
+		engine.SetMode(mode)
+		if _, err := engine.RunTurn(context.Background(), "make a change", nil); err != nil {
+			t.Fatalf("[%s] RunTurn failed: %v", mode, err)
+		}
+
+		var guard string
+		for _, msg := range ctxMgr.Messages() {
+			if msg.ToolCallID == "tc1" {
+				guard = msg.Content
+			}
+		}
+		if guard == "" {
+			t.Fatalf("[%s] expected a guard message for the blocked write_file", mode)
+		}
+		if !strings.Contains(guard, "switch_mode") {
+			t.Errorf("[%s] guard must instruct calling switch_mode, got: %s", mode, guard)
+		}
+		if strings.Contains(guard, "Shift+Tab") {
+			t.Errorf("[%s] guard must NOT push the manual Shift+Tab shortcut to the user: %s", mode, guard)
+		}
+	}
+}
+
 type repeatWriteAdapter struct {
 	count int
 }

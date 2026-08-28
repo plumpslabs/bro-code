@@ -446,7 +446,7 @@ func (s *Store) Recall(query string, limit int) string {
 	// FormatResults renders each fact as "[section] body" (ID = section,
 	// body = the fact) with a relevance score and snippet.
 	return "PROJECT MEMORY MATCHES:\n" + search.FormatResults(results, query) +
-		"\n\nUse these as verified prior knowledge; you may still read files to confirm details."
+		"\n\nUse these as verified prior knowledge; only open SOURCE files to confirm specifics (do not re-read .brocode/memory.md)."
 }
 
 // Retain adds a fact to a section, deduplicating near-identical entries.

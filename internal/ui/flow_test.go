@@ -542,6 +542,86 @@ func TestActivityResetsOnNewTurn(t *testing.T) {
 	}
 }
 
+// TestAutonomousModeSwitchUpdatesBadge verifies that after the engine flips
+// mode autonomously (e.g. MINER -> BUILDER via an approved switch_mode), the
+// turn-result badge reflects the new mode and the UI cache adopts it — so the
+// badge does not stay stuck on the stale pre-switch mode, and the next turn is
+// not forced back to it. Regression for "badge still MINER but response is
+// BUILDER".
+func TestAutonomousModeSwitchUpdatesBadge(t *testing.T) {
+	m := newTestApp()
+	m.activeModel = "test-model"
+	m.mode = "MINER"
+	m.engine.SetMode("BUILDER") // engine switched autonomously last turn
+
+	// turnResultMsg.mode is stamped from the engine's end-of-turn mode (see
+	// engine_bridge.go runTurnCmd), so it carries BUILDER here.
+	if _, err := m.Update(turnResultMsg{content: "Saya beralih ke BUILDER mode", mode: "BUILDER"}); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+	last := m.messages[len(m.messages)-1]
+	if !strings.HasPrefix(last, "BROCODE:BUILDER:test-model\n") {
+		t.Errorf("expected BUILDER badge, got: %q", last)
+	}
+	if m.mode != "BUILDER" {
+		t.Errorf("UI cache should adopt engine mode BUILDER, got %s", m.mode)
+	}
+	if m.turnMode != "BUILDER" {
+		t.Errorf("turnMode should be BUILDER, got %s", m.turnMode)
+	}
+}
+
+// TestDeferredShiftTabDuringTurnStillApplies verifies a Shift+Tab pressed while
+// a turn is running is applied at turn end and is not clobbered by the
+// autonomous-switch reconciliation.
+func TestDeferredShiftTabDuringTurnStillApplies(t *testing.T) {
+	m := newTestApp()
+	m.activeModel = "test-model"
+	m.mode = "MINER"
+	m.engine.SetMode("MINER")
+	// Simulate the Shift+Tab handler deferring the change (turn was running).
+	m.mode = "BUILDER"
+	m.modePending = "BUILDER"
+
+	if _, err := m.Update(turnResultMsg{content: "done", mode: "MINER"}); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+	if m.mode != "BUILDER" {
+		t.Errorf("deferred Shift+Tab should apply at turn end (BUILDER), got %s", m.mode)
+	}
+	if m.modePending != "" {
+		t.Errorf("modePending should be cleared, got %q", m.modePending)
+	}
+	if m.engine.Mode() != "BUILDER" {
+		t.Errorf("engine should be BUILDER after deferred apply, got %s", m.engine.Mode())
+	}
+}
+
+// TestStreamingCommitUsesLiveEngineMode verifies a streamed assistant bubble
+// committed mid-turn (on entering StateActing) is stamped with the LIVE engine
+// mode, not the turn-start mode. After an autonomous MINER->BUILDER switch, the
+// agent's "I'm now in BUILDER" text must show the BUILDER badge — the exact
+// "badge still MINER but response is BUILDER" desync.
+func TestStreamingCommitUsesLiveEngineMode(t *testing.T) {
+	m := newTestApp()
+	m.activeModel = "test-model"
+	m.mode = "MINER"
+	m.turnMode = "MINER"
+	m.engine.SetMode("BUILDER") // engine switched autonomously mid-turn
+	m.status = "Thinking..."
+	m.turnRunning = true
+	m.streaming = true
+	m.pendingStream = "Sekarang saya di BUILDER mode"
+
+	if _, err := m.Update(stepProgressMsg{state: loop.StateActing, info: "read_file"}); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+	last := m.messages[len(m.messages)-1]
+	if !strings.HasPrefix(last, "BROCODE:BUILDER:test-model\n") {
+		t.Errorf("expected live BUILDER badge on streaming commit, got: %q", last)
+	}
+}
+
 // TestTurnResultModeBadge verifies each assistant answer is stamped with the
 // engine mode the turn ran under, and the renderer draws the mode badge.
 func TestTurnResultModeBadge(t *testing.T) {

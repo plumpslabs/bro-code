@@ -300,7 +300,7 @@ func findProjectRootForFile(filePath string) string {
 }
 
 // planVerificationForFiles plans verification checks scoped to the nearest project
-// roots containing editedFiles when possible, falling back to full repo plan.
+// roots and specific packages containing editedFiles when possible, falling back to full repo plan.
 func planVerificationForFiles(editedFiles []string) []checkCmd {
 	if len(editedFiles) > 0 {
 		subdirs := make(map[string]bool)
@@ -311,6 +311,33 @@ func planVerificationForFiles(editedFiles []string) []checkCmd {
 		}
 		var subCmds []checkCmd
 		for dir := range subdirs {
+			if fileExistsIn(dir, "go.mod") {
+				// Targeted Go package testing: if all edited files live in specific subpackages,
+				// run build, vet, and test on those specific package paths for 10x faster feedback.
+				pkgPaths := make(map[string]bool)
+				for _, f := range editedFiles {
+					rel, err := filepath.Rel(dir, f)
+					if err == nil && !strings.HasPrefix(rel, "..") {
+						pkgDir := filepath.Dir(rel)
+						if pkgDir == "." {
+							pkgPaths["."] = true
+						} else {
+							pkgPaths["./"+pkgDir] = true
+						}
+					}
+				}
+				if len(pkgPaths) > 0 && len(pkgPaths) <= 3 {
+					for p := range pkgPaths {
+						subCmds = append(subCmds,
+							checkCmd{"go", []string{"build", p}, dir},
+							checkCmd{"go", []string{"vet", p}, dir},
+							checkCmd{"go", []string{"test", p}, dir},
+						)
+					}
+					continue
+				}
+			}
+
 			if cmds := planIn(dir); len(cmds) > 0 {
 				for i := range cmds {
 					cmds[i].dir = dir

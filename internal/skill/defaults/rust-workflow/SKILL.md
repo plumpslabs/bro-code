@@ -21,7 +21,7 @@ version: 1
 
 ## Diagnostics
 - `lsp_scan`/`lsp_diagnostics` cover rust-analyzer errors (borrow checker, type errors, unused) — that IS your linter. Do NOT install clippy mid-task; if the project already runs `cargo clippy`, use it as configured.
-- If LSP is unavailable, rely on `cargo check` and ask the user to run `/lsp-install`.
+- If LSP is unavailable, rely on `cargo check` and OFFER to run `/lsp-install` for the user (or propose it via ask_user) — do not merely instruct them to do it manually.
 
 ## Edits
 - Fix borrow-checker and type errors first — they are blockers.

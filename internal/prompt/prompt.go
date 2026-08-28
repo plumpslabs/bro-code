@@ -226,7 +226,7 @@ func renderMemory(in *Input) string {
 	if in.MemoryWarm == "" {
 		return ""
 	}
-	return "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + in.MemoryWarm
+	return "\n\nPROJECT MEMORY (learned in past sessions, use as verified prior knowledge — confirm details against the code when they matter):\n" + in.MemoryWarm + "\n\n⚠️ Do NOT re-read .brocode/memory.md — the relevant facts are already shown above. Only open SOURCE files to confirm specifics."
 }
 
 // renderMemoryIndex renders a compact table of contents for project memory.
@@ -250,14 +250,14 @@ func renderNotesHints(in *Input) string {
 	if in.NotesHints == "" {
 		return ""
 	}
-	return "\n\n🧠 SELF-AWARE CONTEXT (distilled from past sessions — treat as a starting mental model / verified prior knowledge; confirm details against the code when they matter, and explore freely when uncertain):\n" + in.NotesHints
+	return "\n\n🧠 SELF-AWARE CONTEXT (distilled from past sessions — treat as a starting mental model / verified prior knowledge; confirm details against the code when they matter):\n" + in.NotesHints + "\n\n⚠️ Do NOT re-read .brocode/memory.md; the distilled insights above are sufficient. Only open SOURCE files to confirm specifics — do not re-scan files already summarized above."
 }
 
 func renderLSP(in *Input) string {
 	if in.LSPAvailable > 0 {
 		return fmt.Sprintf("\n\nLSP AVAILABLE (%d language server(s)): use `lsp_scan` for project-wide type/lint/deprecated diagnostics and `lsp_diagnostics` per file — that IS your linter, no external install needed.", in.LSPAvailable)
 	}
-	return "\n\nLSP NOT AVAILABLE this session: `lsp_scan` will fail. Do NOT `go install` external linters (golangci-lint/staticcheck/revive) — ask the user to run `/lsp-install` once, or rely on the project's own `go vet`/`go build`/`tsc --noEmit`."
+	return "\n\nLSP NOT AVAILABLE this session: `lsp_scan` will fail. Do NOT `go install` external linters (golangci-lint/staticcheck/revive) — instead OFFER to run `/lsp-install` for the user (or propose it via ask_user) and rely on the project's own `go vet`/`go build`/`tsc --noEmit` in the meantime. Do not merely instruct the user to do it manually."
 }
 
 func renderPreflight(in *Input) string {
@@ -297,7 +297,7 @@ func renderActivePlan(in *Input) string {
 	if in.Mode == "PLANNER" {
 		return "\n\n📋 EXISTING PLAN IN WORKSPACE (.brocode/current_plan.md):\n" + strings.TrimSpace(in.ActivePlan) + "\n(If the user's request is a continuation, refine or extend this plan. If the user is starting a new unrelated task or bugfix, output the fresh plan and BroCode will automatically archive this previous plan to .brocode/plans/archive/)."
 	}
-	return "\n\n🎯 ACTIVE TASK PLAN (.brocode/current_plan.md):\nYou are executing this plan. Confine your work strictly to these tasks and impacted files. BroCode automatically tracks file edits and checks off completed tasks in .brocode/current_plan.md:\n" + strings.TrimSpace(in.ActivePlan)
+	return "\n\n🎯 ACTIVE TASK PLAN (.brocode/current_plan.md):\nYou are executing this plan. Confine your work strictly to these tasks and impacted files. BroCode automatically tracks file edits and checks off completed tasks in .brocode/current_plan.md:\n" + strings.TrimSpace(in.ActivePlan) + "\n\n⚠️ Do NOT re-read .brocode/current_plan.md — the full plan is already shown above and is authoritative. BroCode auto-syncs your edits and check-offs; trust the text above and act on it directly."
 }
 
 func renderCustomAgent(in *Input) string {

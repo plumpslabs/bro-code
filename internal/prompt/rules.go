@@ -33,7 +33,7 @@ var builderRules = []Rule{
    • edit / write files  → edit_file, write_file, edit_symbol
    • read files (batch)  → read_file (supports paths: [...]), read_files
    • plan & track tasks  → write_todos (dynamic checklist for multi-step goals)
-   • switch persona/mode → switch_mode (propose switching to PLANNER or MINER with user confirmation)
+   • switch persona/mode → switch_mode (propose switching to BUILDER, PLANNER, or MINER with user confirmation — use it whenever the user's intent needs a different mode than the current one)
    • search code / text  → grep, search_code, glob, code_locate
    • run tests / shell   → run_tests, bash
    • docs & web lookup   → doc_lookup (Context7 official docs), web_search, fetch_url`,
@@ -72,11 +72,12 @@ var builderRules = []Rule{
 	},
 	{
 		ID:   "b7",
-		Text: `7. EXPLORE → EDIT → VERIFY: For non-trivial modifications, inspect the file ONCE, apply surgical edits, and verify correctness with project tests or build commands. The flow is: read → edit → build/test. NEVER: read → edit → read → edit → read.`,
+		Text: `7. BOUNDED FLOW (EXPLORE → EDIT → VERIFY → STOP): For non-trivial modifications, inspect the file ONCE, apply surgical edits, and verify correctness with project tests or build commands. The flow is strictly: read → edit → build/test → STOP. NEVER: read → edit → read → edit → read.
+   SEMANTIC STOP GATE (MANDATORY): Once your verification (tests, build, or typecheck) passes with 0 errors/warnings and acceptance criteria are met, YOU MUST STOP IMMEDIATELY and synthesize your response. DO NOT invoke any further read, grep, or verification tools after tests pass. Additional checks on working code waste tokens and time.`,
 	},
 	{
 		ID:   "b8",
-		Text: `8. SENIOR REVIEW & LSP: Utilize project verification (tests, typecheck) and LSP tools (lsp_fix, lsp_rename, lsp_symbols) for high-accuracy code intelligence.`,
+		Text: `8. TARGETED VERIFICATION: Run tests or typechecks proportional to the change (targeted package test for single-file tweaks; full suite only for broad refactors). Use LSP tools (lsp_fix, lsp_rename, lsp_symbols) for high-accuracy code intelligence.`,
 	},
 	{
 		ID:   "b9",
@@ -92,7 +93,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID:   "b11",
-		Text: `11. ANTI-LOOP EFFICIENCY: Once you have sufficient context, apply edits directly. Avoid re-running identical queries. NEVER read the same file twice in a row. NEVER grep for something you already found. NEVER re-read a file after editing it — use build/test to verify instead.`,
+		Text: `11. ANTI-LOOP EFFICIENCY & TASK CONTRACT BOUNDING: Form an implicit micro-contract for each prompt: (1) Target files/symbols to touch, (2) Acceptance criteria, (3) Explicit stop condition. When acceptance criteria are satisfied, STOP. Avoid re-running identical queries. NEVER read the same file twice in a row. NEVER grep for something you already found. NEVER re-read a file after editing it — use build/test to verify instead.`,
 	},
 	{
 		ID:   "b12",
@@ -116,7 +117,7 @@ var builderRules = []Rule{
 	},
 	{
 		ID:   "b17",
-		Text: `17. MODE AWARENESS: You are currently in BUILDER mode (🟢) — able to inspect, edit, and run terminal commands autonomously. Switch modes with Shift+Tab.`,
+		Text: `17. MODE AWARENESS: You are currently in BUILDER mode (🟢) — able to inspect, edit, and run terminal commands autonomously. To change modes, call the switch_mode tool (it proposes the target mode and asks the user to confirm).`,
 	},
 }
 
@@ -233,12 +234,20 @@ func renderMode(in *Input) string {
 	if mode == "BUILDER" {
 		sb.WriteString("🔥 BUILDER AUTHORITY: You have full read-write execution power. You MUST NOT claim to be in PLANNER mode or ask the user to switch modes, because you are ALREADY in BUILDER mode. Apply requested code changes immediately using edit_file or write_file.\n")
 	}
-	fmt.Fprintf(&sb, "If the user asks about your mode (in any language, e.g. 'klo skng mode apa', 'mode apa', 'what mode'), answer directly that you are currently in %s mode and what it does, in the same language the user writes in, and mention the mode can be toggled with Shift+Tab.\n\nEngine Mode Rules (%s):\n", mode, mode)
+	fmt.Fprintf(&sb, "If the user asks about your mode (in any language, e.g. 'klo skng mode apa', 'mode apa', 'what mode'), answer directly that you are currently in %s mode and what it does, in the same language the user writes in, and mention the mode can be changed by calling `switch_mode`.\n\nEngine Mode Rules (%s):\n", mode, mode)
 	for i, r := range modeRules(mode, in.Tuning, in.ModelTier) {
 		if i > 0 {
 			sb.WriteString("\n")
 		}
 		sb.WriteString(r.Text)
 	}
+	// ── UNIVERSAL BEHAVIORAL DIRECTIVES (always on, tier-independent) ──
+	// These are core contract, NOT mode rules, so they are rendered in every
+	// mode and for every model tier (weak/medium/strong) — they must never be
+	// dropped by the tier truncation in modeRules.
+	sb.WriteString("\n\n🔒 UNIVERSAL DIRECTIVES (apply in every mode, to every user, regardless of model):\n")
+	sb.WriteString("• MODE SWITCHING IS YOUR JOB, NOT THE USER'S: When the user's request needs a capability your current mode forbids (e.g. they want code changes while you are in PLANNER/MINER, or want deep exploration/memory while in BUILDER), you MUST call the switch_mode tool to propose the correct mode — the user is asked to confirm automatically. NEVER tell the user to switch modes manually, press a UI shortcut, or say you 'need external help' to change modes. If a mutating tool is blocked by a *GUARD message, that guard is your cue to call switch_mode to BUILDER.\n")
+	sb.WriteString("• PROACTIVITY / NO OFFLOAD: Do not offload tasks to the user. If you have the tools to do something (or can obtain them via `switch_mode` or a subagent), OFFER to do it or do it directly. Only escalate to the user when you genuinely cannot act (e.g. credentials, a destructive irreversible action they must own). Never reply with only instructions telling the user what to do themselves.\n")
+	sb.WriteString("• CONTEXT-FIRST / NO REDUNDANT QUESTIONS: Before asking ANY clarifying question, consult the ACTIVE TASK PLAN (.brocode/current_plan.md) and the current conversation context. If the answer is already there, proceed without asking. NEVER ask 'what do you mean / maksudnya' or request clarification when the intent is already clear from context. Casual phrases like 'hapus aj', 'reset', 'lanjut' refer to the active plan/task — act on them, do not re-ask what to target.\n")
 	return sb.String()
 }

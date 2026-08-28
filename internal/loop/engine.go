@@ -994,10 +994,10 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 			}
 		}
 
-		// Smart scope pre-selection: if the prompt contains recognizable
-		// keywords, pre-compute relevance-ranked files and inject a
-		// "SMART SCOPE" hint into the system prompt so the model focuses
-		// exploration on the relevant subset instead of scanning everything.
+		// Smart scope & AST Pre-Retrieval: if the prompt contains recognizable
+		// keywords/symbols, pre-compute relevance-ranked files and pre-locate
+		// AST symbols via GlobalIndex so the model gets exact file:line references
+		// on turn start instead of spending 5+ rounds grep-searching blindly.
 		var scopeHint string
 		if len(e.repoFiles) > 0 {
 			results := repo.ScoreFiles(e.repoFiles, userQuery, 8)
@@ -1005,6 +1005,43 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				scopeHint = repo.SummarizeScope(results, userQuery)
 				if onUpdate != nil {
 					onUpdate(e.state, fmt.Sprintf("🎯 Smart scope: %d relevant files identified", len(results)))
+				}
+			}
+		}
+		// Pre-retrieve indexed AST symbols matching words in userQuery
+		if e.globalIndex != nil {
+			var symbolHints []string
+			tokens := strings.FieldsFunc(userQuery, func(r rune) bool {
+				return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_')
+			})
+			seenSym := make(map[string]bool)
+			for _, tok := range tokens {
+				if len(tok) < 3 || seenSym[tok] {
+					continue
+				}
+				if syms := e.globalIndex.Lookup(tok); len(syms) > 0 {
+					seenSym[tok] = true
+					for _, s := range syms {
+						rel := s.File
+						if relRoot, err := filepath.Rel(e.repoRoot, s.File); err == nil && !strings.HasPrefix(relRoot, "..") {
+							rel = relRoot
+						}
+						symbolHints = append(symbolHints, fmt.Sprintf("• %s `%s` → %s:%d", s.Kind, s.Name, rel, s.Line))
+						if len(symbolHints) >= 6 {
+							break
+						}
+					}
+				}
+				if len(symbolHints) >= 6 {
+					break
+				}
+			}
+			if len(symbolHints) > 0 {
+				astBlock := "PRE-LOCATED AST SYMBOLS (Zero-Grep Pre-Retrieval):\n" + strings.Join(symbolHints, "\n")
+				if scopeHint != "" {
+					scopeHint += "\n\n" + astBlock
+				} else {
+					scopeHint = astBlock
 				}
 			}
 		}
@@ -1546,7 +1583,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 				switch e.Mode() {
 				case "PLANNER":
 					if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" || tc.Name == "bash" {
-						guardMsg := fmt.Sprintf("⚠️ [PLANNER GUARD]: Tool '%s' is disabled in PLANNER mode (read-only architecture mode). Switch to BUILDER mode (Shift+Tab) to execute code changes.", tc.Name)
+						guardMsg := fmt.Sprintf("⚠️ [PLANNER GUARD]: Tool '%s' is disabled in PLANNER mode (read-only architecture mode). To make code changes, call `switch_mode` to propose BUILDER mode — the user is asked to confirm automatically. Do NOT tell the user to switch modes manually or press a UI shortcut.", tc.Name)
 						if onUpdate != nil {
 							onUpdate(e.state, guardMsg)
 						}
@@ -1555,7 +1592,7 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					}
 				case "MINER":
 					if tc.Name == "write_file" || tc.Name == "edit_file" || tc.Name == "delete_file" {
-						guardMsg := fmt.Sprintf("⚠️ [MINER GUARD]: Tool '%s' is blocked in MINER mode (read-only knowledge agent). Switch to BUILDER mode (Shift+Tab) to modify code.", tc.Name)
+						guardMsg := fmt.Sprintf("⚠️ [MINER GUARD]: Tool '%s' is blocked in MINER mode (read-only knowledge agent). To modify code, call `switch_mode` to propose BUILDER mode — the user is asked to confirm automatically. Do NOT say you 'need external help' or tell the user to delete/edit files manually.", tc.Name)
 						if onUpdate != nil {
 							onUpdate(e.state, guardMsg)
 						}
@@ -2086,6 +2123,14 @@ func (e *Engine) RunTurn(ctx context.Context, userQuery string, onUpdate TurnOut
 					if onUpdate != nil {
 						onUpdate(e.state, "🧪 Failure reproduced — TSR reproduce gate open, edits allowed")
 					}
+				}
+				// Semantic Stop Gate (Paper ECLoop & Agentic Abstention 2026):
+				// When a test/verification tool passes cleanly (0 errors) after file edits,
+				// inject an explicit Stop Gate reminder so the model synthesizes its answer
+				// immediately rather than searching/re-reading working code.
+				if pending[i].exec && (pending[i].tc.Name == "run_tests" || strings.Contains(pending[i].tc.Name, "test")) && len(e.editedFiles) > 0 && !looksLikeFailure(pending[i].output) {
+					e.hasPassedVerification = true
+					e.context.InjectContextMessage("✅ [SEMANTIC STOP GATE]: Verification tests passed with 0 errors. Acceptance criteria are satisfied. STOP calling read/grep tools now — synthesize your final response directly.")
 				}
 			}
 
@@ -2636,7 +2681,7 @@ func (e *Engine) toolsForMode(mode string) []provider.ToolDefinition {
 		weakKeep := map[string]bool{
 			"read_file": true, "write_file": true, "edit_file": true,
 			"bash": true, "grep": true, "glob": true, "list_dir": true,
-			"run_tests": true, "git": true,
+			"run_tests": true, "git": true, "switch_mode": true,
 		}
 		out := make([]provider.ToolDefinition, 0, len(weakKeep))
 		for _, d := range defs {

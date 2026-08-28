@@ -47,7 +47,7 @@ echo "🚀 Installing BroCode for $OS/$ARCH into $INSTALL_DIR..."
 LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || true)
 
 if [ -z "$LATEST_TAG" ]; then
-    LATEST_TAG="v0.1.56"
+    LATEST_TAG="v0.1.58"
 fi
 
 EXT="tar.gz"

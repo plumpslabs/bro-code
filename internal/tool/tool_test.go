@@ -1124,15 +1124,18 @@ func TestSwitchModeTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("switch_mode failed: %v", err)
 	}
-	if !strings.Contains(res1, "Autonomous mode switch to MINER requested") {
+	if !strings.Contains(res1, "Cannot switch to MINER without user approval") {
 		t.Errorf("unexpected headless result: %s", res1)
+	}
+	if !strings.Contains(res1, "Ask the user to switch mode") {
+		t.Errorf("headless result should tell the agent to ask the user, got: %s", res1)
 	}
 
 	// 2. Test User Approved
 	toolWithApproved := &SwitchModeTool{
 		Ask: func(ctx context.Context, questions []AskQuestion) ([]AskResult, error) {
 			return []AskResult{
-				{Answers: []string{"✅ Ya, ganti mode"}},
+				{Answers: []string{"✅ Switch mode"}},
 			}, nil
 		},
 	}

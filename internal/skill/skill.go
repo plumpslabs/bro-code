@@ -59,6 +59,11 @@ func (l *Loader) scanDir(dirPath string) {
 	if err != nil {
 		return
 	}
+	builtinNames := make(map[string]bool)
+	for _, ds := range DefaultSkills() {
+		builtinNames[ds.Name] = true
+	}
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			skillFile := filepath.Join(dirPath, entry.Name(), "SKILL.md")
@@ -74,6 +79,7 @@ func (l *Loader) scanDir(dirPath string) {
 					Version:     parseFrontmatterVersion(content),
 					Path:        skillFile,
 					Content:     content,
+					Builtin:     builtinNames[name],
 				})
 			}
 		}

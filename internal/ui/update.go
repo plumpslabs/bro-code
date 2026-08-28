@@ -117,6 +117,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		str := msg.info
+		// Handle autonomous mode switch progress events: update live UI mode and turnMode
+		// immediately so the live streaming bubble reflects the new mode mid-turn.
+		if strings.Contains(str, "Autonomous mode switched to ") {
+			for _, mName := range []string{"BUILDER", "PLANNER", "MINER"} {
+				if strings.Contains(str, "to "+mName) {
+					m.mode = mName
+					m.turnMode = mName
+					m.persistMode()
+					break
+				}
+			}
+		}
+
 		// Progress events that land AFTER the turn has already settled (the
 		// adapter's stderr goroutine may still flush lines after turnResultMsg)
 		// must not clobber the final status or pollute the history.
@@ -142,7 +155,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Subagents and tournament runners must never trigger main-turn assistant bubble commits.
 		isSubagentEvent := strings.HasPrefix(str, "🤖") || strings.HasPrefix(str, "[Alpha]") || strings.HasPrefix(str, "[Beta]") || strings.HasPrefix(str, "[Swarm]")
 		if msg.state == loop.StateActing && m.turnRunning && m.streaming && !isSubagentEvent && strings.TrimSpace(m.pendingStream) != "" {
-			useMode := m.turnMode
+			// Stamp with the LIVE engine mode, not the mode captured at turn
+			// start: an autonomous switch_mode approval can flip the engine mode
+			// mid-turn, and the streamed assistant text must be labeled with the
+			// mode it actually runs under — otherwise the badge lags behind the
+			// real mode (e.g. shows MINER after switching to BUILDER).
+			useMode := m.engine.Mode()
 			if useMode == "" {
 				useMode = m.mode
 			}
@@ -214,6 +232,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.appendMessages("BROCODE:\n" + display)
 				}
 			}
+			// Reconcile the UI's cached mode with the engine after the turn.
+			// A user-initiated Shift+Tab during the turn was deferred into
+			// modePending; apply it now. Otherwise, if the engine mode changed
+			// during the turn (an autonomous switch_mode approval), adopt it so
+			// the badge and the next turn's mode stay correct — without this, a
+			// MINER->BUILDER autonomous switch would leave the badge stuck on
+			// MINER and the next turn would even force the engine back to MINER.
+			if m.modePending != "" {
+				m.engine.SetMode(m.modePending)
+				m.mode = m.modePending
+				m.persistMode()
+				m.modePending = ""
+			} else if m.engine.Mode() != m.mode {
+				m.mode = m.engine.Mode()
+			}
+			m.turnMode = m.mode
 			// Extract senior recommendations for quick interactive execution
 			if recs := ExtractRecommendations(display); len(recs) > 0 {
 				m.activeRecommendations = recs
@@ -765,6 +799,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !m.turnRunning {
 					m.engine.SetMode(m.mode)
 					m.persistMode()
+				} else {
+					// Defer applying the mode to the engine until the running
+					// turn ends (see turnResultMsg handler), so we don't disturb
+					// the in-flight turn.
+					m.modePending = next
 				}
 			}
 			return m, nil
@@ -1330,7 +1369,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.promptInput, cmd = m.promptInput.Update(msg)
 		cmds = append(cmds, cmd)
-		m.autocomplete = DetectAutocomplete(m.promptInput.Value(), m.allProjectFiles(), m.autocomplete)
+		m.autocomplete = DetectAutocomplete(m.promptInput.Value(), m.allProjectFiles(), m.allCustomAgents(), m.allCustomSkills(), m.autocomplete)
 	}
 
 	return m, tea.Batch(cmds...)

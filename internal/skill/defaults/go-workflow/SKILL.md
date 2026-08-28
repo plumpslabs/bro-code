@@ -20,7 +20,7 @@ version: 1
 
 ## Diagnostics
 - `lsp_scan` is the linter: gopls already covers go vet + type errors + deprecated + unused. Do NOT `go install` golangci-lint/staticcheck/revive.
-- If LSP is unavailable, rely on `go vet`/`go build` and ask the user to run `/lsp-install`.
+- If LSP is unavailable, rely on `go vet`/`go build` and OFFER to run `/lsp-install` for the user (or propose it via ask_user) — do not merely instruct them to do it manually.
 
 ## Edits
 - Fix type errors before anything else — treat them as blockers.

@@ -18,6 +18,7 @@ import (
 	"github.com/plumpslabs/bro-code/internal/provider"
 	"github.com/plumpslabs/bro-code/internal/repo"
 	"github.com/plumpslabs/bro-code/internal/search"
+	"github.com/plumpslabs/bro-code/internal/skill"
 	"github.com/plumpslabs/bro-code/internal/store"
 	"github.com/plumpslabs/bro-code/internal/subagent"
 	"github.com/plumpslabs/bro-code/internal/tool"
@@ -83,6 +84,9 @@ type Model struct {
 	agentLoader *agent.Loader
 	activeAgent *agent.CustomAgent
 
+	// skillLoader discovers custom skills (.brocode/skills and ~/.config/brocode/skills).
+	skillLoader *skill.Loader
+
 	// Cancelation function for active LLM turn / tool execution
 	cancelTurn context.CancelFunc
 
@@ -92,6 +96,11 @@ type Model struct {
 	// per-turn state and can crash the CLI progress goroutine (nil handler).
 	turnRunning  bool
 	turnMode     string
+	// modePending holds a user-initiated mode change (Shift+Tab) requested
+	// while a turn was running. The engine mode is deferred until the turn
+	// ends (applying it mid-turn would disturb the running turn); it is
+	// reconciled in the turnResultMsg handler.
+	modePending  string
 	// turnGen is an monotonically-increasing counter, incremented each time a
 	// new turn starts. turnResultMsg carries the gen value at dispatch time —
 	// if the message arrives with a stale gen (the turn was interrupted and a

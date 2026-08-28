@@ -225,6 +225,61 @@ func TestAssembleCostAccounting(t *testing.T) {
 	}
 }
 
+// TestUniversalDirectivesRendered verifies the core behavioral contract
+// (proactive switch_mode, no offload, context-first) is always present — in
+// every mode AND for every model tier. These are rendered by renderMode outside
+// the tier-truncatable modeRules list, so even a "medium" tier model (which
+// loses some numbered rules) still receives them.
+func TestUniversalDirectivesRendered(t *testing.T) {
+	for _, mode := range []string{"BUILDER", "PLANNER", "MINER"} {
+		for _, tier := range []string{"weak", "medium", "strong"} {
+			in := baseInput()
+			in.Mode = mode
+			in.ModelTier = tier
+			p, _ := Assemble(in)
+			for _, want := range []string{
+				"UNIVERSAL DIRECTIVES",
+				"MODE SWITCHING IS YOUR JOB",
+				"switch_mode",
+				"PROACTIVITY / NO OFFLOAD",
+				"CONTEXT-FIRST / NO REDUNDANT QUESTIONS",
+				"maksudnya", // casual-phrase handling cue
+			} {
+				if !strings.Contains(p, want) {
+					t.Errorf("[%s/%s] universal directive missing %q", mode, tier, want)
+				}
+			}
+			// The manual UI shortcut must never be the instruction.
+			if strings.Contains(p, "Shift+Tab") {
+				t.Errorf("[%s/%s] prompt must not instruct the manual Shift+Tab shortcut", mode, tier)
+			}
+		}
+	}
+}
+
+// TestNoRedundantMDReads verifies the context/memory blocks tell the agent the
+// plan + memory are ALREADY injected, so it must not re-read the .md files
+// (which previously caused redundant read loops and over-investigation). It also
+// confirms the old "explore freely when uncertain" over-investigation cue is gone.
+func TestNoRedundantMDReads(t *testing.T) {
+	in := baseInput()
+	in.ActivePlan = "- [ ] Step 1: do the thing"
+	in.MemoryWarm = "- Build: go build ./..."
+	in.NotesHints = "• [FACT] service -> repo -> DB"
+	p, _ := Assemble(in)
+	for _, want := range []string{
+		"Do NOT re-read .brocode/current_plan.md",
+		"Do NOT re-read .brocode/memory.md",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing no-re-read guidance %q", want)
+		}
+	}
+	if strings.Contains(p, "explore freely when uncertain") {
+		t.Error("over-investigation cue 'explore freely when uncertain' must be removed")
+	}
+}
+
 // TestLoadTuning verifies the JSON tuning surface: defaults on missing/corrupt
 // files, and field-level merge over defaults for partial files.
 func TestLoadTuning(t *testing.T) {
